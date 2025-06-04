@@ -24,8 +24,8 @@ bids-editor = "bids_editor_ancpbids:main"
 
 
 [tool.setuptools]
+packages = ["bids_manager"]
 py-modules = [
-  "bids_manager",
   "dicom_inventory",
   "build_heuristic_from_tsv",
   "run_heudiconv_from_heuristic",

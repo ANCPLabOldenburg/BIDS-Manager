@@ -18,6 +18,8 @@ import logging  # debug logging
 # Import the scan function directly to ensure TSV generation works
 from dicom_inventory import scan_dicoms_long
 
+__version__ = "0.1.0"
+
 # ---- basic logging config ----
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
@@ -466,11 +468,11 @@ class BIDSManager(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to save TSV: {e}")
             return
 
-        # Paths for scripts
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        build_script = os.path.join(script_dir, "build_heuristic_from_tsv.py")
-        run_script = os.path.join(script_dir, "run_heudiconv_from_heuristic.py")
-        rename_script = os.path.join(script_dir, "post_conv_renamer.py")
+        # Paths for helper scripts (located alongside this package)
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        build_script = os.path.join(root_dir, "build_heuristic_from_tsv.py")
+        run_script = os.path.join(root_dir, "run_heudiconv_from_heuristic.py")
+        rename_script = os.path.join(root_dir, "post_conv_renamer.py")
 
         # 2) Build heuristic
         self.heuristic_path = os.path.join(self.bids_out_dir, "auto_heuristic.py")
