@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-post_fmap_rename.py — Fieldmap Renamer (PyCharm-friendly)
----------------------------------------------------------
+post_fmap_rename.py — Fieldmap Renamer
+--------------------------------------
 This script renames fieldmap files in a BIDS dataset so that:
   - echo-1 → _magnitude1
   - echo-2 → _magnitude2
@@ -9,23 +9,12 @@ This script renames fieldmap files in a BIDS dataset so that:
 It also **removes** the trailing `_fmap` from the filenames.
 Both .nii, .nii.gz, and .json sidecars are handled.
 
-Usage in PyCharm:
-  1. Open this script in PyCharm.
-  2. Set the BIDS_ROOT path below to your dataset directory.
-  3. Run this script (e.g., click ▶️ in the editor).
-
-No CLI arguments required.
+Usage:
+  python post_conv_renamer.py <bids_root>
 """
 from pathlib import Path
 import re
 import sys
-
-# -----------------------------------------------------------------------------
-# Configuration: EDIT this path to point to your BIDS dataset
-# -----------------------------------------------------------------------------
-BIDS_ROOT = Path("/path/to/your/BIDS_dataset")
-
-# -----------------------------------------------------------------------------
 # Rename rules based on filename patterns
 # -----------------------------------------------------------------------------
 RENAME_RULES = [
