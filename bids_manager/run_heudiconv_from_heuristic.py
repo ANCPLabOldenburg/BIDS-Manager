@@ -97,19 +97,20 @@ def run_heudiconv(raw_root: Path,
         subprocess.run(cmd, check=True)
 
 
-# ────────────────── CLI example ──────────────────
-if __name__ == "__main__":
-    RAW_ROOT = Path(
-        "/home/karelo/Desktop/Development/MEGQC_workshop/datasets/"
-        "Testdata_ConversionApp/raw_data/neuroimaging_unit_new"
-    )
-    HEURISTIC = Path(''
-        "/home/karelo/Desktop/Development/MEGQC_workshop/datasets/"
-        "Testdata_ConversionApp/converted_data/auto_heuristic.py"
-    '')
-    BIDS_OUT = Path(
-        "/home/karelo/Desktop/Development/MEGQC_workshop/datasets/"
-        "Testdata_ConversionApp/converted_data/BIDS_conv"
-    )
+# ────────────────── CLI interface ──────────────────
+def main() -> None:
+    import argparse
 
-    run_heudiconv(RAW_ROOT, HEURISTIC, BIDS_OUT, per_folder=True)
+    parser = argparse.ArgumentParser(description="Run HeuDiConv using a heuristic")
+    parser.add_argument("dicom_root", help="Root directory containing DICOMs")
+    parser.add_argument("heuristic", help="Heuristic .py file")
+    parser.add_argument("bids_out", help="Output BIDS directory")
+    parser.add_argument("--single-run", action="store_true", help="Use one heudiconv call for all subjects")
+    args = parser.parse_args()
+
+    run_heudiconv(Path(args.dicom_root), Path(args.heuristic), Path(args.bids_out), per_folder=not args.single_run)
+
+
+if __name__ == "__main__":
+    main()
+

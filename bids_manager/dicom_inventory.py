@@ -9,8 +9,8 @@ Why you want this
 -----------------
 * Lets you review **all** SeriesDescriptions, subjects, sessions and file counts
   before converting anything.
-* Column `include` starts at 1.  Flip rows to 0 (manually or via GUI) to skip
-  them when the heuristic is generated.
+* Column `include` defaults to 1 except for scout/report/physlog sequences,
+  which start at 0 so they are skipped by default.
 * Generated table is the single source of truth you feed into a helper script
   that writes the HeuDiConv heuristic.
 
@@ -21,7 +21,7 @@ BIDS_name      – auto-assigned `sub-001`, `sub-002`, …
 session        – `ses-<label>` if exactly one unique session tag is present in
                  that folder, otherwise blank
 source_folder  – first directory under *root_dir* that contained the DICOM
-include        – 1 by default; turn to 0 to exclude the line
+include        – defaults to 1 but scout/report/physlog rows start at 0
 sequence       – original SeriesDescription
 modality       – fine label inferred from patterns (T1w, bold, dwi, …)
 modality_bids  – top-level container (anat, func, dwi, fmap) derived from
@@ -183,12 +183,15 @@ def scan_dicoms_long(root_dir: str,
 
             for series, n_files in sorted(counts[subj][folder].items()):
                 fine_mod = mods[subj][folder][series]
+                include = 1
+                if fine_mod in {"scout", "report"} or "physlog" in series.lower():
+                    include = 0
                 rows.append({
                     "subject"       : demo[subj]["GivenName"] if first_row else "",
                     "BIDS_name"     : bids_map[subj],
                     "session"       : session,
                     "source_folder" : folder,
-                    "include"       : 1,                       # user toggles later
+                    "include"       : include,
                     "sequence"      : series,
                     "modality"      : fine_mod,
                     "modality_bids" : modality_to_container(fine_mod),
@@ -217,10 +220,18 @@ def scan_dicoms_long(root_dir: str,
 # ----------------------------------------------------------------------
 # Command-line test
 # ----------------------------------------------------------------------
-if __name__ == "__main__":
-    ROOT_DIR = "/home/karelo/Desktop/Development/MEGQC_workshop/datasets/Testdata_ConversionApp/raw_data/neuroimaging_unit_new"
-    OUT_TSV  = "/home/karelo/Desktop/Development/MEGQC_workshop/datasets/Testdata_ConversionApp/converted_data/subject_summary.tsv"
+def main() -> None:
+    import argparse
 
-    table = scan_dicoms_long(ROOT_DIR, OUT_TSV)
+    parser = argparse.ArgumentParser(description="Generate TSV inventory for a DICOM folder")
+    parser.add_argument("dicom_dir", help="Path to the directory containing DICOM files")
+    parser.add_argument("output_tsv", help="Destination TSV file")
+    args = parser.parse_args()
+
+    table = scan_dicoms_long(args.dicom_dir, args.output_tsv)
     print("\nPreview (first 10 rows):\n")
     print(table.head(10).to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()

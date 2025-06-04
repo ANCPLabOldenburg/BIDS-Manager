@@ -16,7 +16,7 @@ from PyQt5.QtGui import QPalette, QColor, QFont
 import logging  # debug logging
 
 # Import the scan function directly to ensure TSV generation works
-from dicom_inventory import scan_dicoms_long
+from .dicom_inventory import scan_dicoms_long
 
 # ---- basic logging config ----
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
@@ -194,7 +194,7 @@ class BIDSManager(QMainWindow):
         actions_layout = QHBoxLayout()
         self.preview_button = QPushButton("Preview")
         self.preview_button.setFixedWidth(100)
-        self.preview_button.clicked.connect(self.updateModalTree)
+        self.preview_button.clicked.connect(self.generatePreview)
         self.run_button = QPushButton("Run")
         log_group = QGroupBox("Log Output")
         log_layout = QVBoxLayout(log_group)
@@ -212,8 +212,8 @@ class BIDSManager(QMainWindow):
 
         self.tabs.addTab(self.convert_tab, "Convert")
 
-    def updateModalTree(self):
-        logging.info("updateModalTree → Building preview tree …")
+    def generatePreview(self):
+        logging.info("generatePreview → Building preview tree …")
         """Populate preview tree based on checked sequences."""
         self.preview_tree.clear()
         for i in range(self.mapping_table.rowCount()):
@@ -223,8 +223,13 @@ class BIDSManager(QMainWindow):
                 ses = self.mapping_table.item(i, 2).text()
                 seq = self.mapping_table.item(i, 3).text()
                 modb = self.mapping_table.item(i, 5).text()
-                item = QTreeWidgetItem([f"{subj}/{ses}/{modb}/{subj}_{ses}_{seq}.nii.gz"])
-                self.preview_tree.addTopLevelItem(item)
+                if modb == "fmap":
+                    for suffix in ["magnitude1", "magnitude2", "phasediff"]:
+                        fname = f"{subj}/{ses}/{modb}/{subj}_{ses}_{seq}_{suffix}.nii.gz"
+                        self.preview_tree.addTopLevelItem(QTreeWidgetItem([fname]))
+                else:
+                    item = QTreeWidgetItem([f"{subj}/{ses}/{modb}/{subj}_{ses}_{seq}.nii.gz"])
+                    self.preview_tree.addTopLevelItem(item)
         self.preview_tree.expandAll()
 
     # (Rest of code remains unchanged)
@@ -399,24 +404,6 @@ class BIDSManager(QMainWindow):
         self.full_tree.expandAll()
         self.unique_tree.expandAll()
 
-    def previewBIDS(self):
-        """
-        Show a simple preview text of how selected sequences will map to BIDS structure.
-        """
-        rows = self.mapping_table.rowCount()
-        lines = []
-        for i in range(rows):
-            include = (self.mapping_table.item(i, 0).checkState() == Qt.Checked)
-            subj = self.mapping_table.item(i, 1).text()
-            ses = self.mapping_table.item(i, 2).text()
-            seq = self.mapping_table.item(i, 3).text()
-            modb = self.mapping_table.item(i, 5).text()
-            if include:
-                # Construct a sample BIDS path
-                path = f"{subj}/{ses}/{modb}/{subj}_{ses}_{seq}.nii.gz"
-                lines.append(path)
-        self.preview_text.setPlainText("\n".join(lines))
-        self.log_text.append("Preview generated.")
 
     def runFullConversion(self):
         logging.info("runFullConversion → Starting full pipeline …")
@@ -848,7 +835,7 @@ class MetadataViewer(QWidget):
             obj[k] = child if child is not None else val
         return obj
 
-if __name__ == '__main__':
+def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     pal = QPalette()
@@ -858,3 +845,8 @@ if __name__ == '__main__':
     win = BIDSManager()
     win.show()
     sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
+

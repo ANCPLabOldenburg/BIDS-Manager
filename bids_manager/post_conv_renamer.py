@@ -80,9 +80,19 @@ def post_fmap_rename(bids_root: Path) -> None:
 # -----------------------------------------------------------------------------
 # Run immediately when executed
 # -----------------------------------------------------------------------------
-if __name__ == '__main__':
-    BIDS_ROOT = Path(
-        "/home/karelo/Desktop/Development/MEGQC_workshop/datasets/Testdata_ConversionApp/converted_data/BIDS_conv/")
-    print(f"Starting fieldmap rename in: {BIDS_ROOT}")
-    post_fmap_rename(BIDS_ROOT)
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Rename BIDS fieldmap files")
+    parser.add_argument('bids_root', help='Path to BIDS dataset root')
+    args = parser.parse_args()
+
+    bids_root = Path(args.bids_root)
+    print(f"Starting fieldmap rename in: {bids_root}")
+    post_fmap_rename(bids_root)
     print("Done.")
+
+
+if __name__ == '__main__':
+    main()
+

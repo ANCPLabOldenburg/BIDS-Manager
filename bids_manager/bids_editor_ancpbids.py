@@ -362,7 +362,15 @@ class MainWindow(QMainWindow):
         dlg = RemapDialog(self, getattr(self, 'selected', self.bids_root))
         dlg.exec_()
 
-if __name__=='__main__':
-    app=QApplication(sys.argv); app.setStyle('Fusion')
-    pal=QPalette(); pal.setColor(QPalette.Window,QColor(240,240,240)); pal.setColor(QPalette.WindowText,Qt.black); app.setPalette(pal)
-    win=MainWindow(); win.show(); sys.exit(app.exec_())
+def main() -> None:
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    pal = QPalette(); pal.setColor(QPalette.Window, QColor(240,240,240))
+    pal.setColor(QPalette.WindowText, Qt.black)
+    app.setPalette(pal)
+    win = MainWindow(); win.show(); sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
+

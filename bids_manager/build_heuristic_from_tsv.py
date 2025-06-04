@@ -135,7 +135,17 @@ def generate(tsv: Path, out_py: Path) -> None:
     heudiconv -d "<RAW_ROOT>/{{subject}}/**/*.dcm" -s {folders} -f {out_py.name} -c dcm2niix -o <BIDS_OUT> -b --minmeta --overwrite"""))
 
 
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Generate HeuDiConv heuristic from TSV")
+    parser.add_argument("tsv", help="Path to subject_summary.tsv file")
+    parser.add_argument("out_py", help="Output heuristic file path")
+    args = parser.parse_args()
+
+    generate(Path(args.tsv), Path(args.out_py))
+
+
 if __name__ == "__main__":
-    TSV = Path("/home/karelo/Desktop/Development/MEGQC_workshop/datasets/Testdata_ConversionApp/converted_data/subject_summary.tsv")
-    OUT = TSV.with_name("auto_heuristic.py")
-    generate(TSV, OUT)
+    main()
+

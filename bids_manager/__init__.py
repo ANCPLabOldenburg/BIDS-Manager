@@ -1,0 +1,1 @@
+"""BIDS Manager package"""
