@@ -69,12 +69,16 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
     buf.append("}\n\n")
 
     # 3 ─ template keys ----------------------------------------------------
-    seq2key: dict[tuple[str, str, str], str] = {}
+    seq2key: dict[tuple[str, str, str, str], str] = {}
     key_defs: list[tuple[str, str]] = []
 
     for row in df.itertuples():
         ses = str(row.session).strip() if pd.notna(row.session) and str(row.session).strip() else ""
-        key_id = (row.sequence, row.BIDS_name, ses)
+        # HeuDiConv's ``dcm_dir_name`` holds only the leaf directory of the DICOM
+        # series. ``source_folder`` can be a multi-level path, so match on just
+        # the final component to avoid mismatches.
+        folder = Path(str(row.source_folder)).name
+        key_id = (row.sequence, row.BIDS_name, ses, folder)
         if key_id in seq2key:
             continue
 
@@ -104,9 +108,10 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
     buf.append("    }\n\n")
 
     buf.append("    for s in seqinfo:\n")
-    for (seq, _b, _s), var in seq2key.items():
-        esc = seq.replace("'", "\\'")
-        buf.append(f"        if s.series_description == '{esc}':\n")
+    for (seq, _b, _s, folder), var in seq2key.items():
+        seq_esc = seq.replace("'", "\\'")
+        fol_esc = folder.replace("'", "\\'")
+        buf.append(f"        if s.series_description == '{seq_esc}' and s.dcm_dir_name == '{fol_esc}':\n")
         buf.append(f"            {var}_list.append(s.series_id)\n")
     buf.append("    return info\n")
 
