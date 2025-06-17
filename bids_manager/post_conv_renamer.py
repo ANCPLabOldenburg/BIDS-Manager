@@ -6,7 +6,8 @@ This script renames fieldmap files in a BIDS dataset so that:
   - echo-1 → _magnitude1
   - echo-2 → _magnitude2
   - plain _fmap → _phasediff
-It also **removes** the trailing `_fmap` from the filenames.
+It also **removes** the trailing `_fmap` from the filenames and moves any
+``_rep-<n>`` suffix to the end (e.g. ``magnitude1_rep-2``).
 Both .nii, .nii.gz, and .json sidecars are handled.
 
 Usage in PyCharm:
@@ -37,6 +38,13 @@ RENAME_RULES = [
 # Match plain '_fmap' before .nii, .nii.gz or .json
 FMAP_SUFFIX_RE = re.compile(r"_fmap(?=(\.nii(?:\.gz)?|\.json)$)", re.I)
 
+
+def _move_rep_suffix(name: str) -> str:
+    """Ensure ``_rep-N`` appears after magnitude/phase suffix."""
+    name = re.sub(r"(_rep-\d+)(_magnitude[12])", r"\2\1", name)
+    name = re.sub(r"(_rep-\d+)(_phasediff)", r"\2\1", name)
+    return name
+
 # -----------------------------------------------------------------------------
 # Process a single fmap directory
 # -----------------------------------------------------------------------------
@@ -53,6 +61,7 @@ def process_fmap_dir(fmap_dir: Path) -> None:
                 interim = pattern.sub(replacement, name)
                 # remove trailing _fmap before extension
                 new_name = FMAP_SUFFIX_RE.sub('', interim)
+                new_name = _move_rep_suffix(new_name)
                 file.rename(fmap_dir / new_name)
                 print(f"Renamed: {name} → {new_name}")
                 break
@@ -61,6 +70,7 @@ def process_fmap_dir(fmap_dir: Path) -> None:
             if name.lower().endswith(('.nii', '.nii.gz', '.json')) and '_fmap' in name and not any(rep in name.lower() for rep in ['magnitude1', 'magnitude2']):
                 # replace _fmap with _phasediff
                 new_name = name.replace('_fmap', '_phasediff')
+                new_name = _move_rep_suffix(new_name)
                 file.rename(fmap_dir / new_name)
                 print(f"Renamed: {name} → {new_name}")
 

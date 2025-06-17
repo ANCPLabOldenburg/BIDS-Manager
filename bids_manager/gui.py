@@ -1024,7 +1024,7 @@ class BIDSManager(QMainWindow):
         """
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
-        df = pd.read_csv(self.tsv_path, sep="\t")
+        df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
 
         self.study_set.clear()
         self.modb_rows.clear()
@@ -1480,7 +1480,7 @@ class BIDSManager(QMainWindow):
 
         # 1) Save updated TSV from table
         try:
-            df_orig = pd.read_csv(self.tsv_path, sep="\t")
+            df_orig = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
             df_conv = df_orig.copy()
             for i in range(self.mapping_table.rowCount()):
                 include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
@@ -2372,7 +2372,7 @@ class MetadataViewer(QWidget):
 
     def _tsv_view(self, path: Path) -> QTableWidget:
         """Create a table widget to show and edit TSV data."""
-        df = pd.read_csv(path, sep="\t")
+        df = pd.read_csv(path, sep="\t", keep_default_na=False)
         tbl = QTableWidget(df.shape[0], df.shape[1])
         tbl.setAlternatingRowColors(True)
         hdr = tbl.horizontalHeader()

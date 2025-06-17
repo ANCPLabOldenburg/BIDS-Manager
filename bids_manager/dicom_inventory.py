@@ -123,6 +123,7 @@ def scan_dicoms_long(root_dir: str,
     counts     = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     mods       = defaultdict(lambda: defaultdict(dict))
     acq_times  = defaultdict(lambda: defaultdict(dict))
+    phase_map  = defaultdict(lambda: defaultdict(dict))
     sessset = defaultdict(lambda: defaultdict(set))
 
     # PASS 1: Walk filesystem and collect info
@@ -163,6 +164,12 @@ def scan_dicoms_long(root_dir: str,
             key = (series, uid)
             counts[subj_key][folder][key] += 1
             mods[subj_key][folder][key] = guess_modality(series)
+            img_type = getattr(ds, "ImageType", [])
+            if isinstance(img_type, (list, tuple)):
+                is_phase = any(str(it).upper() == "PHASE" for it in img_type)
+            else:
+                is_phase = "PHASE" in str(img_type).upper()
+            phase_map[subj_key][folder][key] = is_phase
             acq_time = str(getattr(ds, "AcquisitionTime", "")).strip()
             if key not in acq_times[subj_key][folder] and acq_time:
                 acq_times[subj_key][folder][key] = acq_time
@@ -218,7 +225,9 @@ def scan_dicoms_long(root_dir: str,
                 include = 1
                 if fine_mod in {"scout", "report"} or "physlog" in series.lower():
                     include = 0
-                rep_counter[series] += 1
+                is_phase = phase_map[subj_key][folder].get((series, uid), False)
+                rep_key = (series, is_phase)
+                rep_counter[rep_key] += 1
                 rows.append({
                     "subject"       : demo[subj_key]["GivenName"] if first_row else "",
                     "BIDS_name"     : bids_map[subj_key],
@@ -227,11 +236,12 @@ def scan_dicoms_long(root_dir: str,
                     "include"       : include,
                     "sequence"      : series,
                     "series_uid"    : uid,
-                    "rep"           : rep_counter[series] if rep_counter[series] > 1 else "",
+                    "rep"           : rep_counter[rep_key] if rep_counter[rep_key] > 1 else "",
                     "acq_time"      : acq_times[subj_key][folder].get((series, uid), ""),
                     "modality"      : fine_mod,
                     "modality_bids" : modality_to_container(fine_mod),
                     "n_files"       : n_files,
+                    "is_phase"      : is_phase,
                     **demo[subj_key],                                # demographics
                 })
                 first_row = False
@@ -240,7 +250,7 @@ def scan_dicoms_long(root_dir: str,
     columns = [
         "subject", "BIDS_name", "session", "source_folder",
         "include", "sequence", "series_uid", "rep", "acq_time",
-        "modality", "modality_bids", "n_files",
+        "modality", "modality_bids", "n_files", "is_phase",
         "GivenName", "FamilyName", "PatientID",
         "PatientSex", "PatientAge", "StudyDescription",
     ]

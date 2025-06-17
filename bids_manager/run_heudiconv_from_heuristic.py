@@ -211,7 +211,7 @@ def main() -> None:
 
     mapping_df = None
     if args.subject_tsv:
-        mapping_df = pd.read_csv(args.subject_tsv, sep="\t")
+        mapping_df = pd.read_csv(args.subject_tsv, sep="\t", keep_default_na=False)
 
     heur_path = Path(args.heuristic)
     heuristics = [heur_path] if heur_path.is_file() else sorted(heur_path.glob("heuristic_*.py"))

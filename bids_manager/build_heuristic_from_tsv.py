@@ -94,13 +94,17 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
     key_defs: list[tuple[str, str]] = []
 
     rep_counts = (
-        df.groupby(["BIDS_name", "session", "sequence"])["sequence"].transform("count")
+        df.groupby(["BIDS_name", "session", "sequence", "is_phase"], dropna=False)["sequence"].transform("count")
+    )
+    rep_index = (
+        df.groupby(["BIDS_name", "session", "sequence", "is_phase"], dropna=False).cumcount() + 1
     )
 
     for idx, row in df.iterrows():
-        ses = str(row.get("session", "")).strip()
+        ses_raw = row.get("session", "")
+        ses = "" if pd.isna(ses_raw) else str(ses_raw).strip()
         folder = Path(str(row.get("source_folder", "."))).name
-        rep = str(row.get("rep", "")).strip()
+        rep_num = rep_index.loc[idx]
         uid = str(row.get("series_uid", ""))
         key_id = (row["sequence"], row["BIDS_name"], ses, folder, uid)
         if key_id in seq2key:
@@ -111,15 +115,15 @@ def write_heuristic(df: pd.DataFrame, dst: Path) -> None:
         stem = safe_stem(row["sequence"])
 
         base_parts = [bids, ses, stem]
-        if rep_counts.loc[idx] > 1 and rep:
-            base_parts.append(f"rep-{rep}")
+        if rep_counts.loc[idx] > 1:
+            base_parts.append(f"rep-{rep_num}")
         base = dedup_parts(*base_parts)
         path = "/".join(p for p in [bids, ses, container] if p)
         template = f"{path}/{base}"
 
         key_parts = [bids, ses, stem]
-        if rep_counts.loc[idx] > 1 and rep:
-            key_parts.append(f"rep-{rep}")
+        if rep_counts.loc[idx] > 1:
+            key_parts.append(f"rep-{rep_num}")
         key_var = "key_" + clean("_".join(p for p in key_parts if p))
         seq2key[key_id] = key_var
         key_defs.append((key_var, template))
@@ -167,7 +171,7 @@ def generate(tsv: Path, out_dir: Path) -> None:
         Directory where the heuristic files will be written.
     """
 
-    df = pd.read_csv(tsv, sep="\t")
+    df = pd.read_csv(tsv, sep="\t", keep_default_na=False)
 
     # Drop rows with unwanted modalities
     mask = df.modality.isin(SKIP_BY_DEFAULT)
