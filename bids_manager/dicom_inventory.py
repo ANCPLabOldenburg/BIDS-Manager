@@ -39,6 +39,7 @@ import re
 from collections import defaultdict
 from typing import Optional
 from pathlib import Path
+from joblib import Parallel, delayed
 
 import pandas as pd
 import pydicom
@@ -126,8 +127,11 @@ SESSION_RE = re.compile(r"ses-([a-zA-Z0-9]+)")
 # ----------------------------------------------------------------------
 # 3.  Main scanner
 # ----------------------------------------------------------------------
-def scan_dicoms_long(root_dir: str,
-                     output_tsv: Optional[str] = None) -> pd.DataFrame:
+def scan_dicoms_long(
+    root_dir: str,
+    output_tsv: Optional[str] = None,
+    n_jobs: int = 1,
+) -> pd.DataFrame:
     """
     Walk *root_dir*, read DICOM headers, return long-format DataFrame.
 
@@ -137,6 +141,8 @@ def scan_dicoms_long(root_dir: str,
         Path with raw DICOMs organised in sub-folders.
     output_tsv : str | None
         If provided, write the TSV to that path.
+    n_jobs : int
+        Number of parallel workers to use when reading DICOM files.
 
     Returns
     -------
@@ -155,70 +161,83 @@ def scan_dicoms_long(root_dir: str,
     imgtypes   = defaultdict(lambda: defaultdict(dict))
     sessset = defaultdict(lambda: defaultdict(set))
 
-    # PASS 1: Walk filesystem and collect info
+    # PASS 1: Walk filesystem and collect info in parallel
+    file_list = []
     for root, _dirs, files in os.walk(root_dir):
         for fname in files:
-            if not fname.lower().endswith(".dcm"):
-                continue
-            fpath = os.path.join(root, fname)
+            if fname.lower().endswith(".dcm"):
+                file_list.append(os.path.join(root, fname))
 
-            try:
-                ds = pydicom.dcmread(fpath, stop_before_pixels=True, force=True)
-            except Exception as exc:
-                print(f"Warning: could not read {fpath}: {exc}")
-                continue
+    def _read_one(fpath: str):
+        try:
+            ds = pydicom.dcmread(fpath, stop_before_pixels=True, force=True)
+        except Exception as exc:  # pragma: no cover - I/O errors
+            print(f"Warning: could not read {fpath}: {exc}")
+            return None
 
-            # ---- subject id  (GivenName > PatientID > 'UNKNOWN')
-            pn    = getattr(ds, "PatientName", None)
-            given = pn.given_name.strip() if pn and pn.given_name else ""
-            pid   = getattr(ds, "PatientID", "").strip()
-            subj  = given or pid or "UNKNOWN"
+        root = os.path.dirname(fpath)
+        pn = getattr(ds, "PatientName", None)
+        given = pn.given_name.strip() if pn and pn.given_name else ""
+        pid = getattr(ds, "PatientID", "").strip()
+        subj = given or pid or "UNKNOWN"
+        study = (
+            getattr(ds, "StudyDescription", None)
+            or getattr(ds, "StudyName", None)
+            or "n/a"
+        )
+        study = str(study).strip()
+        subj_key = f"{subj}||{study}"
+        rel = os.path.relpath(root, root_dir)
+        folder = root_dir.name if rel == "." else rel
+        series = getattr(ds, "SeriesDescription", "n/a").strip()
+        uid = getattr(ds, "SeriesInstanceUID", "")
+        raw_img_type = getattr(ds, "ImageType", None)
+        img_list = normalize_image_type(raw_img_type)
+        img3 = classify_fieldmap_type(img_list)
+        if not img3:
+            img3 = img_list[2] if len(img_list) >= 3 else ""
+        acq_time = str(getattr(ds, "AcquisitionTime", "")).strip()
+        m = SESSION_RE.search(series.lower())
+        sess_tag = f"ses-{m.group(1)}" if m else None
+        demo_dict = dict(
+            GivenName=given,
+            FamilyName=getattr(pn, "family_name", "").strip(),
+            PatientID=pid,
+            PatientSex=getattr(ds, "PatientSex", "n/a").strip(),
+            PatientAge=getattr(ds, "PatientAge", "n/a").strip(),
+            StudyDescription=study,
+        )
+        return dict(
+            subj_key=subj_key,
+            folder=folder,
+            series=series,
+            uid=uid,
+            modality=guess_modality(series),
+            img3=img3,
+            acq_time=acq_time,
+            sess_tag=sess_tag,
+            demo=demo_dict,
+        )
 
-            # ---- study description/name
-            study = (
-                getattr(ds, "StudyDescription", None)
-                or getattr(ds, "StudyName", None)
-                or "n/a"
-            )
-            study = str(study).strip()
-
-            subj_key = f"{subj}||{study}"
-
-            # ---- source folder  (relative path under root_dir)
-            rel = os.path.relpath(root, root_dir)
-            folder = root_dir.name if rel == "." else rel
-
-            series = getattr(ds, "SeriesDescription", "n/a").strip()
-            uid = getattr(ds, "SeriesInstanceUID", "")
-            key = (series, uid)
-            counts[subj_key][folder][key] += 1
-            mods[subj_key][folder][key] = guess_modality(series)
-            raw_img_type = getattr(ds, "ImageType", None)
-            img_list = normalize_image_type(raw_img_type)
-            img3 = classify_fieldmap_type(img_list)
-            if not img3:
-                img3 = img_list[2] if len(img_list) >= 3 else ""
-            if key not in imgtypes[subj_key][folder]:
-                imgtypes[subj_key][folder][key] = img3
-            acq_time = str(getattr(ds, "AcquisitionTime", "")).strip()
-            if key not in acq_times[subj_key][folder] and acq_time:
-                acq_times[subj_key][folder][key] = acq_time
-
-            # collect session tags
-            m = SESSION_RE.search(series.lower())
-            if m:
-                sessset[subj_key][folder].add(f"ses-{m.group(1)}")
-
-            # store demographics once per subject
-            if subj_key not in demo:
-                demo[subj_key] = dict(
-                    GivenName        = given,
-                    FamilyName       = getattr(pn, "family_name", "").strip(),
-                    PatientID        = pid,
-                    PatientSex       = getattr(ds, "PatientSex", "n/a").strip(),
-                    PatientAge       = getattr(ds, "PatientAge", "n/a").strip(),
-                    StudyDescription = study,
-                )
+    results = Parallel(n_jobs=n_jobs)(delayed(_read_one)(fp) for fp in file_list)
+    for res in results:
+        if not res:
+            continue
+        subj_key = res["subj_key"]
+        folder = res["folder"]
+        series = res["series"]
+        uid = res["uid"]
+        key = (series, uid)
+        counts[subj_key][folder][key] += 1
+        mods[subj_key][folder][key] = res["modality"]
+        if key not in imgtypes[subj_key][folder]:
+            imgtypes[subj_key][folder][key] = res["img3"]
+        if key not in acq_times[subj_key][folder] and res["acq_time"]:
+            acq_times[subj_key][folder][key] = res["acq_time"]
+        if res["sess_tag"]:
+            sessset[subj_key][folder].add(res["sess_tag"])
+        if subj_key not in demo:
+            demo[subj_key] = res["demo"]
 
     print(f"Subjects found            : {len(demo)}")
     total_series = sum(len(seq_dict)
@@ -362,9 +381,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate TSV inventory for a DICOM folder")
     parser.add_argument("dicom_dir", help="Path to the directory containing DICOM files")
     parser.add_argument("output_tsv", help="Destination TSV file")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of parallel workers to use",
+    )
     args = parser.parse_args()
 
-    table = scan_dicoms_long(args.dicom_dir, args.output_tsv)
+    table = scan_dicoms_long(args.dicom_dir, args.output_tsv, n_jobs=args.jobs)
     print("\nPreview (first 10 rows):\n")
     print(table.head(10).to_string(index=False))
 

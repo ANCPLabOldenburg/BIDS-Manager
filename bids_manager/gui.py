@@ -54,7 +54,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTextBrowser, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox, QStyledItemDelegate)
+    QCheckBox, QStyledItemDelegate, QDialogButtonBox)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
 from PyQt5.QtGui import (
@@ -242,6 +242,9 @@ class BIDSManager(QMainWindow):
         self._spinner_index = 0
         self._spinner_message = ""
 
+        # Parallel settings
+        self.num_cpus = 1
+
         # Main widget and layout
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -267,12 +270,16 @@ class BIDSManager(QMainWindow):
         self.current_theme = None
         self.theme_btn = QPushButton("🌓")  # half-moon icon
         self.theme_btn.setFixedWidth(50)
+        self.cpu_btn = QPushButton(f"CPU ({self.num_cpus})")
+        self.cpu_btn.setFixedWidth(50)
+        self.cpu_btn.clicked.connect(self.show_cpu_dialog)
         # Create a container widget with layout to adjust position
         container = QWidget()
         layout = QHBoxLayout()
         layout.setContentsMargins(8, 2, 0, 6)  # left, top, right, bottom
         layout.setSpacing(0)
         layout.addWidget(self.theme_btn)
+        layout.addWidget(self.cpu_btn)
         container.setLayout(layout)
         # Add the container to the status bar (left-aligned)
         self.statusBar().addWidget(container)
@@ -544,6 +551,13 @@ class BIDSManager(QMainWindow):
         else:
             font.setWeight(QFont.Normal)
         app.setFont(font)
+
+    def show_cpu_dialog(self) -> None:
+        """Display dialog to choose number of CPUs."""
+        dlg = CpuSettingsDialog(self, self.num_cpus)
+        if dlg.exec_() == QDialog.Accepted:
+            self.num_cpus = dlg.spin.value()
+            self.cpu_btn.setText(f"CPU ({self.num_cpus})")
 
     def _start_spinner(self, message: str) -> None:
         """Show animated spinner with *message* in the log group."""
@@ -1805,6 +1819,39 @@ class RemapDialog(QDialog):
             orig.rename(new)
         QMessageBox.information(self, "Batch Remap", "Rename applied.")
         self.accept()
+
+
+class CpuSettingsDialog(QDialog):
+    """Dialog to select the number of CPUs for parallel tasks."""
+
+    def __init__(self, parent, current: int = 1):
+        super().__init__(parent)
+        self.setWindowTitle("Parallel Settings")
+        layout = QVBoxLayout(self)
+
+        total_cpu = os.cpu_count() or 1
+        ram_text = "n/a"
+        if HAS_PSUTIL:
+            try:
+                mem_gb = psutil.virtual_memory().total / (1024 ** 3)
+                ram_text = f"{mem_gb:.1f} GB"
+            except Exception:  # pragma: no cover - info retrieval failure
+                pass
+
+        layout.addWidget(QLabel(f"Available CPUs: {total_cpu}\nRAM: {ram_text}"))
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("CPUs to use:"))
+        self.spin = QSpinBox()
+        self.spin.setRange(1, total_cpu)
+        self.spin.setValue(min(current, total_cpu))
+        row.addWidget(self.spin)
+        layout.addLayout(row)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
 
 class MetadataViewer(QWidget):
     """

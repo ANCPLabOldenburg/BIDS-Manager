@@ -25,6 +25,7 @@ dependencies = [
     "numpy",
     "psutil",
     "matplotlib",
+    "joblib==1.4.2",
 ]
 
 
