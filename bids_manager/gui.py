@@ -2793,10 +2793,13 @@ class BIDSManager(QMainWindow):
             self.loadExcludePatterns()
 
     def onTreeClicked(self, idx: QModelIndex):
-        """When a file is clicked in the tree, load metadata if JSON/TSV."""
+        """When a file is clicked, load metadata if supported."""
+
         p = Path(self.model.filePath(idx))
         self.selected = p
-        if _get_ext(p) in ['.json', '.tsv', '.nii', '.nii.gz', '.html', '.htm']:
+        ext = _get_ext(p)
+        # ``is_dicom_file`` also checks for files without an extension
+        if ext in ['.json', '.tsv', '.nii', '.nii.gz', '.html', '.htm'] or is_dicom_file(str(p)):
             self.viewer.load_file(p)
 
     def updateStats(self):
@@ -3793,19 +3796,22 @@ class MetadataViewer(QWidget):
         self.loading_label.hide()
 
     def load_file(self, path: Path):
-        """Load JSON, TSV or NIfTI file into an editable viewer.
+        """Load JSON, TSV, NIfTI or DICOM file into an editable viewer.
 
         The file is read in a background thread to keep the UI responsive and
-        animate the loading spinner while large datasets are processed.
+        animate the loading spinner while potentially large datasets are processed.
         """
+
         self.current_path = path
         self.clear()
         self.welcome.hide()
         ext = _get_ext(path)
+        dicom = is_dicom_file(str(path))
         self._start_loading("Loading")
         # ``worker`` reads the file in a separate thread so the UI can keep
         # updating the spinner while potentially large data is loaded.
         result = {}
+
         def worker():
             if ext == '.json':
                 result['data'] = json.loads(path.read_text(encoding='utf-8'))
@@ -3815,8 +3821,11 @@ class MetadataViewer(QWidget):
                 img = nib.load(str(path))
                 result['img'] = img
                 result['data'] = img.get_fdata()
+            elif dicom:
+                # ``stop_before_pixels`` avoids loading heavy pixel data
+                result['ds'] = pydicom.dcmread(str(path), stop_before_pixels=True)
 
-        if ext in ['.json', '.tsv', '.nii', '.nii.gz']:
+        if ext in ['.json', '.tsv', '.nii', '.nii.gz'] or dicom:
             t = threading.Thread(target=worker)
             t.start()
             while t.is_alive():
@@ -3834,9 +3843,13 @@ class MetadataViewer(QWidget):
         elif ext in ['.nii', '.nii.gz']:
             self._setup_nifti_toolbar()
             self.viewer = self._nifti_view(path, (result.get('img'), result.get('data')))
+        elif dicom:
+            self.viewer = self._dicom_view(path, result.get('ds'))
+            self.toolbar.addStretch()
         elif ext in ['.html', '.htm']:
             self.viewer = self._html_view(path)
             self.toolbar.addStretch()
+
         self.layout().addWidget(self.viewer)
 
     def resizeEvent(self, event):
@@ -4314,22 +4327,25 @@ class MetadataViewer(QWidget):
         tree.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         return tree
 
-    def _populate_json(self, parent, data):
-        """Recursively populate JSON dictionary into the tree widget."""
+    def _populate_json(self, parent, data, editable: bool = True):
+        """Recursively populate JSON-like data into the tree widget."""
+
         if isinstance(data, dict):
             for k, v in data.items():
                 it = QTreeWidgetItem([str(k), '' if isinstance(v, (dict, list)) else str(v)])
-                it.setFlags(it.flags() | Qt.ItemIsEditable)
+                if editable:
+                    it.setFlags(it.flags() | Qt.ItemIsEditable)
                 parent.addChild(it)
                 if isinstance(v, (dict, list)):
-                    self._populate_json(it, v)
+                    self._populate_json(it, v, editable)
         elif isinstance(data, list):
             for i, v in enumerate(data):
                 it = QTreeWidgetItem([str(i), '' if isinstance(v, (dict, list)) else str(v)])
-                it.setFlags(it.flags() | Qt.ItemIsEditable)
+                if editable:
+                    it.setFlags(it.flags() | Qt.ItemIsEditable)
                 parent.addChild(it)
                 if isinstance(v, (dict, list)):
-                    self._populate_json(it, v)
+                    self._populate_json(it, v, editable)
 
     def _tsv_view(self, path: Path, df=None) -> QTableWidget:
         """Create a table widget to show and edit TSV data."""
@@ -4349,6 +4365,39 @@ class MetadataViewer(QWidget):
             hdr.setSectionResizeMode(j, QHeaderView.Interactive)
         tbl.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         return tbl
+
+    def _dicom_view(self, path: Path, dataset) -> QTreeWidget:
+        """Display DICOM metadata in a read-only tree."""
+
+        tree = QTreeWidget()
+        tree.setColumnCount(2)
+        tree.setHeaderLabels(["Tag", "Value"])
+        tree.setAlternatingRowColors(True)
+        hdr = tree.header()
+        hdr.setSectionResizeMode(0, QHeaderView.Interactive)
+        hdr.setSectionResizeMode(1, QHeaderView.Interactive)
+
+        # Convert ``pydicom`` dataset to nested dictionaries for display
+        def ds_to_dict(ds):
+            out = {}
+            for elem in ds:
+                name = elem.keyword or elem.name
+                if elem.VR == "SQ":  # sequence of items
+                    out[name] = [ds_to_dict(item) for item in elem.value]
+                else:
+                    out[name] = str(elem.value)
+            return out
+
+        data = {
+            "File Meta Information": ds_to_dict(dataset.file_meta)
+            if getattr(dataset, "file_meta", None)
+            else {},
+            "Dataset": ds_to_dict(dataset),
+        }
+        self._populate_json(tree.invisibleRootItem(), data, editable=False)
+        tree.expandAll()
+        tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        return tree
 
     def _html_view(self, path: Path) -> QWebEngineView:
         """Display HTML file using a QWebEngineView for full rendering."""
