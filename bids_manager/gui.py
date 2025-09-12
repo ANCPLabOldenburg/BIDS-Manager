@@ -9,6 +9,11 @@ import pandas as pd
 import numpy as np
 import threading
 import time
+import pydicom  # used to inspect DICOM headers when checking for mixed sessions
+try:  # prefer relative import but fall back to direct when running as a script
+    from .run_heudiconv_from_heuristic import is_dicom_file  # reuse existing helper
+except Exception:  # pragma: no cover - packaging edge cases
+    from run_heudiconv_from_heuristic import is_dicom_file  # type: ignore
 try:
     import nibabel as nib
 except ModuleNotFoundError as exc:
@@ -75,6 +80,19 @@ import logging  # debug logging
 import signal
 import random
 import string
+from .renaming.config import (
+    DEFAULT_SCHEMA_DIR,
+    ENABLE_SCHEMA_RENAMER,
+    ENABLE_FIELDMap_NORMALIZATION,
+    ENABLE_DWI_DERIVATIVES_MOVE,
+    DERIVATIVES_PIPELINE_NAME,
+)
+from .renaming.schema_renamer import (
+    load_bids_schema,
+    SeriesInfo,
+    build_preview_names,
+    apply_post_conversion_rename,
+)
 try:
     import psutil
     HAS_PSUTIL = True
@@ -116,6 +134,40 @@ class _ImageLabel(_AutoUpdateLabel):
         if callable(self._click_fn):
             self._click_fn(event)
         super().mousePressEvent(event)
+
+def _extract_subject(row) -> str:
+    """Return subject identifier prioritising ``BIDS_name`` and stripping ``sub-``."""
+    subj = str(row.get("BIDS_name") or row.get("subject") or row.get("sub") or "UNK")
+    if subj.lower().startswith("sub-"):
+        subj = subj[4:]
+    return subj
+
+def _compute_bids_preview(df, schema):
+    """Returns a dict {row_index: (datatype, basename)} for preview; safe if schema is None."""
+    out = {}
+    if not schema:
+        return out
+    rows = []
+    idxs = []
+    for i, row in df.iterrows():
+        subject = _extract_subject(row)
+        session = row.get("session") or row.get("ses") or None
+        modality = str(row.get("modality") or row.get("fine_modality") or row.get("BIDS_modality") or "")
+        sequence = str(row.get("sequence") or row.get("SeriesDescription") or "")
+        rep = row.get("rep") or row.get("repeat") or 1
+
+        extra = {}
+        for key in ("task", "task_hits", "acq", "run", "dir", "echo"):
+            if row.get(key):
+                extra[key] = str(row.get(key))
+
+        rows.append(SeriesInfo(subject, session, modality, sequence, int(rep or 1), extra))
+        idxs.append(i)
+
+    proposals = build_preview_names(rows, schema)
+    for (series, dt, base), idx in zip(proposals, idxs):
+        out[idx] = (dt, base)
+    return out
 
 # ---- basic logging config ----
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
@@ -307,6 +359,16 @@ class BIDSManager(QMainWindow):
 
         # Root of the currently loaded BIDS dataset (None until loaded)
         self.bids_root = None
+
+        # Schema information for proposed BIDS names
+        self._schema = None
+        if ENABLE_SCHEMA_RENAMER:
+            try:
+                self._schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+            except Exception as e:
+                print(f"[WARN] Could not load BIDS schema: {e}")
+                self._schema = None
+        self.inventory_df = None
 
         # Path to persistent user preferences
         self.pref_dir = PREF_DIR
@@ -825,7 +887,7 @@ class BIDSManager(QMainWindow):
         metadata_layout = QVBoxLayout(metadata_tab)
         self.mapping_table = QTableWidget()
         # +1 column for the original subject label shown in the inventory TSV
-        self.mapping_table.setColumnCount(13)
+        self.mapping_table.setColumnCount(14)
         self.mapping_table.setHorizontalHeaderLabels([
             "include",
             "source_folder",
@@ -834,6 +896,7 @@ class BIDSManager(QMainWindow):
             "GivenName",
             "session",
             "sequence",
+            "Proposed BIDS name",
             "StudyDescription",
             "series_uid",
             "acq_time",
@@ -991,14 +1054,16 @@ class BIDSManager(QMainWindow):
         text_tab = QWidget()
         text_lay = QVBoxLayout(text_tab)
         self.preview_text = QTreeWidget()
-        self.preview_text.setHeaderLabels(["BIDS Path"])
+        self.preview_text.setColumnCount(2)
+        self.preview_text.setHeaderLabels(["BIDS Path", "Original Sequence"])
         text_lay.addWidget(self.preview_text)
         self.preview_tabs.addTab(text_tab, "Text")
 
         tree_tab = QWidget()
         tree_lay = QVBoxLayout(tree_tab)
         self.preview_tree = QTreeWidget()
-        self.preview_tree.setHeaderLabels(["BIDS Structure"])
+        self.preview_tree.setColumnCount(2)
+        self.preview_tree.setHeaderLabels(["BIDS Structure", "Original Sequence"])
         tree_lay.addWidget(self.preview_tree)
         self.preview_tabs.addTab(tree_tab, "Tree")
 
@@ -1066,13 +1131,11 @@ class BIDSManager(QMainWindow):
 
         self.tabs.addTab(self.convert_tab, "Converter")
 
-    def _add_preview_path(self, parts):
-        """Insert path components into the preview tree if missing."""
-        # ``parts`` represents a sequence of folders/files in a BIDS path. This
-        # helper walks the preview tree and adds nodes so that the structure is
-        # displayed hierarchically.
+    def _add_preview_path(self, parts, orig_seq):
+        """Insert path components into the preview tree, storing ``orig_seq`` on the leaf."""
+        # ``parts`` is a sequence of folder/file names comprising a BIDS path.
         parent = self.preview_tree.invisibleRootItem()
-        for part in parts:
+        for idx, part in enumerate(parts):
             match = None
             for i in range(parent.childCount()):
                 child = parent.child(i)
@@ -1080,9 +1143,11 @@ class BIDSManager(QMainWindow):
                     match = child
                     break
             if match is None:
-                match = QTreeWidgetItem([part])
+                match = QTreeWidgetItem([part, ""])  # second column filled on leaf
                 parent.addChild(match)
             parent = match
+            if idx == len(parts) - 1:
+                parent.setText(1, orig_seq)
 
     def generatePreview(self):
         logging.info("generatePreview → Building preview tree …")
@@ -1106,8 +1171,44 @@ class BIDSManager(QMainWindow):
             subj = info['bids'] if self.use_bids_names else f"sub-{info['given']}"
             study = info['study']
             ses = info['ses']
-            seq = info['seq']
             modb = info['modb']
+            seq = info['seq']
+
+            # Preview for DWI derivative maps moved to derivatives/
+            tag = None
+            if modb == 'dwi':
+                seq_low = seq.lower()
+                for t in ("adc", "fa", "tracew", "colfa"):
+                    if t in seq_low:
+                        tag = t.upper()
+                        break
+            if tag:
+                path_parts = []
+                if multi_study:
+                    path_parts.append(study)
+                path_parts.extend(["derivatives", DERIVATIVES_PIPELINE_NAME, subj, ses, "dwi"])
+                fname_prefix = "_".join([p for p in [subj, ses] if p])
+                fname = f"{fname_prefix}_desc-{tag}_dwi.nii.gz"
+                full = [p for p in path_parts if p] + [fname]
+                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
+                self._add_preview_path(full, seq)
+                continue
+
+            prop_dt = info.get('prop_dt')
+            prop_base = info.get('prop_base')
+            if prop_dt and prop_base:
+                path_parts = []
+                if multi_study:
+                    path_parts.append(study)
+                path_parts.extend([subj, ses, prop_dt])
+                files = [f"{prop_base}.nii.gz"]
+                if prop_base.endswith("_physio"):
+                    files = [f"{prop_base}.tsv", f"{prop_base}.json"]
+                for fname in files:
+                    full = [p for p in path_parts if p] + [fname]
+                    self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
+                    self._add_preview_path(full, seq)
+                continue
 
             path_parts = []
             if multi_study:
@@ -1124,13 +1225,13 @@ class BIDSManager(QMainWindow):
                 for suffix in ["magnitude1", "magnitude2", "phasediff"]:
                     fname = f"{base}_{suffix}.nii.gz"
                     full = path_parts + [fname]
-                    self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
-                    self._add_preview_path(full)
+                    self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
+                    self._add_preview_path(full, seq)
             else:
                 fname = f"{base}.nii.gz"
                 full = path_parts + [fname]
-                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full)]))
-                self._add_preview_path(full)
+                self.preview_text.addTopLevelItem(QTreeWidgetItem(["/".join(full), seq]))
+                self._add_preview_path(full, seq)
 
         self.preview_text.expandAll()
         self.preview_tree.expandAll()
@@ -1343,6 +1444,82 @@ class BIDSManager(QMainWindow):
         ]
         self.inventory_process.start(sys.executable, args)
 
+    # ------------------------------------------------------------------
+    # Helpers for detecting and reorganising multiple sessions in a
+    # single folder
+    # ------------------------------------------------------------------
+    def _find_conflicting_studies(self, root_dir: str) -> dict:
+        """Return folders containing more than one StudyInstanceUID.
+
+        Parameters
+        ----------
+        root_dir : str
+            Top level directory that may contain mixed-session folders.
+
+        Returns
+        -------
+        dict
+            Mapping of folder path → {study_uid: [file1, file2, ...]} for
+            folders that contain DICOMs from multiple sessions.
+        """
+
+        conflicts: dict[str, dict[str, list[str]]] = {}
+        for folder, _dirs, files in os.walk(root_dir):
+            study_map: dict[str, list[str]] = {}
+            for fname in files:
+                fpath = os.path.join(folder, fname)
+                if not is_dicom_file(fpath):
+                    continue
+                try:
+                    ds = pydicom.dcmread(
+                        fpath, stop_before_pixels=True, specific_tags=["StudyInstanceUID"]
+                    )
+                    uid = str(getattr(ds, "StudyInstanceUID", "")).strip()
+                except Exception:
+                    continue
+                study_map.setdefault(uid, []).append(fpath)
+            if len(study_map) > 1:
+                conflicts[folder] = study_map
+        return conflicts
+
+    def _reorganize_conflicting_sessions(self, conflicts: dict) -> None:
+        """Move files for **all** sessions into separate subfolders.
+
+        This method ensures that each unique ``StudyInstanceUID`` found within a
+        folder is placed in its own subdirectory.  Previously only the
+        additional sessions were moved, leaving the first session's files in the
+        root folder, which could lead to HeuDiConv processing multiple sessions
+        together and crashing.  By relocating every session we guarantee a clean
+        one-session-per-folder layout.
+
+        Parameters
+        ----------
+        conflicts : dict
+            Output of :meth:`_find_conflicting_studies` mapping folder paths to
+            ``StudyInstanceUID`` → list of files.
+        """
+
+        for folder, uid_map in conflicts.items():
+            # Iterate over each StudyInstanceUID and move its files into a
+            # unique ``sessionX`` directory.
+            for idx, (uid, files) in enumerate(uid_map.items(), start=1):
+                # Determine a unique destination directory.  We increment the
+                # numeric suffix if a folder with the same name already exists.
+                new_dir = os.path.join(folder, f"session{idx}")
+                suffix = idx
+                while os.path.exists(new_dir):
+                    suffix += 1
+                    new_dir = os.path.join(folder, f"session{suffix}")
+                os.makedirs(new_dir, exist_ok=True)
+
+                # Move each file belonging to the current UID into ``new_dir``.
+                for fpath in files:
+                    shutil.move(fpath, os.path.join(new_dir, os.path.basename(fpath)))
+
+                self.log_text.append(
+                    f"Moved {len(files)} files with StudyInstanceUID {uid} to {new_dir}."
+                )
+
     def _inventoryFinished(self):
         ok = self.inventory_process.exitCode() == 0 if self.inventory_process else False
         self.inventory_process = None
@@ -1350,6 +1527,25 @@ class BIDSManager(QMainWindow):
         self.tsv_stop_button.setEnabled(False)
         self._stop_spinner()
         if ok:
+            conflicts = self._find_conflicting_studies(self.dicom_dir)
+            if conflicts:
+                folders = "\n".join(conflicts.keys())
+                msg = (
+                    "Multiple sessions were detected in the following folders:\n"
+                    f"{folders}\n\n"
+                    "Would you like to move each session into its own subfolder?"
+                )
+                resp = QMessageBox.question(
+                    self,
+                    "Multiple sessions detected",
+                    msg,
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if resp == QMessageBox.Yes:
+                    self._reorganize_conflicting_sessions(conflicts)
+                    # re-run inventory after reorganisation
+                    self.runInventory()
+                    return
             self.log_text.append("TSV generation finished.")
             self.loadMappingTable()
         else:
@@ -1385,12 +1581,13 @@ class BIDSManager(QMainWindow):
             df.at[i, "GivenName"] = self.mapping_table.item(i, 4).text()
             df.at[i, "session"] = self.mapping_table.item(i, 5).text()
             df.at[i, "sequence"] = self.mapping_table.item(i, 6).text()
-            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 7).text()
-            df.at[i, "series_uid"] = self.mapping_table.item(i, 8).text()
-            df.at[i, "acq_time"] = self.mapping_table.item(i, 9).text()
-            df.at[i, "rep"] = self.mapping_table.item(i, 10).text()
-            df.at[i, "modality"] = self.mapping_table.item(i, 11).text()
-            df.at[i, "modality_bids"] = self.mapping_table.item(i, 12).text()
+            df.at[i, "Proposed BIDS name"] = self.mapping_table.item(i, 7).text()
+            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 8).text()
+            df.at[i, "series_uid"] = self.mapping_table.item(i, 9).text()
+            df.at[i, "acq_time"] = self.mapping_table.item(i, 10).text()
+            df.at[i, "rep"] = self.mapping_table.item(i, 11).text()
+            df.at[i, "modality"] = self.mapping_table.item(i, 12).text()
+            df.at[i, "modality_bids"] = self.mapping_table.item(i, 13).text()
 
         # When editing the scanned data table we assume the user knows what
         # they are doing, so we do not enforce BIDS naming rules or uniqueness
@@ -1430,7 +1627,7 @@ class BIDSManager(QMainWindow):
         id_map: dict[tuple[str, str], str] = {}
         for i in range(self.mapping_table.rowCount()):
             bids = self.mapping_table.item(i, 2).text().strip()
-            study = self.mapping_table.item(i, 7).text().strip()
+            study = self.mapping_table.item(i, 8).text().strip()
             if not bids:
                 continue
 
@@ -1517,13 +1714,13 @@ class BIDSManager(QMainWindow):
         rows = []
         for i in range(self.mapping_table.rowCount()):
             rows.append({
-                'StudyDescription': self.mapping_table.item(i, 7).text().strip(),
+                'StudyDescription': self.mapping_table.item(i, 8).text().strip(),
                 'BIDS_name': self.mapping_table.item(i, 2).text().strip(),
                 'session': self.mapping_table.item(i, 5).text().strip(),
-                'modality_bids': self.mapping_table.item(i, 12).text().strip(),
-                'modality': self.mapping_table.item(i, 11).text().strip(),
+                'modality_bids': self.mapping_table.item(i, 13).text().strip(),
+                'modality': self.mapping_table.item(i, 12).text().strip(),
                 'sequence': self.mapping_table.item(i, 6).text().strip(),
-                'acq_time': self.mapping_table.item(i, 9).text().strip(),
+                'acq_time': self.mapping_table.item(i, 10).text().strip(),
             })
 
         df = pd.DataFrame(rows)
@@ -1537,7 +1734,7 @@ class BIDSManager(QMainWindow):
 
         for i in range(self.mapping_table.rowCount()):
             val = df.at[i, 'rep']
-            self.mapping_table.item(i, 10).setText(str(val) if str(val) else '')
+            self.mapping_table.item(i, 11).setText(str(val) if str(val) else '')
             self.row_info[i]['rep'] = str(val) if str(val) else ''
 
         self._rebuild_lookup_maps()
@@ -1625,6 +1822,19 @@ class BIDSManager(QMainWindow):
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
         df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
+        preview_map = _compute_bids_preview(df, self._schema)
+        df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
+        df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
+        def _prop_path(r):
+            base = r.get("proposed_basename")
+            dt = r.get("proposed_datatype")
+            if not base:
+                return ""
+            ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
+            return f"{dt}/{base}{ext}"
+
+        df["Proposed BIDS name"] = df.apply(_prop_path, axis=1)
+        self.inventory_df = df
 
         # ----- load existing mappings without altering the TSV -----
         self.existing_maps = {}
@@ -1701,36 +1911,42 @@ class BIDSManager(QMainWindow):
             seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
             self.mapping_table.setItem(r, 6, seq_item)
 
+            preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
+            preview_item.setFlags(preview_item.flags() & ~Qt.ItemIsEditable)
+            self.mapping_table.setItem(r, 7, preview_item)
+
             study_item = QTableWidgetItem(study)
             study_item.setFlags(study_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 7, study_item)
+            self.mapping_table.setItem(r, 8, study_item)
 
             uid_item = QTableWidgetItem(_clean(row.get('series_uid')))
             uid_item.setFlags(uid_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 8, uid_item)
+            self.mapping_table.setItem(r, 9, uid_item)
 
             acq_item = QTableWidgetItem(_clean(row.get('acq_time')))
             acq_item.setFlags(acq_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 9, acq_item)
+            self.mapping_table.setItem(r, 10, acq_item)
 
             rep_item = QTableWidgetItem(_clean(row.get('rep')))
             # Allow editing the repeat number directly in the table
             rep_item.setFlags(rep_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 10, rep_item)
+            self.mapping_table.setItem(r, 11, rep_item)
 
             mod_item = QTableWidgetItem(_clean(row.get('modality')))
             mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 11, mod_item)
+            self.mapping_table.setItem(r, 12, mod_item)
 
             modb = _clean(row.get('modality_bids'))
             modb_item = QTableWidgetItem(modb)
             modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 12, modb_item)
+            self.mapping_table.setItem(r, 13, modb_item)
 
             mod = _clean(row.get('modality'))
             seq = _clean(row.get('sequence'))
             run = _clean(row.get('rep'))
             given = _clean(row.get('GivenName'))
+            prop_dt = _clean(row.get('proposed_datatype'))
+            prop_base = _clean(row.get('proposed_basename'))
             self.row_info.append({
                 'study': study,
                 'bids': bids_name,
@@ -1740,6 +1956,8 @@ class BIDSManager(QMainWindow):
                 'mod': mod,
                 'seq': seq,
                 'rep': run,
+                'prop_dt': prop_dt,
+                'prop_base': prop_base,
                 'n_files': _clean(row.get('n_files')),
                 'acq_time': _clean(row.get('acq_time')),
             })
@@ -1776,6 +1994,70 @@ class BIDSManager(QMainWindow):
         self.naming_table.blockSignals(False)
         self._updateScanExistingEnabled()
         self._updateMappingControlsEnabled()
+
+
+    def _build_series_list_from_df(self, df):
+        rows = []
+
+        # ``heudiconv`` initially names outputs using a simplified stem derived
+        # from the DICOM SeriesDescription.  To later locate those files for
+        # renaming we reconstruct that stem here.  We mirror the logic used by
+        # :mod:`build_heuristic_from_tsv` which appends ``rep-<N>`` when a
+        # sequence appears multiple times for a given subject/session.
+        rep_counts = (
+            df.groupby(["BIDS_name", "session", "sequence"], dropna=False)["sequence"].transform("count")
+        )
+        rep_index = (
+            df.groupby(["BIDS_name", "session", "sequence"], dropna=False).cumcount() + 1
+        )
+
+        for idx, row in df.iterrows():
+            subject = _extract_subject(row)
+            session = row.get("session") or row.get("ses") or None
+            modality = str(row.get("modality") or row.get("fine_modality") or row.get("BIDS_modality") or "")
+            sequence = str(row.get("sequence") or row.get("SeriesDescription") or "")
+            # ``rep`` encodes repeat acquisitions detected earlier.  Leave it as
+            # ``None`` for non-repeated series and cast to ``int`` when present.
+            rep_val = row.get("rep") or row.get("repeat")
+            rep = int(rep_val) if rep_val else None
+
+            extra: dict[str, str] = {}
+            for key in ("task", "task_hits", "acq", "run", "dir", "echo"):
+                if row.get(key):
+                    extra[key] = str(row.get(key))
+
+            # Reconstruct the basename produced by the converter so
+            # :func:`apply_post_conversion_rename` can locate existing files even
+            # when their names no longer contain the raw sequence.  This uses the
+            # subject ID, optional session, a "safe" version of the sequence and
+            # ``rep-<N>`` when duplicates exist.
+            if row.get("BIDS_name") and sequence:
+                base_parts = [str(row["BIDS_name"])]
+                if session:
+                    base_parts.append(session)
+                base_parts.append(_safe_stem(sequence))
+                if rep_counts.iloc[idx] > 1:
+                    base_parts.append(f"rep-{rep_index.iloc[idx]}")
+                current_base = _dedup_parts(*base_parts)
+                extra["current_bids"] = current_base
+
+            rows.append(SeriesInfo(subject, session, modality, sequence, rep, extra))
+
+        return rows
+
+    def _post_conversion_schema_rename(self, bids_root: str, df):
+        if not (ENABLE_SCHEMA_RENAMER and self._schema):
+            return {}
+        series_list = self._build_series_list_from_df(df)
+        proposals = build_preview_names(series_list, self._schema)
+        rename_map = apply_post_conversion_rename(
+            bids_root=bids_root,
+            proposals=proposals,
+            also_normalize_fieldmaps=ENABLE_FIELDMap_NORMALIZATION,
+            handle_dwi_derivatives=ENABLE_DWI_DERIVATIVES_MOVE,
+            derivatives_pipeline_name=DERIVATIVES_PIPELINE_NAME,
+        )
+        return rename_map
 
 
     def populateModalitiesTree(self):
@@ -2150,8 +2432,8 @@ class BIDSManager(QMainWindow):
                 seq = self.mapping_table.item(i, 6).text()
                 mod = dicom_inventory.guess_modality(seq)
                 modb = dicom_inventory.modality_to_container(mod)
-                self.mapping_table.item(i, 11).setText(mod)
-                self.mapping_table.item(i, 12).setText(modb)
+                self.mapping_table.item(i, 12).setText(mod)
+                self.mapping_table.item(i, 13).setText(modb)
                 if i < len(self.row_info):
                     self.row_info[i]['mod'] = mod
                     self.row_info[i]['modb'] = modb
@@ -2371,7 +2653,7 @@ class BIDSManager(QMainWindow):
                 include = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
                 info = self.row_info[i]
                 seq = self.mapping_table.item(i, 6).text()
-                modb = self.mapping_table.item(i, 12).text()
+                modb = self.mapping_table.item(i, 13).text()
 
                 # Update df_orig with canonical BIDS name
                 df_orig.at[i, 'BIDS_name'] = info['bids']
@@ -2453,6 +2735,9 @@ class BIDSManager(QMainWindow):
             else:
                 self.log_text.append("Conversion pipeline finished successfully.")
                 self._store_heuristics()
+                if self.inventory_df is not None:
+                    rename_map = self._post_conversion_schema_rename(self.bids_out_dir, self.inventory_df)
+                    self.log_text.append(f"Schema renamer moved/renamed {len(rename_map)} files.")
                 if getattr(self, 'tsv_for_conv', self.tsv_path) != self.tsv_path:
                     try:
                         os.remove(self.tsv_for_conv)
@@ -2892,7 +3177,8 @@ class AuthorshipDialog(QDialog):
             "Bsc. Pablo Alexis Olguín Baxman\n"
             "Dr. Amirhussein Abdolalizadeh Saleh\n"
             "Dr. Tina Schmitt\n"
-            "Dr.-Ing. Andreas Spiegler"
+            "Dr.-Ing. Andreas Spiegler\n"
+            "Msc. Shari Hiltner"
         )
         ack.setWordWrap(True)
         ack.setAlignment(Qt.AlignCenter)

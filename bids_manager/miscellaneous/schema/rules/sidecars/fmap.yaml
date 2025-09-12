@@ -1,0 +1,102 @@
+#
+# Groups of related metadata fields
+#
+# Assumptions: never need disjunction of selectors
+# Assumptions: top-to-bottom overrides is sufficient logic
+
+---
+# Fieldmap data
+MRIFieldmapIntendedFor:
+  selectors:
+    - datatype == "fmap"
+    - match(extension, '\.nii(\.gz)?$')
+  fields:
+    IntendedFor:
+      level: optional
+      description_addendum: |
+        This field is optional, and in case the fieldmaps do not correspond
+        to any particular scans, it does not have to be filled.
+
+MRIFieldmapB0FieldIdentifier:
+  selectors:
+    - datatype == "fmap"
+    - match(extension, '\.nii(\.gz)?$')
+    - '!("IntendedFor" in sidecar)'
+  fields:
+    B0FieldIdentifier:
+      level: recommended
+      issue:
+        code: B0_FIELD_IDENTIFIER_RECOMMENDED
+        message: |
+          File is missing B0FieldIdentifier metadata and IntendedFor metadata,
+          so it will not be possible to use to perform susceptibility distortion correction.
+          B0FieldIdentifier metadata permits the flexible selection of images
+          for estimating B0 inhomogeneity fields, and B0FieldSource permits EPI
+          images to indicate the identifier of the estimated field to use.
+
+# Case 1: Phase-difference map and at least one magnitude image
+MRIFieldmapPhaseDifferencePhasediff:
+  selectors:
+    - datatype == "fmap"
+    - suffix == "phasediff"
+    - match(extension, '\.nii(\.gz)?$')
+  fields:
+    EchoTime1: required
+    EchoTime2: required
+
+# Case 2: Two phase maps and two magnitude images
+# NOTE: Need to check for presence of related files.
+# For example, magnitude1 needs EchoTime__fmap only if phase1 file exists,
+# but EchoTime1 if phasediff exists.
+MRIFieldmapTwoPhase:
+  selectors:
+    - datatype == "fmap"
+    - intersects([suffix], ["phase1", "phase2"])
+    - match(extension, '\.nii(\.gz)?$')
+  fields:
+    EchoTime__fmap: required
+
+# Case 3: Direct field mapping
+MRIFieldmapDirectFieldMapping:
+  selectors:
+    - datatype == "fmap"
+    - suffix == "fieldmap"
+    - match(extension, '\.nii(\.gz)?$')
+  fields:
+    Units:
+      level: required
+      description_addendum: |
+        Fieldmaps must be in units of Hertz (`"Hz"`),
+        radians per second (`"rad/s"`), or Tesla (`"T"`).
+
+# Case 4: Multiple phase-encoded directions ("pepolar")
+MRIFieldmapPepolar:
+  selectors:
+    - datatype == "fmap"
+    - suffix == "epi"
+    - match(extension, '\.nii(\.gz)?$')
+  fields:
+    PhaseEncodingDirection:
+      level: required
+      issue:
+        code: PHASE_ENCODING_DIRECTION_MUST_DEFINE
+        message: |
+          You have to define 'PhaseEncodingDirection' for this file.
+    TotalReadoutTime:
+      level: optional
+      level_addendum: |
+        required if other methods for calculating readout time are not present
+    EffectiveEchoSpacing:
+      level: optional
+      level_addendum: |
+        required if other methods for calculating readout time are not present
+
+TB1EPI:
+  selectors:
+    - datatype == "fmap"
+    - suffix == "TB1EPI"
+  fields:
+    EchoTime: required
+    FlipAngle: required
+    TotalReadoutTime: required
+    MixingTime: required

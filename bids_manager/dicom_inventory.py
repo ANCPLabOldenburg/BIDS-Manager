@@ -9,8 +9,8 @@ Why you want this
 -----------------
 * Lets you review **all** SeriesDescriptions, subjects, sessions and file counts
   before converting anything.
-* Column `include` defaults to 1 except for scout/report/physlog sequences,
-  which start at 0 so they are skipped by default.
+* Column `include` defaults to 1 except for scout/report/physio/physlog
+  sequences, which start at 0 so they are skipped by default.
 * Generated table is the single source of truth you feed into a helper script
   that writes the HeuDiConv heuristic.
 
@@ -45,13 +45,53 @@ import pandas as pd
 import pydicom
 from pydicom.multival import MultiValue
 
+# Preview name helpers – loaded lazily so ``scan_dicoms_long`` can store
+# proposed BIDS names directly in the TSV.  We guard the import to keep the
+# inventory script functional even if the renamer dependencies are missing.
+try:  # pragma: no cover - import errors simply disable preview generation
+    from .renaming.schema_renamer import (
+        load_bids_schema,
+        SeriesInfo,
+        build_preview_names,
+    )
+    from .renaming.config import DEFAULT_SCHEMA_DIR
+except Exception:  # pragma: no cover - best effort
+    load_bids_schema = None  # type: ignore
+    SeriesInfo = None  # type: ignore
+    build_preview_names = None  # type: ignore
+    DEFAULT_SCHEMA_DIR = Path(".")  # type: ignore
+
 # Directory used to store persistent user preferences
 PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
 SEQ_DICT_FILE = PREF_DIR / "sequence_dictionary.tsv"
 
 # Acceptable DICOM file extensions (lower case)
+# Siemens scanners sometimes omit extensions altogether, so we also
+# perform a light-weight header check for files with no suffix.
 DICOM_EXTS = (".dcm", ".ima")
 
+
+def is_dicom_file(path: str) -> bool:
+    """Return ``True`` if *path* looks like a DICOM file.
+
+    Files with a known DICOM extension are accepted immediately.  For
+    extensionless files we peek at the standard ``DICM`` marker located
+    128 bytes into the file.  Any I/O error or missing marker results in
+    ``False``.
+    """
+
+    name = Path(path).name.lower()
+    if name.endswith(DICOM_EXTS):
+        return True
+    # If the filename contains a dot it has some other extension – skip it
+    if "." in name:
+        return False
+    try:
+        with open(path, "rb") as f:
+            f.seek(128)
+            return f.read(4) == b"DICM"
+    except Exception:
+        return False
 
 # ----------------------------------------------------------------------
 # 1.  Patterns: SeriesDescription → fine-grained modality label
@@ -74,10 +114,23 @@ BIDS_PATTERNS = {
     "PDw"    : ("gre-nm", "gre_nm"),
     "scout"  : ("localizer", "scout"),
     "report" : ("phoenixzipreport", "phoenix document", ".pdf", "report"),
-    "refscan": ("type-ref", "reference", "refscan"),
     # functional
+    # SBRef must precede bold to avoid misclassification when sequences
+    # contain both "sbref" and "bold" tokens.
+    "SBRef"  : (
+        "sbref",
+        "type-ref",
+        "reference",
+        "refscan",
+        " ref",
+        "_ref",
+        "ref",
+    ),
+    # Physiological recordings also tend to include "fmri" or "bold" in
+    # their sequence names.  List them before the generic bold patterns so
+    # they are detected correctly.
+    "physio" : ("physiolog", "physio", "pulse", "resp"),
     "bold"   : ("fmri", "bold", "task-"),
-    "SBRef"  : ("sbref",),
     # diffusion
     "dwi"    : ("dti", "dwi", "diff"),
     # field maps
@@ -92,8 +145,6 @@ BIDS_PATTERNS = {
         "b0_map",
         "b0map",
     ),
-    # misc (kept for completeness)
-    "physio" : ("physiolog", "physio", "pulse", "resp"),
 }
 
 # Keep a pristine copy of the default patterns so the GUI can restore them
@@ -132,11 +183,29 @@ def restore_sequence_dictionary() -> None:
 load_sequence_dictionary()
 
 def guess_modality(series: str) -> str:
-    """Return first matching fine label; otherwise 'unknown'."""
+    """Return first matching fine-grained modality label or 'unknown'.
+
+    Important details:
+    - We classify common vendor DWI derivative maps (ADC/FA/TRACEW/ColFA/expADC)
+      before general DWI detection to keep them out of the raw `dwi/` tree.
+    - Matching is performed on the lower-cased SeriesDescription.
+    """
     s = series.lower()
+
+    # Recognize common scanner-generated maps as derivatives
+    dwi_derivatives = [
+        "_adc", "_fa", "_tracew", "_colfa", "_expadc",
+        " adc", " fa", " tracew", " colfa", " expadc",
+        "adc", "fa", "tracew", "colfa", "expadc",
+    ]
+    for deriv in dwi_derivatives:
+        if deriv in s:
+            return "dwi_derivative"
+
     for label, pats in BIDS_PATTERNS.items():
         if any(p in s for p in pats):
             return label
+
     return "unknown"
 
 
@@ -174,9 +243,10 @@ def classify_fieldmap_type(img_list: list) -> str:
 BIDS_CONTAINER = {
     "T1w":"anat", "T2w":"anat", "FLAIR":"anat",
     "MTw":"anat", "PDw":"anat",
-    "scout":"anat", "report":"anat", "refscan":"anat",
-    "bold":"func", "SBRef":"func",
+    "scout":"anat", "report":"anat",
+    "bold":"func", "SBRef":"func", "physio":"func",
     "dwi":"dwi",
+    "dwi_derivative":"derivatives",  # DWI derivatives go to derivatives folder
     "fmap":"fmap",
 }
 def modality_to_container(mod: str) -> str:
@@ -228,8 +298,9 @@ def scan_dicoms_long(
     file_list = []
     for root, _dirs, files in os.walk(root_dir):
         for fname in files:
-            if fname.lower().endswith(DICOM_EXTS):
-                file_list.append(os.path.join(root, fname))
+            fpath = os.path.join(root, fname)
+            if is_dicom_file(fpath):
+                file_list.append(fpath)
 
     def _read_one(fpath: str):
         try:
@@ -336,7 +407,7 @@ def scan_dicoms_long(
                 fine_mod = mods[subj_key][folder][(series, uid)]
                 img3 = imgtypes[subj_key][folder].get((series, uid), "")
                 include = 1
-                if fine_mod in {"scout", "report"} or "physlog" in series.lower():
+                if fine_mod in {"scout", "report", "physio"} or "physlog" in series.lower():
                     include = 0
                 # Do not consider image type when counting scout duplicates
                 rep_key = series if fine_mod == "scout" else (series, img3)
@@ -424,6 +495,33 @@ def scan_dicoms_long(
         df = pd.concat([df[~fmap_mask], fmap_df], ignore_index=True, sort=False)
 
     df.sort_values(["StudyDescription", "BIDS_name"], inplace=True)
+
+    # ------------------------------------------------------------------
+    # Proposed BIDS names
+    # ------------------------------------------------------------------
+    if load_bids_schema and SeriesInfo and build_preview_names:
+        try:
+            schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+            rows = []
+            idxs = []
+            for i, row in df.iterrows():
+                subj = str(row.get("BIDS_name", ""))
+                subj = subj[4:] if subj.lower().startswith("sub-") else subj
+                session = row.get("session") or None
+                modality = str(row.get("modality") or "")
+                sequence = str(row.get("sequence") or "")
+                rep = row.get("rep") or 1
+                rows.append(SeriesInfo(subj, session, modality, sequence, int(rep or 1), {}))
+                idxs.append(i)
+            for (series, dt, base), idx in zip(build_preview_names(rows, schema), idxs):
+                df.loc[idx, "proposed_datatype"] = dt
+                df.loc[idx, "proposed_basename"] = base
+                ext = ".tsv" if base.endswith("_physio") else ".nii.gz"
+                df.loc[idx, "Proposed BIDS name"] = f"{dt}/{base}{ext}" if base else ""
+        except Exception:
+            # Preview generation is best-effort; fall back silently if anything
+            # goes wrong so the inventory can still be written.
+            pass
 
     # optional TSV export
     if output_tsv:

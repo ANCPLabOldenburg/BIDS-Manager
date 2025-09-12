@@ -1,0 +1,136 @@
+#
+# Groups of related metadata fields
+#
+# Assumptions: never need disjunction of selectors
+# Assumptions: top-to-bottom overrides is sufficient logic
+
+---
+# Magnetoencephalography
+#
+# Note: "task" in entities identifies MEG data files and excludes calibration/crosstalk scans
+
+# Sidecar JSON (*_meg.json)
+MEGHardware:
+  selectors:
+    - datatype == "meg"
+    - '"task" in entities'
+    - suffix == "meg"
+  fields:
+    Manufacturer:
+      level: recommended
+      description_addendum: |
+        For MEG scanners, this must be one of:
+        `"CTF"`, `"Neuromag/Elekta/MEGIN"`, `"BTi/4D"`, `"KIT/Yokogawa"`,
+        `"ITAB"`, `"KRISS"`, `"Other"`.
+        The use of `"Elekta/Neuromag"` is
+        [DEPRECATED](SPEC_ROOT/common-principles.md#definitions).
+        Dataset curators SHOULD use `"Neuromag/Elekta/MEGIN"` instead.
+        See the [MEG Systems Appendix](SPEC_ROOT/appendices/meg-systems.md) for
+        preferred names.
+    ManufacturersModelName:
+      level: recommended
+      description_addendum: |
+        See the [MEG Systems Appendix](SPEC_ROOT/appendices/meg-systems.md) for
+        preferred names.
+    SoftwareVersions: recommended
+    DeviceSerialNumber: recommended
+
+MEGTaskInformation:
+  selectors:
+    - datatype == "meg"
+    - '"task" in entities'
+    - suffix == "meg"
+  fields:
+    TaskName:
+      level: required
+      description_addendum: |
+        A recommended convention is to name resting state task using labels
+        beginning with `rest`.
+    TaskDescription: recommended
+    Instructions:
+      level: recommended
+      description_addendum: |
+        This is especially important in context of resting state recordings and
+        distinguishing between eyes open and eyes closed paradigms.
+    CogAtlasID: recommended
+    CogPOID: recommended
+
+MEGInstitutionInformation:
+  selectors:
+    - datatype == "meg"
+    - '"task" in entities'
+    - suffix == "meg"
+  fields:
+    InstitutionName: recommended
+    InstitutionAddress: recommended
+    InstitutionalDepartmentName: recommended
+
+# Specific MEG fields MUST be present
+MEGRequired:
+  selectors:
+    - datatype == "meg"
+    - '"task" in entities'
+    - suffix == "meg"
+  fields:
+    SamplingFrequency:
+      level: required
+      description_addendum: |
+        The sampling frequency of data channels that deviate from the main sampling
+        frequency SHOULD be specified in the `channels.tsv` file.
+    PowerLineFrequency: required
+    DewarPosition: required
+    SoftwareFilters: required
+    DigitizedLandmarks: required
+    DigitizedHeadPoints: required
+
+# Specific MEG fields SHOULD be present
+MEGRecommended:
+  selectors:
+    - datatype == "meg"
+    - '"task" in entities'
+    - suffix == "meg"
+  fields:
+    MEGChannelCount: recommended
+    MEGREFChannelCount: recommended
+    EEGChannelCount: recommended
+    ECOGChannelCount: recommended
+    SEEGChannelCount: recommended
+    EOGChannelCount: recommended
+    ECGChannelCount: recommended
+    EMGChannelCount: recommended
+    MiscChannelCount: recommended
+    TriggerChannelCount: recommended
+    RecordingDuration: recommended
+    RecordingType: recommended
+    EpochLength:
+      level: optional
+      # Implemented in rules.sidecars.electrophys
+      level_addendum: recommended if RecordingType is "epoched"
+    ContinuousHeadLocalization: recommended
+    HeadCoilFrequency: recommended
+    MaxMovement: recommended
+    SubjectArtefactDescription: recommended
+    AssociatedEmptyRoom: recommended
+    HardwareFilters: recommended
+
+# Specific MEG fields MAY be present
+MEGOptional:
+  selectors:
+    - datatype == "meg"
+    - suffix == "meg"
+  fields:
+    ElectricalStimulation: optional
+    ElectricalStimulationParameters: optional
+
+# Specific EEG fields
+# NOTE: I'm not sure if "EEG is present" is enough to indicate simultaneous EEG/MEG.
+MEGwithEEG:
+  selectors:
+    - datatype == "meg"
+    - suffix == "meg"
+    - intersects(dataset.modalities, ["eeg"])
+  fields:
+    EEGPlacementScheme: optional
+    CapManufacturer: optional
+    CapManufacturersModelName: optional
+    EEGReference: optional

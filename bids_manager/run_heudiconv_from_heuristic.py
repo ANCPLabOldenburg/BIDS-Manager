@@ -16,8 +16,25 @@ import pandas as pd
 import re
 
 # Acceptable DICOM file extensions (lower case)
+# Some Siemens datasets omit file extensions; we therefore supplement the
+# extension check with a quick sniff of the header for the ``DICM`` tag.
 DICOM_EXTS = (".dcm", ".ima")
 
+
+def is_dicom_file(path: str) -> bool:
+    """Return ``True`` if *path* appears to be a DICOM file."""
+
+    name = Path(path).name.lower()
+    if name.endswith(DICOM_EXTS):
+        return True
+    if "." in name:
+        return False
+    try:
+        with open(path, "rb") as f:
+            f.seek(128)
+            return f.read(4) == b"DICM"
+    except Exception:
+        return False
 
 # ────────────────── helpers ──────────────────
 def load_sid_map(heur: Path) -> Dict[str, str]:
@@ -63,8 +80,9 @@ def physical_by_clean(raw_root: Path) -> Dict[str, str]:
 
 def detect_depth(folder: Path) -> int:
     """Minimum depth (#subdirs) from *folder* to any DICOM file."""
+
     for root, _dirs, files in os.walk(folder):
-        if any(f.lower().endswith(DICOM_EXTS) for f in files):
+        if any(is_dicom_file(os.path.join(root, f)) for f in files):
             rel = Path(root).relative_to(folder)
             return len(rel.parts)
     raise RuntimeError(f"No DICOMs under {folder}")
@@ -97,7 +115,8 @@ def heudi_cmd(raw_root: Path,
             "--overwrite",
         ]
 
-    template = f"{raw_root}/" + "{subject}/" + wild + "*.*"
+    # Use "*" instead of "*.*" so DICOMs without extensions are also matched
+    template = f"{raw_root}/" + "{subject}/" + wild + "*"
     subjects = [p or clean_name(raw_root.name) for p in phys_folders]
     return [
         "heudiconv",
