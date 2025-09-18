@@ -49,12 +49,12 @@ from pydicom.multival import MultiValue
 # proposed BIDS names directly in the TSV.  We guard the import to keep the
 # inventory script functional even if the renamer dependencies are missing.
 try:  # pragma: no cover - import errors simply disable preview generation
-    from .renaming.schema_renamer import (
+    from .schema_renamer import (
         load_bids_schema,
         SeriesInfo,
         build_preview_names,
     )
-    from .renaming.config import DEFAULT_SCHEMA_DIR
+    from .schema_config import DEFAULT_SCHEMA_DIR
 except Exception:  # pragma: no cover - best effort
     load_bids_schema = None  # type: ignore
     SeriesInfo = None  # type: ignore

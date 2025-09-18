@@ -18,20 +18,22 @@ import re
 
 # Import the same preview logic the GUI uses so heuristic names match preview
 try:
-    from .renaming.schema_renamer import (
+    from .schema_renamer import (
         load_bids_schema,
         SeriesInfo,
         build_preview_names,
     )
-    from .renaming.config import DEFAULT_SCHEMA_DIR
+    from .schema_config import DEFAULT_SCHEMA_DIR
 except Exception:
-    # Fallback for direct script execution
-    from renaming.schema_renamer import (  # type: ignore
+    # Fallback for direct script execution from a checkout. When the module is
+    # invoked via ``python build_heuristic_from_tsv.py`` the parent package is
+    # not initialised, so we import from the sibling modules directly.
+    from schema_renamer import (  # type: ignore
         load_bids_schema,
         SeriesInfo,
         build_preview_names,
     )
-    from renaming.config import DEFAULT_SCHEMA_DIR  # type: ignore
+    from schema_config import DEFAULT_SCHEMA_DIR  # type: ignore
 
 # -----------------------------------------------------------------------------
 # Configuration

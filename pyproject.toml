@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "0.1.4"
+version = "0.1.5"
 description = "GUI application to manage BIDS datasets"
 readme = "README.md"
 license = "MIT"
@@ -22,6 +22,7 @@ dependencies = [
     "pandas==2.3.1",
     "PyQt5==5.15.11",
     "PyQtWebEngine==5.15.7",
+    "PyYAML>=6.0",
     "heudiconv-ancp",
     "dcm2niix==1.0.20250506",
     "nibabel==5.3.2",
@@ -49,11 +50,15 @@ post-conv-renamer = "bids_manager.post_conv_renamer:main"
 fill-bids-ignore = "bids_manager.fill_bids_ignore:main"
 
 [tool.setuptools]
-packages = ["bids_manager", "bids_manager.renaming"]
+packages = ["bids_manager"]
 include-package-data = true
 
 [tool.setuptools.package-data]
 "bids_manager" = [
     "miscellaneous/images/*",
     "miscellaneous/schema/**/*",
+    "renaming/*.py",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

@@ -7,10 +7,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
+# ``PyYAML`` is a hard dependency for schema parsing.  Previous versions treated
+# it as optional which meant that users were silently running without any
+# schema-driven rules.  Raising an informative error keeps the behaviour
+# explicit and surfaces installation issues early.
 try:
     import yaml  # type: ignore
-except Exception:  # pragma: no cover
-    yaml = None
+except ImportError as exc:  # pragma: no cover - import error depends on env
+    raise ImportError(
+        "PyYAML is required for BIDS schema parsing. Install bids-manager with"
+        " the bundled dependencies or add PyYAML to your environment."
+    ) from exc
 
 
 # ----------------------------- Utilities -----------------------------
@@ -202,6 +209,8 @@ def _replace_stem_keep_ext(src: Path, new_basename: str) -> Path:
 
 
 def _iter_schema_files(schema_dir: Path) -> Iterable[Path]:
+    """Yield schema definition files shipped with the BIDS specification."""
+
     for p in schema_dir.rglob("*"):
         if p.suffix.lower() in (".json", ".yaml", ".yml") and p.is_file():
             yield p
@@ -216,13 +225,12 @@ class SchemaInfo:
 
 
 def _load_json_or_yaml(p: Path) -> Optional[dict]:
+    """Return the parsed representation of a JSON or YAML document."""
+
     try:
         if p.suffix.lower() == ".json":
             return json.loads(p.read_text(encoding="utf-8"))
-        else:
-            if yaml is None:
-                return None
-            return yaml.safe_load(p.read_text(encoding="utf-8"))
+        return yaml.safe_load(p.read_text(encoding="utf-8"))
     except Exception:
         return None
 
@@ -266,9 +274,24 @@ def _harvest_suffix_rules(obj: Union[dict, list], current_datatype: Optional[str
 
 
 def load_bids_schema(schema_dir: Union[str, Path]) -> SchemaInfo:
+    """Load and aggregate the BIDS schema shipped with the package.
+
+    Parameters
+    ----------
+    schema_dir:
+        Directory containing the ``objects``/``rules`` folders from the official
+        BIDS schema distribution.
+    """
+
     schema_dir = Path(schema_dir)
+    if not schema_dir.exists():
+        raise FileNotFoundError(
+            f"BIDS schema directory '{schema_dir}' does not exist."
+        )
+
     suffix_requirements: Dict[str, set] = {}
     suffix_to_datatypes: Dict[str, set] = {}
+    processed_any = False
 
     for p in _iter_schema_files(schema_dir):
         data = _load_json_or_yaml(p)
@@ -276,6 +299,12 @@ def load_bids_schema(schema_dir: Union[str, Path]) -> SchemaInfo:
             continue
         _harvest_suffix_rules(data, current_datatype=None,
                               out_req=suffix_requirements, out_dt=suffix_to_datatypes)
+        processed_any = True
+
+    if not processed_any:
+        raise RuntimeError(
+            "No schema files could be parsed. Ensure the packaged schema is intact."
+        )
 
     fallback_dt = {
         "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
@@ -760,3 +789,13 @@ def apply_post_conversion_rename(
         shutil.move(str(old), str(new))
 
     return rename_map
+
+
+__all__ = [
+    "SchemaInfo",
+    "SeriesInfo",
+    "load_bids_schema",
+    "build_preview_names",
+    "propose_bids_basename",
+    "apply_post_conversion_rename",
+]

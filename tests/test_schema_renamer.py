@@ -1,13 +1,13 @@
 import shutil
 from pathlib import Path
 
-from bids_manager.renaming.schema_renamer import (
+from bids_manager.schema_renamer import (
     load_bids_schema,
     SeriesInfo,
     build_preview_names,
     apply_post_conversion_rename,
 )
-from bids_manager.renaming.config import DEFAULT_SCHEMA_DIR, DERIVATIVES_PIPELINE_NAME
+from bids_manager.schema_config import DEFAULT_SCHEMA_DIR, DERIVATIVES_PIPELINE_NAME
 from bids_manager.dicom_inventory import guess_modality
 
 
