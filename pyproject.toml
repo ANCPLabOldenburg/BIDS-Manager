@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "0.1.6"
+version = "0.2.0"
 description = "GUI application to manage BIDS datasets"
 readme = "README.md"
 license = "MIT"
@@ -25,11 +25,15 @@ dependencies = [
     "PyYAML>=6.0",
     "heudiconv-ancp",
     "dcm2niix==1.0.20250506",
+    "bidsphysio==3.0",
     "nibabel==5.3.2",
     "numpy==2.2.6",
     "psutil==7.0.0",
     "matplotlib==3.10.3",
     "joblib==1.4.2",
+    "scikit-image==0.24.0",
+    "pyqtgraph==0.13.7",
+    "PyOpenGL==3.1.7",
 ]
 
 [project.optional-dependencies]

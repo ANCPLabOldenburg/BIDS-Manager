@@ -6,7 +6,7 @@ Simple heuristic that:
 1. **Keeps every sequence**, including SBRef.
 2. **Uses the raw SeriesDescription** (cleaned) as the filename stem – no
    added `rep-*`, task, or echo logic.
-3. Skips only modalities listed in `SKIP_BY_DEFAULT` (`report`, `physio`).
+3. Skips only modalities listed in `SKIP_BY_DEFAULT` (`report`).
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ try:
         build_preview_names,
     )
     from .schema_config import DEFAULT_SCHEMA_DIR
+    from ._study_utils import normalize_study_name
 except Exception:
     # Fallback for direct script execution from a checkout. When the module is
     # invoked via ``python build_heuristic_from_tsv.py`` the parent package is
@@ -34,11 +35,12 @@ except Exception:
         build_preview_names,
     )
     from schema_config import DEFAULT_SCHEMA_DIR  # type: ignore
+    from _study_utils import normalize_study_name  # type: ignore
 
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-SKIP_BY_DEFAULT = {"report", "physio"}
+SKIP_BY_DEFAULT = {"report"}
 
 # -----------------------------------------------------------------------------
 # Helper functions
@@ -444,6 +446,11 @@ def generate(tsv: Path, out_dir: Path, only_last_repeated: bool = False) -> None
     """
 
     df = pd.read_csv(tsv, sep="\t", keep_default_na=False)
+
+    if "StudyDescription" in df.columns:
+        # Collapse duplicate tokens (``study_study`` → ``study``) before grouping
+        # by study so each heuristic is generated only once per logical study.
+        df["StudyDescription"] = df["StudyDescription"].apply(normalize_study_name)
 
     # Drop rows with unwanted modalities
     mask = df.modality.isin(SKIP_BY_DEFAULT)

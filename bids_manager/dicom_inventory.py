@@ -16,7 +16,7 @@ Why you want this
 
 Output columns (ordered as they appear)
 ---------------------------------------
-subject        – GivenName shown only on the first row of each subject block
+subject        – GivenName copied to every row for easier downstream processing
 BIDS_name      – auto-assigned `sub-001`, `sub-002`, … (same GivenName → same ID)
 session        – `ses-<label>` if exactly one unique session tag is present in
                  that folder, otherwise blank
@@ -44,6 +44,8 @@ from joblib import Parallel, delayed
 import pandas as pd
 import pydicom
 from pydicom.multival import MultiValue
+
+from ._study_utils import normalize_study_name
 
 # Preview name helpers – loaded lazily so ``scan_dicoms_long`` can store
 # proposed BIDS names directly in the TSV.  We guard the import to keep the
@@ -319,7 +321,8 @@ def scan_dicoms_long(
             or getattr(ds, "StudyName", None)
             or "n/a"
         )
-        study = str(study).strip()
+        # Normalize to remove repeated words (``study_study`` → ``study``).
+        study = normalize_study_name(study)
         subj_key = f"{subj}||{study}"
         rel = os.path.relpath(root, root_dir)
         folder = root_dir.name if rel == "." else rel
@@ -395,7 +398,7 @@ def scan_dicoms_long(
     # PASS 3: build DataFrame rows
     rows = []
     for subj_key in sorted(counts):
-        first_row = True
+        given_name = demo[subj_key]["GivenName"]
         for folder in sorted(counts[subj_key]):
 
             # decide session label for this folder
@@ -407,13 +410,16 @@ def scan_dicoms_long(
                 fine_mod = mods[subj_key][folder][(series, uid)]
                 img3 = imgtypes[subj_key][folder].get((series, uid), "")
                 include = 1
-                if fine_mod in {"scout", "report", "physio"} or "physlog" in series.lower():
+                if fine_mod in {"scout", "report"}:
                     include = 0
                 # Do not consider image type when counting scout duplicates
                 rep_key = series if fine_mod == "scout" else (series, img3)
                 rep_counter[rep_key] += 1
                 rows.append({
-                    "subject"       : demo[subj_key]["GivenName"] if first_row else "",
+                    # Store the human readable subject name on every row so
+                    # downstream tools no longer need to search for the first
+                    # populated entry in each block.
+                    "subject"       : given_name,
                     "BIDS_name"     : bids_map[subj_key],
                     "session"       : session,
                     "source_folder" : folder,
@@ -428,7 +434,6 @@ def scan_dicoms_long(
                     "n_files"       : n_files,
                     **demo[subj_key],                                # demographics
                 })
-                first_row = False
 
     # Final column order
     columns = [
@@ -494,7 +499,10 @@ def scan_dicoms_long(
 
         df = pd.concat([df[~fmap_mask], fmap_df], ignore_index=True, sort=False)
 
-    df.sort_values(["StudyDescription", "BIDS_name"], inplace=True)
+    # Present the inventory in a predictable order that matches the
+    # expectations of the scanned data viewer: BIDS identifier first, followed
+    # by the human readable subject name, session, and acquisition time.
+    df.sort_values(["BIDS_name", "subject", "session", "acq_time"], inplace=True)
 
     # ------------------------------------------------------------------
     # Proposed BIDS names

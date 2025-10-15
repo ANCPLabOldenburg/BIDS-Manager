@@ -7,6 +7,7 @@ import re
 import shutil
 import pandas as pd
 import numpy as np
+from decimal import Decimal, InvalidOperation
 try:  # NumPy exposes structured-array helpers from ``numpy.lib``
     from numpy.lib import recfunctions as rfn
 except Exception:  # pragma: no cover - extremely old NumPy releases
@@ -62,16 +63,33 @@ except ModuleNotFoundError as exc:
         raise
 from pathlib import Path
 from collections import defaultdict
+from functools import cmp_to_key
+from typing import Any, Callable, Optional, Sequence
+from pandas.core.tools.datetimes import guess_datetime_format
+from dataclasses import dataclass
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog,
-    QTableWidget, QTableWidgetItem, QGroupBox, QGridLayout,
+    QTableWidget, QTableWidgetItem, QTableWidgetSelectionRange, QGroupBox, QGridLayout,
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget)
+    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea
+)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import Qt, QModelIndex, QTimer, QProcess, QUrl
+from PyQt5.QtCore import (
+    Qt,
+    QModelIndex,
+    QTimer,
+    QProcess,
+    QUrl,
+    QRect,
+    QPoint,
+    QObject,
+    QThread,
+    pyqtSignal,
+    pyqtSlot,
+)
 from PyQt5.QtGui import (
     QPalette,
     QColor,
@@ -83,11 +101,14 @@ from PyQt5.QtGui import (
     QIcon,
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 import logging  # debug logging
 import signal
 import random
 import string
+import math
 from .schema_config import (
     DEFAULT_SCHEMA_DIR,
     ENABLE_SCHEMA_RENAMER,
@@ -101,11 +122,30 @@ from .schema_renamer import (
     build_preview_names,
     apply_post_conversion_rename,
 )
+from ._study_utils import normalize_study_name
 try:
     import psutil
     HAS_PSUTIL = True
 except Exception:  # pragma: no cover - optional dependency
     HAS_PSUTIL = False
+
+try:  # Surface reconstruction for the 3-D viewer (optional dependency)
+    from skimage import measure as sk_measure
+    HAS_SKIMAGE = True
+except Exception:  # pragma: no cover - optional dependency
+    sk_measure = None
+    HAS_SKIMAGE = False
+
+try:  # Hardware-accelerated 3-D rendering for volumes and surfaces
+    import pyqtgraph as pg
+    import pyqtgraph.opengl as gl
+    from pyqtgraph.opengl import shaders as gl_shaders
+    HAS_PYQTGRAPH = True
+except Exception:  # pragma: no cover - optional dependency
+    pg = None
+    gl = None
+    gl_shaders = None
+    HAS_PYQTGRAPH = False
 
 # Paths to images bundled with the application
 LOGO_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" / "Logo.png"
@@ -116,6 +156,195 @@ JOCHEM_IMG_FILE = Path(__file__).resolve().parent / "miscellaneous" / "images" /
 
 # Directory used to store persistent user preferences
 PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
+
+
+class _ConflictScannerWorker(QObject):
+    """Run the conflict detection scan in a background thread."""
+
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, root_dir: str, finder: Callable[[str], dict]):
+        super().__init__()
+        self._root_dir = root_dir
+        self._finder = finder
+
+    @pyqtSlot()
+    def run(self) -> None:
+        """Execute the slow directory walk outside the GUI thread."""
+
+        try:
+            conflicts = self._finder(self._root_dir)
+        except Exception as exc:  # pragma: no cover - runtime safety
+            # Forward the error message back to the GUI thread so the caller
+            # can decide how to handle it without freezing the interface.
+            self.failed.emit(str(exc))
+        else:
+            self.finished.emit(conflicts)
+
+
+def _create_directional_light_shader():
+    """Build a lightweight directional lighting shader for ``GLMeshItem``.
+
+    PyQtGraph ships with a fixed light direction inside the built-in
+    ``'shaded'`` program which makes the surface difficult to interpret when the
+    user wants to change the perceived light source.  Creating our own shader
+    allows us to expose the light direction and intensity as uniforms that can
+    be updated on the fly without recompiling the OpenGL program each time the
+    sliders move.
+    """
+
+    if not HAS_PYQTGRAPH or gl is None:
+        return None
+
+    shader_mod = getattr(gl, "shaders", None)
+    if shader_mod is None:
+        return None
+
+    try:
+        vertex = shader_mod.VertexShader(
+            """
+            varying vec3 normal;
+            void main() {
+                normal = normalize(gl_NormalMatrix * gl_Normal);
+                gl_FrontColor = gl_Color;
+                gl_BackColor = gl_Color;
+                gl_Position = ftransform();
+            }
+            """
+        )
+        fragment = shader_mod.FragmentShader(
+            """
+            uniform float lightDir[3];
+            uniform float lightParams[2];
+            varying vec3 normal;
+            void main() {
+                vec3 norm = normalize(normal);
+                vec3 lightVec = normalize(vec3(lightDir[0], lightDir[1], lightDir[2]));
+                float diffuse = max(dot(norm, lightVec), 0.0) * lightParams[0];
+                float ambient = lightParams[1];
+                float lighting = clamp(ambient + diffuse, 0.0, 1.0);
+                vec4 colour = gl_Color;
+                colour.rgb *= lighting;
+                gl_FragColor = colour;
+            }
+            """
+        )
+    except Exception:  # pragma: no cover - shader compilation errors are runtime only
+        return None
+
+    return shader_mod.ShaderProgram(
+        None,
+        [vertex, fragment],
+        uniforms={
+            "lightDir": [0.0, 0.0, 1.0],
+            # ``lightParams`` stores [diffuse_scale, ambient_strength].  We keep
+            # a modest ambient component so that the mesh never becomes entirely
+            # black when the light points away from the surface.
+            "lightParams": [1.0, 0.35],
+        },
+    )
+
+
+def _create_flat_color_shader():
+    """Return an unlit shader for meshes when lighting is disabled."""
+
+    if not HAS_PYQTGRAPH or gl is None:
+        return None
+
+    shader_mod = getattr(gl, "shaders", None)
+    if shader_mod is None:
+        return None
+
+    try:
+        vertex = shader_mod.VertexShader(
+            """
+            void main() {
+                gl_FrontColor = gl_Color;
+                gl_BackColor = gl_Color;
+                gl_Position = ftransform();
+            }
+            """
+        )
+        fragment = shader_mod.FragmentShader(
+            """
+            void main() {
+                gl_FragColor = gl_Color;
+            }
+            """
+        )
+    except Exception:  # pragma: no cover - shader compilation errors occur at runtime
+        return None
+
+    return shader_mod.ShaderProgram(None, [vertex, fragment], uniforms={})
+
+
+_SLICE_ORIENTATIONS = (
+    ("sagittal", 0, "Left", "Right"),
+    ("coronal", 1, "Posterior", "Anterior"),
+    ("axial", 2, "Inferior", "Superior"),
+)
+
+
+if HAS_PYQTGRAPH:
+
+    class _AdjustableAxisItem(gl.GLAxisItem):
+        """Axis item with configurable line width for better visibility."""
+
+        def __init__(self, *args, **kwargs):
+            self._line_width = 2.0
+            super().__init__(*args, **kwargs)
+
+        def setLineWidth(self, width: float) -> None:
+            self._line_width = max(1.0, float(width))
+            self.update()
+
+        def paint(self):  # pragma: no cover - requires OpenGL context
+            from OpenGL.GL import (
+                GL_LINES,
+                GL_LINE_SMOOTH,
+                GL_LINE_SMOOTH_HINT,
+                GL_NICEST,
+                glBegin,
+                glColor4f,
+                glEnable,
+                glEnd,
+                glHint,
+                glLineWidth,
+                glVertex3f,
+            )
+
+            self.setupGLState()
+            if self.antialias:
+                glEnable(GL_LINE_SMOOTH)
+                glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
+            glLineWidth(self._line_width)
+            glBegin(GL_LINES)
+            x, y, z = self.size()
+            glColor4f(0, 1, 0, 0.6)
+            glVertex3f(0, 0, 0)
+            glVertex3f(0, 0, z)
+            glColor4f(1, 1, 0, 0.6)
+            glVertex3f(0, 0, 0)
+            glVertex3f(0, y, 0)
+            glColor4f(0, 0, 1, 0.6)
+            glVertex3f(0, 0, 0)
+            glVertex3f(x, 0, 0)
+            glEnd()
+
+
+@dataclass
+class _SliceControl:
+    """Stores widgets controlling a single anatomical slicer."""
+
+    checkbox: QCheckBox
+    min_slider: QSlider
+    max_slider: QSlider
+    min_value: QLabel
+    max_value: QLabel
+    axis: int
+    negative_name: str
+    positive_name: str
 
 
 class _AutoUpdateLabel(QLabel):
@@ -224,6 +453,39 @@ def _get_ext(path: Path) -> str:
     return path.suffix.lower()
 
 
+def _style_axes_3d(axis, fg_color: str, axis_bg: str) -> None:
+    """Apply consistent styling to Matplotlib 3-D axes."""
+
+    axis.set_facecolor(axis_bg)
+    base = axis.get_facecolor()
+    axis.xaxis.set_pane_color((*base[:3], 0.15))
+    axis.yaxis.set_pane_color((*base[:3], 0.15))
+    axis.zaxis.set_pane_color((*base[:3], 0.15))
+    for ax in (axis.xaxis, axis.yaxis, axis.zaxis):
+        ax.label.set_color(fg_color)
+        ax.set_tick_params(colors=fg_color)
+    axis.grid(False)
+
+
+GIFTI_SURFACE_SUFFIXES = (".surf.gii", ".surf.gii.gz", ".gii", ".gii.gz")
+FREESURFER_SURFACE_SUFFIXES = (
+    ".pial",
+    ".pial.gz",
+    ".white",
+    ".white.gz",
+    ".inflated",
+    ".inflated.gz",
+    ".sphere",
+    ".sphere.gz",
+    ".orig",
+    ".orig.gz",
+    ".smoothwm",
+    ".smoothwm.gz",
+    ".midthickness",
+    ".midthickness.gz",
+)
+
+
 def _dedup_parts(*parts: str) -> str:
     """Return underscore-joined parts with consecutive repeats removed."""
     # ``parts`` may contain elements that themselves contain underscores.  The
@@ -239,8 +501,10 @@ def _dedup_parts(*parts: str) -> str:
 
 
 def _safe_stem(text: str) -> str:
-    """Return filename-friendly version of ``text``."""
-    return re.sub(r"[^0-9A-Za-z_-]+", "_", text.strip()).strip("_")
+    """Return filename-friendly version of ``text`` used for study folders."""
+
+    cleaned = normalize_study_name(text)
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", cleaned).strip("_")
 
 
 def _format_subject_id(num: int) -> str:
@@ -280,6 +544,589 @@ def _next_numeric_id(used: set[str]) -> str:
         if candidate not in used:
             return candidate
         nxt += 1
+
+
+class AutoFillTableWidget(QTableWidget):
+    """``QTableWidget`` with an Excel-like autofill handle.
+
+    The widget exposes a small square in the bottom-right corner of the current
+    selection.  Dragging this handle extends the selection and automatically
+    fills the new cells either by cloning the original content or by continuing
+    simple sequences (numeric, datetime, or text with trailing digits).
+    """
+
+    HANDLE_SIZE = 8  # Square size in device pixels
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._handle_rect = QRect()
+        self._autofill_active = False
+        self._autofill_origin_range: Optional[QTableWidgetSelectionRange] = None
+        self._autofill_current_range: Optional[QTableWidgetSelectionRange] = None
+        # Whenever the selection changes we repaint so the handle follows it.
+        self.itemSelectionChanged.connect(self._refresh_handle)
+
+    # ------------------------------------------------------------------
+    # Painting utilities
+    def _index_is_editable(self, row: int, column: int) -> bool:
+        """Return ``True`` when the ``(row, column)`` cell can be edited."""
+
+        model = self.model()
+        index = model.index(row, column)
+        if not index.isValid():
+            return False
+        flags = model.flags(index)
+        return bool(flags & Qt.ItemIsEditable)
+
+    def _range_is_editable(
+        self, rng: Optional[QTableWidgetSelectionRange]
+    ) -> bool:
+        """Return ``True`` when *all* cells in ``rng`` expose the edit flag."""
+
+        if rng is None:
+            return False
+        for row in range(rng.topRow(), rng.bottomRow() + 1):
+            for col in range(rng.leftColumn(), rng.rightColumn() + 1):
+                if not self._index_is_editable(row, col):
+                    return False
+        return True
+
+    def _clamp_to_editable(
+        self,
+        origin: QTableWidgetSelectionRange,
+        candidate: QTableWidgetSelectionRange,
+    ) -> QTableWidgetSelectionRange:
+        """Restrict ``candidate`` so autofill never crosses non-editable cells."""
+
+        # Limit horizontal growth by checking each additional column in order.
+        max_right = origin.rightColumn()
+        if candidate.rightColumn() > max_right:
+            for col in range(origin.rightColumn() + 1, candidate.rightColumn() + 1):
+                if all(
+                    self._index_is_editable(row, col)
+                    for row in range(origin.topRow(), origin.bottomRow() + 1)
+                ):
+                    max_right = col
+                else:
+                    break
+
+        # Limit vertical growth by checking each extra row with the approved columns.
+        max_bottom = origin.bottomRow()
+        if candidate.bottomRow() > max_bottom:
+            for row in range(origin.bottomRow() + 1, candidate.bottomRow() + 1):
+                if all(
+                    self._index_is_editable(row, col)
+                    for col in range(origin.leftColumn(), max_right + 1)
+                ):
+                    max_bottom = row
+                else:
+                    break
+
+        if (
+            max_right == origin.rightColumn()
+            and max_bottom == origin.bottomRow()
+        ):
+            return origin
+
+        return QTableWidgetSelectionRange(
+            origin.topRow(),
+            origin.leftColumn(),
+            max_bottom,
+            max_right,
+        )
+
+    def _refresh_handle(self) -> None:
+        """Trigger a repaint so the autofill handle reflects the selection."""
+
+        self._handle_rect = QRect()
+        self.viewport().update()
+
+    def _current_selection_range(self) -> Optional[QTableWidgetSelectionRange]:
+        """Return the single active selection range (if any)."""
+
+        ranges = self.selectedRanges()
+        if len(ranges) != 1:
+            return None
+        return ranges[0]
+
+    def paintEvent(self, event):  # noqa: D401 - Qt override
+        super().paintEvent(event)
+
+        rng = self._current_selection_range()
+        if not self._range_is_editable(rng):
+            self._handle_rect = QRect()
+            return
+
+        model_index = self.model().index(rng.bottomRow(), rng.rightColumn())
+        rect = self.visualRect(model_index)
+        if not rect.isValid():
+            self._handle_rect = QRect()
+            return
+
+        size = self.HANDLE_SIZE
+        self._handle_rect = QRect(
+            rect.right() - size + 1,
+            rect.bottom() - size + 1,
+            size,
+            size,
+        )
+
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.fillRect(self._handle_rect, self.palette().highlight())
+        border = QPen(self.palette().color(QPalette.Dark))
+        painter.setPen(border)
+        painter.drawRect(self._handle_rect)
+        painter.end()
+
+    # ------------------------------------------------------------------
+    # Mouse interaction handling
+    def mousePressEvent(self, event):  # noqa: D401 - Qt override
+        if (
+            event.button() == Qt.LeftButton
+            and self._handle_rect.contains(event.pos())
+            and self._current_selection_range() is not None
+        ):
+            self._autofill_active = True
+            self._autofill_origin_range = self._current_selection_range()
+            self._autofill_current_range = self._autofill_origin_range
+            self.viewport().setCursor(Qt.SizeAllCursor)
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # noqa: D401 - Qt override
+        if self._autofill_active:
+            new_range = self._compute_drag_range(event.pos())
+            if new_range is not None:
+                self._autofill_current_range = new_range
+                # Replace the selection with the preview range so the user sees
+                # the future extent of the autofill before releasing the mouse.
+                self.blockSignals(True)
+                self.clearSelection()
+                self.setRangeSelected(new_range, True)
+                self.blockSignals(False)
+                self.viewport().update()
+            event.accept()
+            return
+
+        if self._handle_rect.contains(event.pos()):
+            self.viewport().setCursor(Qt.CrossCursor)
+        else:
+            self.viewport().unsetCursor()
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):  # noqa: D401 - Qt override
+        if self._autofill_active and event.button() == Qt.LeftButton:
+            try:
+                self._finish_autofill()
+            finally:
+                self._autofill_active = False
+                self.viewport().unsetCursor()
+                self._autofill_origin_range = None
+                self._autofill_current_range = None
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
+
+    def _compute_drag_range(self, pos: QPoint) -> Optional[QTableWidgetSelectionRange]:
+        """Return the preview range while dragging the autofill handle."""
+
+        if self._autofill_origin_range is None:
+            return None
+
+        origin = self._autofill_origin_range
+        row = self.rowAt(pos.y())
+        col = self.columnAt(pos.x())
+        if row < 0 or col < 0:
+            return origin
+
+        # Only allow extending outward from the original bottom/right edge.
+        if row < origin.bottomRow():
+            row = origin.bottomRow()
+        if col < origin.rightColumn():
+            col = origin.rightColumn()
+
+        if row == origin.bottomRow() and col == origin.rightColumn():
+            return origin
+
+        candidate = QTableWidgetSelectionRange(
+            origin.topRow(),
+            origin.leftColumn(),
+            row,
+            col,
+        )
+
+        return self._clamp_to_editable(origin, candidate)
+
+    # ------------------------------------------------------------------
+    # Autofill logic
+    def _finish_autofill(self) -> None:
+        """Apply the autofill operation once the user releases the mouse."""
+
+        if self._autofill_origin_range is None:
+            return
+
+        final_range = self._autofill_current_range or self._autofill_origin_range
+        origin = self._autofill_origin_range
+
+        if (
+            final_range.bottomRow() == origin.bottomRow()
+            and final_range.rightColumn() == origin.rightColumn()
+        ):
+            # Nothing changed; restore the original selection highlight.
+            self.blockSignals(True)
+            self.clearSelection()
+            self.setRangeSelected(origin, True)
+            self.blockSignals(False)
+            self.viewport().update()
+            return
+
+        self._apply_autofill(origin, final_range)
+
+        # Keep the extended range selected after the fill to match spreadsheet UX.
+        self.blockSignals(True)
+        self.clearSelection()
+        self.setRangeSelected(final_range, True)
+        self.blockSignals(False)
+        self.viewport().update()
+
+    def _apply_autofill(
+        self,
+        origin: QTableWidgetSelectionRange,
+        target: QTableWidgetSelectionRange,
+    ) -> None:
+        """Populate ``target`` based on ``origin`` and the autofill heuristics."""
+
+        extend_down = target.bottomRow() > origin.bottomRow()
+        extend_right = target.rightColumn() > origin.rightColumn()
+
+        if extend_right:
+            self._fill_right(origin, target.rightColumn())
+
+        if extend_down:
+            base_right = target.rightColumn() if extend_right else origin.rightColumn()
+            base_range = QTableWidgetSelectionRange(
+                origin.topRow(),
+                origin.leftColumn(),
+                origin.bottomRow(),
+                base_right,
+            )
+            self._fill_down(base_range, target.bottomRow())
+
+    def _fill_right(self, base: QTableWidgetSelectionRange, target_right: int) -> None:
+        """Extend ``base`` horizontally until ``target_right`` inclusive."""
+
+        extra = target_right - base.rightColumn()
+        if extra <= 0:
+            return
+
+        for row in range(base.topRow(), base.bottomRow() + 1):
+            values = [
+                self._get_item_text(row, col)
+                for col in range(base.leftColumn(), base.rightColumn() + 1)
+            ]
+            new_values = self._extend_series(values, extra)
+            for offset, value in enumerate(new_values, start=1):
+                self._set_item_text(row, base.rightColumn() + offset, value)
+
+    def _fill_down(self, base: QTableWidgetSelectionRange, target_bottom: int) -> None:
+        """Extend ``base`` vertically until ``target_bottom`` inclusive."""
+
+        extra = target_bottom - base.bottomRow()
+        if extra <= 0:
+            return
+
+        for col in range(base.leftColumn(), base.rightColumn() + 1):
+            values = [
+                self._get_item_text(row, col)
+                for row in range(base.topRow(), base.bottomRow() + 1)
+            ]
+            new_values = self._extend_series(values, extra)
+            for offset, value in enumerate(new_values, start=1):
+                self._set_item_text(base.bottomRow() + offset, col, value)
+
+    # ------------------------------------------------------------------
+    # Sequence helpers
+    def _extend_series(self, values: list[str], steps: int) -> list[str]:
+        """Return ``steps`` new values continuing ``values`` when possible."""
+
+        if steps <= 0 or not values:
+            return []
+
+        numeric = self._extend_numeric_series(values, steps)
+        if numeric is not None:
+            return numeric
+
+        datelike = self._extend_datetime_series(values, steps)
+        if datelike is not None:
+            return datelike
+
+        patterned = self._extend_text_pattern_series(values, steps)
+        if patterned is not None:
+            return patterned
+
+        # Fallback: repeat the original pattern cyclically.
+        repeated = []
+        for i in range(steps):
+            repeated.append(values[i % len(values)])
+        return repeated
+
+    def _extend_numeric_series(
+        self,
+        values: list[str],
+        steps: int,
+    ) -> Optional[list[str]]:
+        """Continue integer/decimal sequences when the pattern is consistent."""
+
+        stripped = [v.strip() for v in values]
+        if any(not s for s in stripped):
+            return None
+
+        # Try integer sequences first so "01", "02" keep their padding.
+        if all(re.fullmatch(r"[+-]?\d+", s) for s in stripped):
+            numbers = [int(s) for s in stripped]
+            diff = 0
+            if len(numbers) >= 2:
+                diffs = [numbers[i] - numbers[i - 1] for i in range(1, len(numbers))]
+                if all(d == diffs[0] for d in diffs):
+                    diff = diffs[0]
+            pad_width = len(stripped[-1].lstrip("+-"))
+            has_leading_zero = stripped[-1].lstrip("+-").startswith("0") and pad_width > 1
+            force_plus = stripped[-1].startswith("+")
+            current = numbers[-1]
+            generated: list[str] = []
+            for _ in range(steps):
+                current += diff
+                text = str(current)
+                if has_leading_zero and current >= 0:
+                    text = f"{current:0{pad_width}d}"
+                if force_plus and not text.startswith("-") and not text.startswith("+"):
+                    text = "+" + text
+                generated.append(text)
+            return generated
+
+        # Fall back to decimals when integers are not appropriate.
+        decimals: list[Decimal] = []
+        decimal_places = 0
+        for s in stripped:
+            try:
+                dec = Decimal(s)
+            except InvalidOperation:
+                return None
+            decimals.append(dec)
+            if "." in s:
+                decimal_places = max(decimal_places, len(s.split(".")[-1]))
+
+        diff = Decimal(0)
+        if len(decimals) >= 2:
+            diffs = [decimals[i] - decimals[i - 1] for i in range(1, len(decimals))]
+            if all(d == diffs[0] for d in diffs):
+                diff = diffs[0]
+        current = decimals[-1]
+        generated = []
+        for _ in range(steps):
+            current += diff
+            if decimal_places:
+                generated.append(f"{current:.{decimal_places}f}")
+            else:
+                generated.append(str(current))
+        return generated
+
+    def _extend_datetime_series(
+        self,
+        values: list[str],
+        steps: int,
+    ) -> Optional[list[str]]:
+        """Continue datetime-like strings when intervals are consistent."""
+
+        try:
+            parsed = pd.to_datetime(values, errors="raise", infer_datetime_format=True)
+        except Exception:
+            return None
+
+        if parsed.isna().any():
+            return None
+
+        delta = pd.Timedelta(0)
+        if len(parsed) >= 2:
+            diffs = parsed.diff().iloc[1:]
+            if not diffs.empty and all(d == diffs.iloc[0] for d in diffs):
+                delta = diffs.iloc[0]
+
+        last = parsed.iloc[-1]
+        template = values[-1]
+        fmt = guess_datetime_format(template)
+        generated = []
+        current = last
+        for _ in range(steps):
+            current = current + delta
+            if fmt:
+                generated.append(current.strftime(fmt))
+            else:
+                if "T" in template:
+                    generated.append(current.isoformat())
+                elif ":" in template:
+                    generated.append(current.strftime("%Y-%m-%d %H:%M:%S"))
+                else:
+                    generated.append(current.date().isoformat())
+        return generated
+
+    def _extend_text_pattern_series(
+        self,
+        values: list[str],
+        steps: int,
+    ) -> Optional[list[str]]:
+        """Continue strings ending with digits (e.g. "scan01")."""
+
+        matches = [re.match(r"^(.*?)(\d+)$", v.strip()) for v in values]
+        if any(m is None for m in matches):
+            return None
+
+        prefixes = [m.group(1) for m in matches if m is not None]
+        numbers = [int(m.group(2)) for m in matches if m is not None]
+        if not prefixes or not numbers:
+            return None
+        if any(p != prefixes[0] for p in prefixes):
+            return None
+
+        diff = 0
+        if len(numbers) >= 2:
+            diffs = [numbers[i] - numbers[i - 1] for i in range(1, len(numbers))]
+            if all(d == diffs[0] for d in diffs):
+                diff = diffs[0]
+        pad_width = len(matches[-1].group(2)) if matches[-1] is not None else 0
+        current = numbers[-1]
+        prefix = prefixes[-1]
+        generated = []
+        for _ in range(steps):
+            current += diff
+            text = f"{current:0{pad_width}d}" if pad_width else str(current)
+            generated.append(f"{prefix}{text}")
+        return generated
+
+    # ------------------------------------------------------------------
+    # Cell helpers
+    def _get_item_text(self, row: int, column: int) -> str:
+        """Return the text stored at ``(row, column)`` (empty if missing)."""
+
+        item = self.item(row, column)
+        return item.text() if item is not None else ""
+
+    def _set_item_text(self, row: int, column: int, value: str) -> None:
+        """Assign ``value`` to ``(row, column)``, creating an item if required."""
+
+        item = self.item(row, column)
+        if item is None:
+            item = QTableWidgetItem()
+            self.setItem(row, column, item)
+        item.setText(value)
+
+
+class MappingSortDialog(QDialog):
+    """Dialog used to configure multi-level sorting for the metadata table."""
+
+    def __init__(self, columns: list[str], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Sort scanned metadata")
+        self._columns = columns
+        self._level_rows: list[tuple[QComboBox, QComboBox, QWidget]] = []
+
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            "Select the columns to sort by in priority order. "
+            "Each level is applied sequentially, just like Excel's multi-column sort."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self._levels_layout = QVBoxLayout()
+        layout.addLayout(self._levels_layout)
+
+        controls_layout = QHBoxLayout()
+        self._add_level_btn = QPushButton("Add level")
+        self._add_level_btn.clicked.connect(self._add_level)
+        self._remove_level_btn = QPushButton("Remove level")
+        self._remove_level_btn.clicked.connect(self._remove_level)
+        controls_layout.addWidget(self._add_level_btn)
+        controls_layout.addWidget(self._remove_level_btn)
+        controls_layout.addStretch()
+        layout.addLayout(controls_layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        # Always start with a single sorting level configured.
+        self._add_level()
+        self._update_button_state()
+
+    # ------------------------------------------------------------------
+    def _add_level(self) -> None:
+        """Append a new sorting level to the dialog."""
+
+        if len(self._level_rows) >= len(self._columns):
+            return
+
+        row_widget = QWidget(self)
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+
+        column_combo = QComboBox(row_widget)
+        column_combo.addItems(self._columns)
+        # Try to pre-select the first column that is not already used.
+        used = {combo.currentText() for combo, _order, _widget in self._level_rows}
+        for idx, name in enumerate(self._columns):
+            if name not in used:
+                column_combo.setCurrentIndex(idx)
+                break
+
+        order_combo = QComboBox(row_widget)
+        order_combo.addItems(["Ascending", "Descending"])
+
+        row_layout.addWidget(QLabel(f"Level {len(self._level_rows) + 1}", row_widget))
+        row_layout.addWidget(column_combo)
+        row_layout.addWidget(order_combo)
+        row_layout.addStretch()
+
+        self._levels_layout.addWidget(row_widget)
+        self._level_rows.append((column_combo, order_combo, row_widget))
+        self._update_button_state()
+
+    def _remove_level(self) -> None:
+        """Remove the last configured sorting level."""
+
+        if not self._level_rows:
+            return
+        combo, order_combo, widget = self._level_rows.pop()
+        combo.deleteLater()
+        order_combo.deleteLater()
+        widget.deleteLater()
+        self._update_button_state()
+
+    def _update_button_state(self) -> None:
+        """Enable/disable controls based on the current dialog state."""
+
+        self._add_level_btn.setEnabled(len(self._level_rows) < len(self._columns))
+        self._remove_level_btn.setEnabled(len(self._level_rows) > 1)
+
+    def sort_instructions(self) -> list[tuple[str, bool]]:
+        """Return the configured sorting hierarchy as ``(column, ascending)``."""
+
+        instructions: list[tuple[str, bool]] = []
+        seen: set[str] = set()
+        for column_combo, order_combo, _widget in self._level_rows:
+            column = column_combo.currentText()
+            if not column or column in seen:
+                continue
+            ascending = order_combo.currentText() == "Ascending"
+            instructions.append((column, ascending))
+            seen.add(column)
+        return instructions
 
 
 class SubjectDelegate(QStyledItemDelegate):
@@ -359,11 +1206,20 @@ class BIDSManager(QMainWindow):
         self.existing_used = {}
         self.use_bids_names = True
 
+        # Flag used to skip expensive updates while the mapping table is being
+        # populated programmatically.  ``QTableWidget`` emits ``itemChanged``
+        # signals even when values are assigned in code, so we guard callbacks
+        # that rebuild caches with this boolean.
+        self._loading_mapping_table = False
+
         # Async process handles for inventory and conversion steps
         self.inventory_process = None  # QProcess for dicom_inventory
         self.conv_process = None       # QProcess for the conversion pipeline
         self.conv_stage = 0            # Tracks which step of the pipeline ran
         self.heurs_to_rename = []      # List of heuristics pending rename
+        # Background worker used to detect mixed StudyInstanceUID folders
+        self._conflict_thread: Optional[QThread] = None
+        self._conflict_worker: Optional[_ConflictScannerWorker] = None
 
         # Root of the currently loaded BIDS dataset (None until loaded)
         self.bids_root = None
@@ -386,6 +1242,19 @@ class BIDSManager(QMainWindow):
             pass
         self.exclude_patterns_file = self.pref_dir / "exclude_patterns.tsv"
         self.theme_file = self.pref_dir / "theme.txt"
+        self.dpi_file = self.pref_dir / "dpi_scale.txt"
+        # Load any previously stored DPI preference so the UI scale persists
+        # across sessions.  Invalid or out-of-range values fall back to the
+        # default of 100%.
+        if self.dpi_file.exists():
+            try:
+                saved_dpi = int(self.dpi_file.read_text().strip())
+            except ValueError:
+                saved_dpi = None
+            except Exception:
+                saved_dpi = None
+            if saved_dpi is not None:
+                self.dpi_scale = max(50, min(200, saved_dpi))
         self.seq_dict_file = self.pref_dir / "sequence_dictionary.tsv"
 
         # Spinner for long-running tasks
@@ -746,6 +1615,12 @@ class BIDSManager(QMainWindow):
             self.dpi_scale = dlg.spin.value()
             self.dpi_btn.setText(f"DPI: {self.dpi_scale}%")
             self._apply_font_scale()
+            # Persist the user-selected DPI so the preference is restored next
+            # time the application starts.
+            try:
+                self.dpi_file.write_text(str(self.dpi_scale))
+            except Exception:
+                pass
 
     def _start_spinner(self, message: str) -> None:
         """Show animated spinner with *message* in the log group."""
@@ -893,7 +1768,15 @@ class BIDSManager(QMainWindow):
         # --- Scanned metadata tab ---
         metadata_tab = QWidget()
         metadata_layout = QVBoxLayout(metadata_tab)
-        self.mapping_table = QTableWidget()
+        metadata_toolbar = QHBoxLayout()
+        self.tsv_sort_button = QPushButton("Sort")
+        self.tsv_sort_button.setEnabled(False)
+        self.tsv_sort_button.setToolTip("Sort the scanned metadata table")
+        self.tsv_sort_button.clicked.connect(self._open_sort_dialog)
+        metadata_toolbar.addWidget(self.tsv_sort_button)
+        metadata_toolbar.addStretch()
+        metadata_layout.addLayout(metadata_toolbar)
+        self.mapping_table = AutoFillTableWidget()
         # Expose immutable DICOM metadata (StudyDescription, FamilyName,
         # PatientID) alongside the editable identifiers so users can see the
         # original values while editing BIDS-specific fields.
@@ -924,6 +1807,7 @@ class BIDSManager(QMainWindow):
         # column indices introduced above.
         self.mapping_table.setItemDelegateForColumn(5, SubjectDelegate(self.mapping_table))
         self.mapping_table.itemChanged.connect(self._updateDetectRepeatEnabled)
+        self.mapping_table.itemChanged.connect(self._onMappingItemChanged)
         btn_row_tsv = QHBoxLayout()
         self.tsv_load_button = QPushButton("Load TSV…")
         self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
@@ -1356,6 +2240,150 @@ class BIDSManager(QMainWindow):
             self.tsv_name_edit.setText(os.path.basename(path))
             self.loadMappingTable()
 
+    def _open_sort_dialog(self) -> None:
+        """Display a dialog allowing the user to configure a multi-level sort."""
+
+        if self.mapping_table.rowCount() <= 1:
+            QMessageBox.information(self, "Nothing to sort", "Load multiple rows before sorting.")
+            return
+
+        headers = []
+        for col in range(self.mapping_table.columnCount()):
+            header_item = self.mapping_table.horizontalHeaderItem(col)
+            if header_item is not None:
+                headers.append(header_item.text())
+
+        dialog = MappingSortDialog(headers, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        instructions = dialog.sort_instructions()
+        if not instructions:
+            QMessageBox.information(self, "No columns selected", "Select at least one column to sort by.")
+            return
+
+        self._apply_mapping_sort(instructions)
+
+    def _apply_mapping_sort(self, instructions: list[tuple[str, bool]]) -> None:
+        """Reorder the mapping table using ``instructions`` as sort keys."""
+
+        column_lookup: dict[str, int] = {}
+        for idx in range(self.mapping_table.columnCount()):
+            header_item = self.mapping_table.horizontalHeaderItem(idx)
+            if header_item is not None:
+                column_lookup[header_item.text()] = idx
+
+        # Translate column names back into indices, ignoring stale entries.
+        order = [(column_lookup.get(name), asc) for name, asc in instructions if name in column_lookup]
+        order = [(idx, asc) for idx, asc in order if idx is not None]
+        if not order:
+            return
+
+        row_count = self.mapping_table.rowCount()
+        col_count = self.mapping_table.columnCount()
+        rows: list[dict[str, Any]] = []
+        for row in range(row_count):
+            row_items: list[QTableWidgetItem] = []
+            sort_values: list[tuple[Any, ...]] = []
+            for col in range(col_count):
+                item = self.mapping_table.item(row, col)
+                if item is not None:
+                    cloned = item.clone()
+                else:
+                    cloned = QTableWidgetItem()
+                if col == 0:
+                    # Preserve checkbox behaviour in the include column.
+                    cloned.setFlags((cloned.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable)
+                    state = item.checkState() if item is not None else Qt.Unchecked
+                    cloned.setCheckState(state)
+                    sort_value = (0, 1 if state == Qt.Checked else 0)
+                else:
+                    text = item.text() if item is not None else ""
+                    sort_value = self._coerce_sort_value(text)
+                row_items.append(cloned)
+                sort_values.append(sort_value)
+            info = self.row_info[row] if row < len(self.row_info) else {}
+            rows.append(
+                {
+                    "items": row_items,
+                    "sort_values": sort_values,
+                    "row_info": info,
+                    "original_index": row,
+                }
+            )
+
+        def _compare(left: dict[str, Any], right: dict[str, Any]) -> int:
+            for col_idx, ascending in order:
+                l_val = left["sort_values"][col_idx]
+                r_val = right["sort_values"][col_idx]
+                if l_val == r_val:
+                    continue
+                if l_val < r_val:
+                    return -1 if ascending else 1
+                return 1 if ascending else -1
+            return 0
+
+        sorted_rows = sorted(rows, key=cmp_to_key(_compare))
+        new_order = [row["original_index"] for row in sorted_rows]
+        if new_order == list(range(len(sorted_rows))):
+            return  # Already sorted
+
+        previous_loading = self._loading_mapping_table
+        self._loading_mapping_table = True
+        self.mapping_table.blockSignals(True)
+        self.mapping_table.setRowCount(0)
+        for row_data in sorted_rows:
+            idx = self.mapping_table.rowCount()
+            self.mapping_table.insertRow(idx)
+            for col_idx, item in enumerate(row_data["items"]):
+                self.mapping_table.setItem(idx, col_idx, item)
+        self.mapping_table.blockSignals(False)
+        self._loading_mapping_table = previous_loading
+
+        # Keep auxiliary structures synchronised with the new row order.
+        self.row_info = [row["row_info"] for row in sorted_rows]
+        if self.inventory_df is not None:
+            try:
+                self.inventory_df = self.inventory_df.iloc[new_order].reset_index(drop=True)
+            except Exception:
+                pass
+
+        self._rebuild_lookup_maps()
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        self._updateMappingControlsEnabled()
+
+        if hasattr(self, "log_text"):
+            summary = ", ".join(
+                f"{name} ({'Ascending' if asc else 'Descending'})" for name, asc in instructions
+            )
+            self.log_text.append(f"Sorted metadata table by {summary}.")
+
+    @staticmethod
+    def _coerce_sort_value(value: str) -> tuple[Any, ...]:
+        """Return a comparable tuple for ``value`` suitable for sorting."""
+
+        text = value.strip()
+        if not text:
+            return (5, "")
+
+        try:
+            numeric = Decimal(text)
+            return (1, numeric)
+        except (InvalidOperation, ValueError):
+            pass
+
+        fmt = guess_datetime_format(text)
+        if fmt:
+            try:
+                dt_value = pd.to_datetime(text, errors="raise")
+                return (2, dt_value.to_pydatetime())
+            except Exception:
+                pass
+
+        lowered = text.lower()
+        return (3, lowered, text)
+
     def detachTSVWindow(self):
         """Detach the scanned data viewer into a separate window."""
         if getattr(self, "tsv_dialog", None):
@@ -1435,6 +2463,9 @@ class BIDSManager(QMainWindow):
         if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
             return
 
+        # Clear the log so each scan run starts with a fresh history for the
+        # user.
+        self.log_text.clear()
         self.log_text.append("Starting TSV generation…")
         self.tsv_button.setEnabled(False)
         self.tsv_stop_button.setEnabled(True)
@@ -1534,6 +2565,83 @@ class BIDSManager(QMainWindow):
                     f"Moved {len(files)} files with StudyInstanceUID {uid} to {new_dir}."
                 )
 
+    def _cleanup_conflict_worker(self) -> None:
+        """Release resources used by the background conflict scanner."""
+
+        if self._conflict_worker is not None:
+            self._conflict_worker.deleteLater()
+            self._conflict_worker = None
+        if self._conflict_thread is not None:
+            if self._conflict_thread.isRunning():
+                self._conflict_thread.quit()
+                self._conflict_thread.wait()
+            self._conflict_thread.deleteLater()
+            self._conflict_thread = None
+
+    def _start_conflict_scan(self) -> None:
+        """Check for mixed sessions without blocking the GUI thread."""
+
+        if not self.dicom_dir or not os.path.isdir(self.dicom_dir):
+            # Nothing to scan – proceed directly to loading the generated TSV.
+            self.log_text.append("TSV generation finished.")
+            self.loadMappingTable()
+            return
+
+        # Avoid launching multiple background scanners simultaneously.
+        if self._conflict_thread is not None:
+            if not self._conflict_thread.isRunning():
+                self._cleanup_conflict_worker()
+            else:
+                return
+
+        self._start_spinner("Checking sessions")
+        self.log_text.append("Checking for multiple sessions in scan folders…")
+
+        self._conflict_worker = _ConflictScannerWorker(self.dicom_dir, self._find_conflicting_studies)
+        self._conflict_thread = QThread(self)
+        self._conflict_worker.moveToThread(self._conflict_thread)
+        self._conflict_thread.started.connect(self._conflict_worker.run)
+        self._conflict_worker.finished.connect(self._on_conflict_scan_finished)
+        self._conflict_worker.failed.connect(self._on_conflict_scan_failed)
+        self._conflict_thread.start()
+
+    def _on_conflict_scan_finished(self, conflicts: dict) -> None:
+        """Handle successful completion of the background conflict scan."""
+
+        self._stop_spinner()
+        self._cleanup_conflict_worker()
+        if conflicts:
+            folders = "\n".join(conflicts.keys())
+            msg = (
+                "Multiple sessions were detected in the following folders:\n"
+                f"{folders}\n\n"
+                "Would you like to move each session into its own subfolder?"
+            )
+            resp = QMessageBox.question(
+                self,
+                "Multiple sessions detected",
+                msg,
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if resp == QMessageBox.Yes:
+                self._reorganize_conflicting_sessions(conflicts)
+                # Re-run the inventory now that the folders have been separated.
+                self.runInventory()
+                return
+
+        self.log_text.append("TSV generation finished.")
+        self.loadMappingTable()
+
+    def _on_conflict_scan_failed(self, error_message: str) -> None:
+        """Fallback when conflict detection fails for any reason."""
+
+        self._stop_spinner()
+        self._cleanup_conflict_worker()
+        logging.error("Conflict detection failed: %s", error_message)
+        self.log_text.append("Failed to check for mixed sessions; continuing anyway.")
+        self.log_text.append("TSV generation finished.")
+        self.loadMappingTable()
+
     def _inventoryFinished(self):
         ok = self.inventory_process.exitCode() == 0 if self.inventory_process else False
         self.inventory_process = None
@@ -1541,27 +2649,7 @@ class BIDSManager(QMainWindow):
         self.tsv_stop_button.setEnabled(False)
         self._stop_spinner()
         if ok:
-            conflicts = self._find_conflicting_studies(self.dicom_dir)
-            if conflicts:
-                folders = "\n".join(conflicts.keys())
-                msg = (
-                    "Multiple sessions were detected in the following folders:\n"
-                    f"{folders}\n\n"
-                    "Would you like to move each session into its own subfolder?"
-                )
-                resp = QMessageBox.question(
-                    self,
-                    "Multiple sessions detected",
-                    msg,
-                    QMessageBox.Yes | QMessageBox.No,
-                )
-                if resp == QMessageBox.Yes:
-                    self._reorganize_conflicting_sessions(conflicts)
-                    # re-run inventory after reorganisation
-                    self.runInventory()
-                    return
-            self.log_text.append("TSV generation finished.")
-            self.loadMappingTable()
+            self._start_conflict_scan()
         else:
             self.log_text.append("TSV generation failed.")
 
@@ -1590,7 +2678,9 @@ class BIDSManager(QMainWindow):
         for i in range(self.mapping_table.rowCount()):
             df.at[i, "include"] = 1 if self.mapping_table.item(i, 0).checkState() == Qt.Checked else 0
             df.at[i, "source_folder"] = self.mapping_table.item(i, 1).text()
-            df.at[i, "StudyDescription"] = self.mapping_table.item(i, 2).text()
+            study_item = self.mapping_table.item(i, 2)
+            study_text = study_item.text() if study_item is not None else ""
+            df.at[i, "StudyDescription"] = normalize_study_name(study_text.strip())
             df.at[i, "FamilyName"] = self.mapping_table.item(i, 3).text()
             df.at[i, "PatientID"] = self.mapping_table.item(i, 4).text()
             df.at[i, "BIDS_name"] = self.mapping_table.item(i, 5).text()
@@ -1717,10 +2807,55 @@ class BIDSManager(QMainWindow):
             return
         has_data = self.mapping_table.rowCount() > 0
         self.tsv_generate_ids_button.setEnabled(has_data)
+        if hasattr(self, "tsv_sort_button"):
+            self.tsv_sort_button.setEnabled(has_data)
         self.last_rep_box.setEnabled(has_data)
         self.name_choice.setEnabled(has_data)
         if not has_data:
             self.last_rep_box.setChecked(False)
+
+    def _onMappingItemChanged(self, item):
+        """Handle edits in the scanned data table."""
+        if self._loading_mapping_table or item is None:
+            return
+        if item.column() != 2:
+            # We only care about changes to the StudyDescription column here.
+            return
+
+        raw_text = item.text().strip()
+        cleaned = normalize_study_name(raw_text)
+
+        if cleaned != item.text():
+            # Temporarily block signals so updating the text does not trigger
+            # additional ``itemChanged`` notifications.
+            self.mapping_table.blockSignals(True)
+            item.setText(cleaned)
+            self.mapping_table.blockSignals(False)
+
+        row = item.row()
+        if 0 <= row < len(self.row_info):
+            self.row_info[row]['study'] = cleaned
+
+        bids_item = self.mapping_table.item(row, 5)
+        if bids_item is not None:
+            bids_item.setData(Qt.UserRole, cleaned)
+
+        # Recompute the set of known studies so preview generation detects when
+        # multiple studies are present after the edit.
+        self.study_set = set()
+        for r in range(self.mapping_table.rowCount()):
+            study_item = self.mapping_table.item(r, 2)
+            if study_item is None:
+                continue
+            study_text = study_item.text().strip()
+            if study_text:
+                self.study_set.add(study_text)
+
+        self._rebuild_lookup_maps()
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.generatePreview)
+        self._updateDetectRepeatEnabled()
 
     def detectRepeatedSequences(self):
         """Detect repeated sequences within each subject and assign numbers."""
@@ -1837,188 +2972,200 @@ class BIDSManager(QMainWindow):
         """
         if not self.tsv_path or not os.path.isfile(self.tsv_path):
             return
-        df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
-        preview_map = _compute_bids_preview(df, self._schema)
-        df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
-        df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
-        def _prop_path(r):
-            base = r.get("proposed_basename")
-            dt = r.get("proposed_datatype")
-            if not base:
-                return ""
-            ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
-            return f"{dt}/{base}{ext}"
 
-        df["Proposed BIDS name"] = df.apply(_prop_path, axis=1)
-        self.inventory_df = df
+        self._loading_mapping_table = True
+        try:
+            df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
+            preview_map = _compute_bids_preview(df, self._schema)
+            df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
+            df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
 
-        # ----- load existing mappings without altering the TSV -----
-        self.existing_maps = {}
-        self.existing_used = {}
-        studies = df["StudyDescription"].fillna("").unique()
-        for study in studies:
-            safe = _safe_stem(str(study))
-            mpath = Path(self.bids_out_dir) / safe / ".bids_manager" / "subject_mapping.tsv"
-            mapping = {}
-            used = set()
-            if mpath.exists():
-                try:
-                    mdf = pd.read_csv(mpath, sep="\t", keep_default_na=False)
-                    mapping = dict(zip(mdf["GivenName"].astype(str), mdf["BIDS_name"].astype(str)))
-                    used = set(mapping.values())
-                except Exception:
-                    pass
-            # Store mapping info so we can validate name edits later on
-            self.existing_maps[study] = mapping
-            self.existing_used[study] = used
+            def _prop_path(r):
+                base = r.get("proposed_basename")
+                dt = r.get("proposed_datatype")
+                if not base:
+                    return ""
+                ext = ".tsv" if str(base).endswith("_physio") else ".nii.gz"
+                return f"{dt}/{base}{ext}"
 
-        self.study_set.clear()
-        self.modb_rows.clear()
-        self.mod_rows.clear()
-        self.seq_rows.clear()
-        self.study_rows.clear()
-        self.subject_rows.clear()
-        self.session_rows.clear()
-        self.spec_modb_rows.clear()
-        self.spec_mod_rows.clear()
-        self.spec_seq_rows.clear()
-        self.row_info = []
+            df["Proposed BIDS name"] = df.apply(_prop_path, axis=1)
+            self.inventory_df = df
 
-        # Populate table rows
-        self.mapping_table.setRowCount(0)
-        def _clean(val):
-            """Return string representation of val or empty string for NaN."""
-            return "" if pd.isna(val) else str(val)
+            # ----- load existing mappings without altering the TSV -----
+            self.existing_maps = {}
+            self.existing_used = {}
+            studies = df["StudyDescription"].fillna("").unique()
+            for study in studies:
+                safe = _safe_stem(str(study))
+                mpath = Path(self.bids_out_dir) / safe / ".bids_manager" / "subject_mapping.tsv"
+                mapping = {}
+                used = set()
+                if mpath.exists():
+                    try:
+                        mdf = pd.read_csv(mpath, sep="\t", keep_default_na=False)
+                        mapping = dict(zip(mdf["GivenName"].astype(str), mdf["BIDS_name"].astype(str)))
+                        used = set(mapping.values())
+                    except Exception:
+                        pass
+                # Store mapping info so we can validate name edits later on
+                self.existing_maps[study] = mapping
+                self.existing_used[study] = used
 
-        for _, row in df.iterrows():
-            r = self.mapping_table.rowCount()
-            self.mapping_table.insertRow(r)
-            include_item = QTableWidgetItem()
-            include_item.setFlags(include_item.flags() | Qt.ItemIsUserCheckable)
-            include_item.setCheckState(Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked)
-            self.mapping_table.setItem(r, 0, include_item)
+            self.study_set.clear()
+            self.modb_rows.clear()
+            self.mod_rows.clear()
+            self.seq_rows.clear()
+            self.study_rows.clear()
+            self.subject_rows.clear()
+            self.session_rows.clear()
+            self.spec_modb_rows.clear()
+            self.spec_mod_rows.clear()
+            self.spec_seq_rows.clear()
+            self.row_info = []
 
-            src_item = QTableWidgetItem(_clean(row.get('source_folder')))
-            src_item.setFlags(src_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 1, src_item)
+            # Populate table rows
+            self.mapping_table.setRowCount(0)
 
-            study = _clean(row.get('StudyDescription'))
+            def _clean(val):
+                """Return string representation of val or empty string for NaN."""
+                return "" if pd.isna(val) else str(val)
 
-            study_item = QTableWidgetItem(study)
-            study_item.setFlags(study_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 2, study_item)
+            for _, row in df.iterrows():
+                r = self.mapping_table.rowCount()
+                self.mapping_table.insertRow(r)
+                include_item = QTableWidgetItem()
+                include_item.setFlags(
+                    (include_item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+                )
+                include_item.setCheckState(
+                    Qt.Checked if row.get('include', 1) == 1 else Qt.Unchecked
+                )
+                self.mapping_table.setItem(r, 0, include_item)
 
-            family_item = QTableWidgetItem(_clean(row.get('FamilyName')))
-            family_item.setFlags(family_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 3, family_item)
+                src_item = QTableWidgetItem(_clean(row.get('source_folder')))
+                src_item.setFlags(src_item.flags() & ~Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 1, src_item)
 
-            patient_item = QTableWidgetItem(_clean(row.get('PatientID')))
-            patient_item.setFlags(patient_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 4, patient_item)
+                study_raw = _clean(row.get('StudyDescription'))
+                study = normalize_study_name(study_raw)
 
-            bids_name = _clean(row.get('BIDS_name'))
-            bids_item = QTableWidgetItem(bids_name)
-            bids_item.setFlags(bids_item.flags() | Qt.ItemIsEditable)
-            bids_item.setData(Qt.UserRole, study)
-            self.study_set.add(study)
-            self.mapping_table.setItem(r, 5, bids_item)
+                study_item = QTableWidgetItem(study)
+                study_item.setFlags(study_item.flags() | Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 2, study_item)
 
-            subj_item = QTableWidgetItem(_clean(row.get('subject')))
-            subj_item.setFlags(subj_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 6, subj_item)
+                family_item = QTableWidgetItem(_clean(row.get('FamilyName')))
+                family_item.setFlags(family_item.flags() & ~Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 3, family_item)
 
-            given_item = QTableWidgetItem(_clean(row.get('GivenName')))
-            given_item.setFlags(given_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 7, given_item)
+                patient_item = QTableWidgetItem(_clean(row.get('PatientID')))
+                patient_item.setFlags(patient_item.flags() & ~Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 4, patient_item)
 
-            session = _clean(row.get('session'))
-            ses_item = QTableWidgetItem(session)
-            ses_item.setFlags(ses_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 8, ses_item)
+                bids_name = _clean(row.get('BIDS_name'))
+                bids_item = QTableWidgetItem(bids_name)
+                bids_item.setFlags(bids_item.flags() | Qt.ItemIsEditable)
+                bids_item.setData(Qt.UserRole, study)
+                self.study_set.add(study)
+                self.mapping_table.setItem(r, 5, bids_item)
 
-            seq_item = QTableWidgetItem(_clean(row.get('sequence')))
-            seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 9, seq_item)
+                subj_item = QTableWidgetItem(_clean(row.get('subject')))
+                subj_item.setFlags(subj_item.flags() | Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 6, subj_item)
 
-            preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
-            preview_item.setFlags(preview_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 10, preview_item)
+                given_item = QTableWidgetItem(_clean(row.get('GivenName')))
+                given_item.setFlags(given_item.flags() | Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 7, given_item)
 
-            uid_item = QTableWidgetItem(_clean(row.get('series_uid')))
-            uid_item.setFlags(uid_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 11, uid_item)
+                session = _clean(row.get('session'))
+                ses_item = QTableWidgetItem(session)
+                ses_item.setFlags(ses_item.flags() | Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 8, ses_item)
 
-            acq_item = QTableWidgetItem(_clean(row.get('acq_time')))
-            acq_item.setFlags(acq_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 12, acq_item)
+                seq_item = QTableWidgetItem(_clean(row.get('sequence')))
+                seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 9, seq_item)
 
-            rep_item = QTableWidgetItem(_clean(row.get('rep')))
-            # Allow editing the repeat number directly in the table
-            rep_item.setFlags(rep_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 13, rep_item)
+                preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
+                preview_item.setFlags(preview_item.flags() & ~Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 10, preview_item)
 
-            mod_item = QTableWidgetItem(_clean(row.get('modality')))
-            mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 14, mod_item)
+                uid_item = QTableWidgetItem(_clean(row.get('series_uid')))
+                uid_item.setFlags(uid_item.flags() & ~Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 11, uid_item)
 
-            modb = _clean(row.get('modality_bids'))
-            modb_item = QTableWidgetItem(modb)
-            modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
-            self.mapping_table.setItem(r, 15, modb_item)
+                acq_item = QTableWidgetItem(_clean(row.get('acq_time')))
+                acq_item.setFlags(acq_item.flags() & ~Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 12, acq_item)
 
-            mod = _clean(row.get('modality'))
-            seq = _clean(row.get('sequence'))
-            run = _clean(row.get('rep'))
-            given = _clean(row.get('GivenName'))
-            prop_dt = _clean(row.get('proposed_datatype'))
-            prop_base = _clean(row.get('proposed_basename'))
-            self.row_info.append({
-                'study': study,
-                'bids': bids_name,
-                'given': given,
-                'ses': session,
-                'modb': modb,
-                'mod': mod,
-                'seq': seq,
-                'rep': run,
-                'prop_dt': prop_dt,
-                'prop_base': prop_base,
-                'n_files': _clean(row.get('n_files')),
-                'acq_time': _clean(row.get('acq_time')),
-            })
-        self.log_text.append("Loaded TSV into mapping table.")
+                rep_item = QTableWidgetItem(_clean(row.get('rep')))
+                # Allow editing the repeat number directly in the table
+                rep_item.setFlags(rep_item.flags() | Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 13, rep_item)
 
-        # Apply always-exclude patterns before building lookup tables
-        self.applyExcludePatterns()
+                mod_item = QTableWidgetItem(_clean(row.get('modality')))
+                mod_item.setFlags(mod_item.flags() & ~Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 14, mod_item)
 
-        # Build modality/sequence lookup for tree interactions
-        self._rebuild_lookup_maps()
+                modb = _clean(row.get('modality_bids'))
+                modb_item = QTableWidgetItem(modb)
+                modb_item.setFlags(modb_item.flags() | Qt.ItemIsEditable)
+                self.mapping_table.setItem(r, 15, modb_item)
 
-        self.populateModalitiesTree()
-        self.populateSpecificTree()
-        if getattr(self, 'last_rep_box', None) is not None and self.last_rep_box.isChecked():
-            self._onLastRepToggled(True)
+                mod = _clean(row.get('modality'))
+                seq = _clean(row.get('sequence'))
+                run = _clean(row.get('rep'))
+                given = _clean(row.get('GivenName'))
+                prop_dt = _clean(row.get('proposed_datatype'))
+                prop_base = _clean(row.get('proposed_basename'))
+                self.row_info.append({
+                    'study': study,
+                    'bids': bids_name,
+                    'given': given,
+                    'ses': session,
+                    'modb': modb,
+                    'mod': mod,
+                    'seq': seq,
+                    'rep': run,
+                    'prop_dt': prop_dt,
+                    'prop_base': prop_base,
+                    'n_files': _clean(row.get('n_files')),
+                    'acq_time': _clean(row.get('acq_time')),
+                })
+            self.log_text.append("Loaded TSV into mapping table.")
 
-        # Populate naming table
-        self.naming_table.blockSignals(True)
-        self.naming_table.setRowCount(0)
-        name_df = df[["StudyDescription", "GivenName", "BIDS_name"]].copy()
-        name_df = name_df.drop_duplicates(subset=["StudyDescription", "BIDS_name"])
-        for _, row in name_df.iterrows():
-            nr = self.naming_table.rowCount()
-            self.naming_table.insertRow(nr)
-            sitem = QTableWidgetItem(_clean(row["StudyDescription"]))
-            sitem.setFlags(sitem.flags() & ~Qt.ItemIsEditable)
-            self.naming_table.setItem(nr, 0, sitem)
-            gitem = QTableWidgetItem(_clean(row["GivenName"]))
-            gitem.setFlags(gitem.flags() & ~Qt.ItemIsEditable)
-            self.naming_table.setItem(nr, 1, gitem)
-            bitem = QTableWidgetItem(_clean(row["BIDS_name"]))
-            bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
-            self.naming_table.setItem(nr, 2, bitem)
-        self.naming_table.blockSignals(False)
-        self._updateScanExistingEnabled()
-        self._updateMappingControlsEnabled()
+            # Apply always-exclude patterns before building lookup tables
+            self.applyExcludePatterns()
+
+            # Build modality/sequence lookup for tree interactions
+            self._rebuild_lookup_maps()
+
+            self.populateModalitiesTree()
+            self.populateSpecificTree()
+            if getattr(self, 'last_rep_box', None) is not None and self.last_rep_box.isChecked():
+                self._onLastRepToggled(True)
+
+            # Populate naming table
+            self.naming_table.blockSignals(True)
+            self.naming_table.setRowCount(0)
+            name_df = df[["StudyDescription", "GivenName", "BIDS_name"]].copy()
+            name_df = name_df.drop_duplicates(subset=["StudyDescription", "BIDS_name"])
+            for _, row in name_df.iterrows():
+                nr = self.naming_table.rowCount()
+                self.naming_table.insertRow(nr)
+                sitem = QTableWidgetItem(_clean(row["StudyDescription"]))
+                sitem.setFlags(sitem.flags() & ~Qt.ItemIsEditable)
+                self.naming_table.setItem(nr, 0, sitem)
+                gitem = QTableWidgetItem(_clean(row["GivenName"]))
+                gitem.setFlags(gitem.flags() & ~Qt.ItemIsEditable)
+                self.naming_table.setItem(nr, 1, gitem)
+                bitem = QTableWidgetItem(_clean(row["BIDS_name"]))
+                bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
+                self.naming_table.setItem(nr, 2, bitem)
+            self.naming_table.blockSignals(False)
+            self._updateScanExistingEnabled()
+            self._updateMappingControlsEnabled()
+        finally:
+            self._loading_mapping_table = False
 
 
     def _build_series_list_from_df(self, df):
@@ -2823,8 +3970,19 @@ class BIDSManager(QMainWindow):
         p = Path(self.model.filePath(idx))
         self.selected = p
         ext = _get_ext(p)
-        # ``is_dicom_file`` also checks for files without an extension
-        if ext in ['.json', '.tsv', '.nii', '.nii.gz', '.html', '.htm'] or is_dicom_file(str(p)):
+        lower_name = p.name.lower()
+        gifti_candidate = any(lower_name.endswith(suffix) for suffix in GIFTI_SURFACE_SUFFIXES)
+        freesurfer_candidate = any(
+            lower_name.endswith(suffix) for suffix in FREESURFER_SURFACE_SUFFIXES
+        )
+        # ``is_dicom_file`` also checks for files without an extension.
+        dicom_like = is_dicom_file(str(p))
+        if (
+            ext in ['.json', '.tsv', '.nii', '.nii.gz', '.html', '.htm']
+            or dicom_like
+            or gifti_candidate
+            or freesurfer_candidate
+        ):
             self.viewer.load_file(p)
 
     def updateStats(self):
@@ -3720,6 +4878,2582 @@ class BidsIgnoreDialog(QDialog):
         self.accept()
 
 
+class Volume3DDialog(QDialog):
+    """Interactive 3-D renderer for NIfTI volumes."""
+
+    def __init__(
+        self,
+        parent,
+        data: np.ndarray,
+        meta: Optional[dict] = None,
+        voxel_sizes: Optional[Sequence[float]] = None,
+        default_mode: Optional[str] = None,
+        title: Optional[str] = None,
+        dark_theme: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        if not HAS_PYQTGRAPH:
+            raise RuntimeError(
+                "3-D volume rendering requires the optional 'pyqtgraph' dependency."
+            )
+        self.setWindowTitle(title or "3D Volume Viewer")
+        self.resize(1800, 1000)
+        self.setMinimumSize(780, 560)
+        self.setSizeGripEnabled(True)
+
+        self._raw = np.asarray(data)
+        if self._raw.ndim < 3:
+            raise ValueError("3-D rendering requires data with at least three axes")
+
+        self._meta = meta or {}
+        self._voxel_sizes = self._normalise_voxel_sizes(voxel_sizes)
+        self._voxel_sizes_vec = np.asarray(self._voxel_sizes, dtype=np.float32)
+        self._dark_theme = bool(dark_theme)
+        self._max_points = 120_000
+        self._surface_step = 1
+        self._initialising = True
+        self._scalar_min = 0.0
+        self._scalar_max = 0.0
+        self._scalar_volume: Optional[np.ndarray] = None
+        self._normalised_volume: Optional[np.ndarray] = None
+        self._downsampled: Optional[np.ndarray] = None
+        self._downsample_step = 1
+        self._point_sorted_values: Optional[np.ndarray] = None
+        self._point_sorted_indices: Optional[np.ndarray] = None
+        self._point_shape: Optional[tuple[int, int, int]] = None
+        self._scalar_hist_upper_edges: Optional[np.ndarray] = None
+        self._scalar_hist_cumulative: Optional[np.ndarray] = None
+        self._scatter_item: Optional[gl.GLScatterPlotItem] = None
+        self._mesh_item: Optional[gl.GLMeshItem] = None
+        self._axis_item: Optional[gl.GLAxisItem] = None
+        self._current_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._colormap_cache: dict[tuple[str, float], mcolors.Colormap] = {}
+        self._light_shader = _create_directional_light_shader()
+        self._flat_shader = _create_flat_color_shader()
+        self._lighting_enabled = True
+
+        self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
+        self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
+        self._axis_label_items: list[gl.GLTextItem] = []
+        self._data_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._slice_controls: dict[str, _SliceControl] = {}
+
+        layout = QVBoxLayout(self)
+
+        self._splitter = QSplitter(Qt.Vertical)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setHandleWidth(12)
+        layout.addWidget(self._splitter)
+
+        self._view_container = QWidget()
+        view_layout = QVBoxLayout(self._view_container)
+        view_layout.setContentsMargins(0, 0, 0, 0)
+        view_layout.setSpacing(0)
+
+        # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
+        # not require recomputing the voxel subset on every interaction.
+        self.view = gl.GLViewWidget()
+        self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.view.setBackgroundColor(self._canvas_bg)
+        self.view.opts["distance"] = 200
+        self.view.opts["elevation"] = 20
+        self.view.opts["azimuth"] = -60
+        view_layout.addWidget(self.view)
+
+        self._splitter.addWidget(self._view_container)
+
+        settings_container = QWidget()
+        settings_layout = QVBoxLayout(settings_container)
+        settings_layout.setContentsMargins(6, 6, 6, 6)
+        settings_layout.setSpacing(10)
+
+        # Allow users to dock the settings pane to whichever edge feels most
+        # comfortable when working on small screens.
+        placement_layout = QHBoxLayout()
+        placement_layout.setSpacing(6)
+        placement_label = QLabel("Panel placement:")
+        placement_layout.addWidget(placement_label)
+        self.panel_location_combo = QComboBox()
+        self.panel_location_combo.addItems(["Bottom", "Left", "Right"])
+        # Default to a side-by-side layout so the viewport opens on the left.
+        self.panel_location_combo.setCurrentText("Right")
+        placement_layout.addWidget(self.panel_location_combo)
+        placement_layout.addStretch()
+        settings_layout.addLayout(placement_layout)
+
+        controls_widget = QWidget()
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+        agg_label = QLabel("Aggregation:")
+        header_row.addWidget(agg_label)
+        self.agg_combo = QComboBox()
+        self._aggregators = {}
+        self._init_aggregator_options()
+        header_row.addWidget(self.agg_combo)
+        header_row.addSpacing(12)
+
+        render_label = QLabel("Render mode:")
+        header_row.addWidget(render_label)
+        self.render_mode_combo = QComboBox()
+        self.render_mode_combo.addItems(["Point cloud", "Surface mesh"])
+        self.render_mode_combo.setToolTip(
+            "Switch between scattered voxels and iso-surface rendering.",
+        )
+        header_row.addWidget(self.render_mode_combo)
+        header_row.addStretch()
+        controls_layout.addLayout(header_row)
+
+        # Stack the render-mode sliders beneath the mode selector so they are
+        # visually associated with the chosen representation.
+        slider_grid = QGridLayout()
+        slider_grid.setContentsMargins(0, 0, 0, 0)
+        slider_grid.setHorizontalSpacing(8)
+        slider_grid.setVerticalSpacing(6)
+        slider_grid.setColumnStretch(1, 1)
+
+        self.thresh_text = QLabel("Threshold:")
+        slider_grid.addWidget(self.thresh_text, 0, 0)
+        self.thresh_slider = QSlider(Qt.Horizontal)
+        self.thresh_slider.setRange(0, 100)
+        self.thresh_slider.setValue(60)
+        self.thresh_slider.setPageStep(5)
+        self.thresh_slider.setToolTip(
+            "Minimum normalised intensity included in the rendering.",
+        )
+        self.thresh_slider.valueChanged.connect(self._update_plot)
+        slider_grid.addWidget(self.thresh_slider, 0, 1)
+        self.thresh_label = QLabel("0.60")
+        slider_grid.addWidget(self.thresh_label, 0, 2)
+
+        self.point_label = QLabel("Point size:")
+        slider_grid.addWidget(self.point_label, 1, 0)
+        self.point_slider = QSlider(Qt.Horizontal)
+        self.point_slider.setRange(1, 12)
+        self.point_slider.setValue(4)
+        self.point_slider.setToolTip("Marker diameter for point-cloud rendering.")
+        self.point_slider.valueChanged.connect(self._update_plot)
+        slider_grid.addWidget(self.point_slider, 1, 1)
+
+        controls_layout.addLayout(slider_grid)
+        controls_layout.addStretch()
+        settings_layout.addWidget(controls_widget)
+
+        options_group = QGroupBox("Rendering options")
+        options = QGridLayout(options_group)
+        options.setColumnStretch(1, 1)
+
+        row = 0
+        options.addWidget(QLabel("Colormap:"), row, 0)
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.addItems([
+            "viridis",
+            "plasma",
+            "inferno",
+            "magma",
+            "cividis",
+            "turbo",
+            "twilight",
+            "cubehelix",
+            "Spectral",
+            "coolwarm",
+            "YlGnBu",
+            "Greys",
+            "bone",
+        ])
+        self.colormap_combo.setToolTip(
+            "Select the matplotlib colormap for voxel intensities.",
+        )
+        self.colormap_combo.currentTextChanged.connect(lambda _: self._update_plot())
+        options.addWidget(self.colormap_combo, row, 1)
+
+        row += 1
+        options.addWidget(QLabel("Opacity:"), row, 0)
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(10, 100)
+        self.opacity_slider.setValue(80)
+        self.opacity_slider.setToolTip(
+            "Global alpha applied to rendered points or the surface mesh.",
+        )
+        options.addWidget(self.opacity_slider, row, 1)
+        self.opacity_label = QLabel("0.80")
+        options.addWidget(self.opacity_label, row, 2)
+
+        row += 1
+        options.addWidget(QLabel("Colour intensity:"), row, 0)
+        self.intensity_slider = QSlider(Qt.Horizontal)
+        self.intensity_slider.setRange(10, 200)
+        self.intensity_slider.setValue(100)
+        self.intensity_slider.setToolTip(
+            "Scale factor applied to RGB values after colormap lookup (0.1–2.0×).",
+        )
+        options.addWidget(self.intensity_slider, row, 1)
+        self.intensity_label = QLabel("1.00×")
+        options.addWidget(self.intensity_label, row, 2)
+
+        row += 1
+        options.addWidget(QLabel("Maximum points:"), row, 0)
+        self.max_points_spin = QSpinBox()
+        self.max_points_spin.setRange(1_000, 20_000_000)
+        self.max_points_spin.setSingleStep(5_000)
+        self.max_points_spin.setValue(self._max_points)
+        self.max_points_spin.setToolTip(
+            "Upper bound on voxels displayed in point-cloud mode.",
+        )
+        options.addWidget(self.max_points_spin, row, 1)
+
+        row += 1
+        options.addWidget(QLabel("Downsample step:"), row, 0)
+        self.downsample_spin = QSpinBox()
+        self.downsample_spin.setRange(0, 8)
+        self.downsample_spin.setValue(0)
+        self.downsample_spin.setToolTip(
+            "Manual voxel stride applied before rendering (0 = automatic).",
+        )
+        options.addWidget(self.downsample_spin, row, 1)
+
+        row += 1
+        self.surface_step_label = QLabel("Marching cubes step:")
+        options.addWidget(self.surface_step_label, row, 0)
+        self.surface_step_spin = QSpinBox()
+        self.surface_step_spin.setRange(1, 6)
+        self.surface_step_spin.setValue(self._surface_step)
+        self.surface_step_spin.setToolTip(
+            "Sampling stride for marching cubes when computing iso-surfaces.",
+        )
+        options.addWidget(self.surface_step_spin, row, 1)
+
+        row += 1
+        self.axes_checkbox = QCheckBox("Show axes")
+        self.axes_checkbox.setChecked(False)
+        options.addWidget(self.axes_checkbox, row, 0, 1, 2)
+
+        row += 1
+        options.addWidget(QLabel("Axis thickness:"), row, 0)
+        self.axis_thickness_slider = QSlider(Qt.Horizontal)
+        self.axis_thickness_slider.setRange(1, 12)
+        self.axis_thickness_slider.setValue(3)
+        self.axis_thickness_slider.setToolTip(
+            "Line width of the anatomical axes (pixels).",
+        )
+        options.addWidget(self.axis_thickness_slider, row, 1)
+        self.axis_thickness_value = QLabel("3 px")
+        options.addWidget(self.axis_thickness_value, row, 2)
+
+        row += 1
+        self.axis_labels_checkbox = QCheckBox("Show axis labels")
+        self.axis_labels_checkbox.setChecked(False)
+        options.addWidget(self.axis_labels_checkbox, row, 0, 1, 2)
+        self.axis_thickness_slider.setEnabled(False)
+        self.axis_labels_checkbox.setEnabled(False)
+        settings_layout.addWidget(options_group)
+
+        # Embed the colour bar alongside the rest of the controls so it folds
+        # away with the settings pane.
+        colorbar_group = QGroupBox("Colour bar")
+        colorbar_layout = QVBoxLayout(colorbar_group)
+        colorbar_layout.setContentsMargins(8, 6, 8, 6)
+        colorbar_layout.setSpacing(4)
+        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.6, 1.4)))
+        self._colorbar_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._colorbar_canvas.setFixedHeight(180)
+        self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
+        colorbar_layout.addWidget(self._colorbar_canvas)
+
+        # Host the colour bar in its own lightweight container so it can share
+        # the retractable pane while remaining independent from the parameter list.
+        self._colorbar_panel = QWidget()
+        colorbar_panel_layout = QVBoxLayout(self._colorbar_panel)
+        colorbar_panel_layout.setContentsMargins(6, 6, 6, 6)
+        colorbar_panel_layout.setSpacing(6)
+        colorbar_panel_layout.addWidget(colorbar_group)
+
+        slice_group = QGroupBox("Slice planes")
+        slice_layout = QVBoxLayout(slice_group)
+        slice_layout.setContentsMargins(8, 4, 8, 4)
+        slice_layout.setSpacing(6)
+        self._slice_controls.clear()
+        for key, axis_idx, neg_name, pos_name in _SLICE_ORIENTATIONS:
+            row_layout = QHBoxLayout()
+            row_layout.setSpacing(6)
+            checkbox = QCheckBox(key.capitalize())
+            checkbox.setChecked(False)
+            row_layout.addWidget(checkbox)
+            row_layout.addSpacing(4)
+            row_layout.addWidget(QLabel(f"{neg_name}:"))
+            min_slider = QSlider(Qt.Horizontal)
+            min_slider.setRange(0, 100)
+            min_slider.setValue(0)
+            min_slider.setEnabled(False)
+            row_layout.addWidget(min_slider, 1)
+            min_value = QLabel("0.0 mm")
+            row_layout.addWidget(min_value)
+            row_layout.addSpacing(6)
+            row_layout.addWidget(QLabel(f"{pos_name}:"))
+            max_slider = QSlider(Qt.Horizontal)
+            max_slider.setRange(0, 100)
+            max_slider.setValue(100)
+            max_slider.setEnabled(False)
+            row_layout.addWidget(max_slider, 1)
+            max_value = QLabel("0.0 mm")
+            row_layout.addWidget(max_value)
+            row_layout.addStretch()
+            slice_layout.addLayout(row_layout)
+            control = _SliceControl(
+                checkbox=checkbox,
+                min_slider=min_slider,
+                max_slider=max_slider,
+                min_value=min_value,
+                max_value=max_value,
+                axis=axis_idx,
+                negative_name=neg_name,
+                positive_name=pos_name,
+            )
+            self._slice_controls[key] = control
+            checkbox.toggled.connect(lambda checked, name=key: self._on_slice_toggle(name, checked))
+            min_slider.valueChanged.connect(lambda value, name=key: self._on_slice_slider_change(name, "min", value))
+            max_slider.valueChanged.connect(lambda value, name=key: self._on_slice_slider_change(name, "max", value))
+        slice_layout.addStretch()
+        settings_layout.addWidget(slice_group)
+
+        self.lighting_group = QGroupBox("Lighting")
+        light_layout = QGridLayout(self.lighting_group)
+        light_row = 0
+        self.light_enable_checkbox = QCheckBox("Enable lighting")
+        self.light_enable_checkbox.setChecked(True)
+        light_layout.addWidget(self.light_enable_checkbox, light_row, 0, 1, 3)
+        light_row += 1
+        light_layout.addWidget(QLabel("Azimuth:"), light_row, 0)
+        self.light_azimuth_slider = QSlider(Qt.Horizontal)
+        self.light_azimuth_slider.setRange(-180, 180)
+        self.light_azimuth_slider.setValue(-45)
+        self.light_azimuth_slider.setToolTip(
+            "Horizontal direction of the light source relative to the mesh (°).",
+        )
+        light_layout.addWidget(self.light_azimuth_slider, light_row, 1)
+        self.light_azimuth_label = QLabel("-45°")
+        light_layout.addWidget(self.light_azimuth_label, light_row, 2)
+
+        light_row += 1
+        light_layout.addWidget(QLabel("Elevation:"), light_row, 0)
+        self.light_elevation_slider = QSlider(Qt.Horizontal)
+        self.light_elevation_slider.setRange(-90, 90)
+        self.light_elevation_slider.setValue(30)
+        self.light_elevation_slider.setToolTip(
+            "Vertical angle of the light source relative to the mesh (°).",
+        )
+        light_layout.addWidget(self.light_elevation_slider, light_row, 1)
+        self.light_elevation_label = QLabel("30°")
+        light_layout.addWidget(self.light_elevation_label, light_row, 2)
+
+        light_row += 1
+        light_layout.addWidget(QLabel("Intensity:"), light_row, 0)
+        self.light_intensity_slider = QSlider(Qt.Horizontal)
+        self.light_intensity_slider.setRange(10, 300)
+        self.light_intensity_slider.setValue(130)
+        self.light_intensity_slider.setToolTip(
+            "Diffuse lighting strength (0.1–3.0×). Ambient light stays constant.",
+        )
+        light_layout.addWidget(self.light_intensity_slider, light_row, 1)
+        self.light_intensity_label = QLabel("1.30×")
+        light_layout.addWidget(self.light_intensity_label, light_row, 2)
+        if self._light_shader is None and self._flat_shader is None:
+            self.lighting_group.setEnabled(False)
+        settings_layout.addWidget(self.lighting_group)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        settings_layout.addWidget(self.status_label)
+        settings_layout.addStretch()
+
+        self._panel_scroll = QScrollArea()
+        self._panel_scroll.setWidget(settings_container)
+        self._panel_scroll.setWidgetResizable(True)
+        self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        # A nested splitter keeps the scrollable controls and the colour bar in
+        # separate panes so each can be resized without affecting the other.
+        self._panel_splitter = QSplitter(Qt.Vertical)
+        self._panel_splitter.setChildrenCollapsible(False)
+        self._panel_splitter.addWidget(self._panel_scroll)
+        self._panel_splitter.addWidget(self._colorbar_panel)
+        self._panel_splitter.setStretchFactor(0, 3)
+        self._panel_splitter.setStretchFactor(1, 1)
+
+        self._panel_container = QWidget()
+        panel_container_layout = QVBoxLayout(self._panel_container)
+        panel_container_layout.setContentsMargins(0, 0, 0, 0)
+        panel_container_layout.setSpacing(0)
+        panel_container_layout.addWidget(self._panel_splitter)
+
+        self._splitter.addWidget(self._panel_container)
+
+        default_name = None
+        if default_mode and default_mode in self._aggregators:
+            default_name = default_mode
+        elif self._raw.ndim > 3:
+            if self._meta.get("is_rgb"):
+                default_name = "Mean |value|"
+            else:
+                default_name = "RMS (DTI)"
+
+        if default_name:
+            self.agg_combo.setCurrentText(default_name)
+
+        self.panel_location_combo.currentTextChanged.connect(self._on_panel_location_change)
+        self.agg_combo.currentTextChanged.connect(self._on_agg_change)
+        self.render_mode_combo.currentTextChanged.connect(self._on_render_mode_change)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_change)
+        self.intensity_slider.valueChanged.connect(self._on_intensity_change)
+        self.max_points_spin.valueChanged.connect(self._on_max_points_change)
+        self.downsample_spin.valueChanged.connect(self._on_downsample_change)
+        self.surface_step_spin.valueChanged.connect(self._on_surface_step_change)
+        self.axes_checkbox.toggled.connect(self._on_axes_toggle)
+        self.axis_thickness_slider.valueChanged.connect(self._on_axis_thickness_change)
+        self.axis_labels_checkbox.toggled.connect(self._on_axis_labels_toggle)
+        self.light_enable_checkbox.toggled.connect(self._on_light_enabled_toggle)
+        self.light_azimuth_slider.valueChanged.connect(self._on_light_setting_change)
+        self.light_elevation_slider.valueChanged.connect(self._on_light_setting_change)
+        self.light_intensity_slider.valueChanged.connect(self._on_light_setting_change)
+
+        self._apply_panel_layout(self.panel_location_combo.currentText())
+        self._update_light_controls_enabled()
+
+        # Prime the UI labels without triggering expensive redraws while we are
+        # still constructing the dialog.
+        self._on_intensity_change(self.intensity_slider.value())
+        self._on_axis_thickness_change(self.axis_thickness_slider.value())
+        self._update_slice_labels()
+        self._update_light_labels()
+        self._update_light_shader()
+
+        self._initialising = False
+        self._update_mode_dependent_controls()
+        self._compute_scalar_volume()
+        self._update_plot()
+
+    def _apply_panel_layout(self, location: str) -> None:
+        """Reposition the settings pane relative to the 3-D viewport."""
+
+        if not hasattr(self, "_splitter"):
+            return
+
+        normalised = (location or "bottom").strip().lower()
+        if normalised not in {"bottom", "left", "right"}:
+            normalised = "bottom"
+
+        orientation = Qt.Vertical if normalised == "bottom" else Qt.Horizontal
+        self._splitter.setOrientation(orientation)
+
+        view_first = True
+        if orientation == Qt.Horizontal:
+            view_first = normalised != "left"
+
+        panel_widget = getattr(self, "_panel_container", None)
+        widgets = [self._view_container, panel_widget]
+        if panel_widget is None:
+            widgets = [self._view_container]
+        if not view_first and len(widgets) == 2:
+            widgets.reverse()
+        for index, widget in enumerate(widgets):
+            if widget is None:
+                continue
+            if self._splitter.indexOf(widget) != index:
+                self._splitter.insertWidget(index, widget)
+
+        # Bias the main splitter so the viewport consumes roughly three quarters
+        # of the available space in the default layout.
+        stretch = (3, 1) if view_first else (1, 3)
+        self._splitter.setStretchFactor(0, stretch[0])
+        if len(widgets) > 1:
+            self._splitter.setStretchFactor(1, stretch[1])
+            scale = 120
+            self._splitter.setSizes([stretch[0] * scale, stretch[1] * scale])
+
+        panel_splitter = getattr(self, "_panel_splitter", None)
+        if isinstance(panel_splitter, QSplitter):
+            # Rotate the internal splitter so the colour bar always occupies its
+            # own pane next to the parameter controls regardless of docking side.
+            if orientation == Qt.Vertical:
+                panel_splitter.setOrientation(Qt.Horizontal)
+                panel_splitter.setSizes([220, 160])
+            else:
+                panel_splitter.setOrientation(Qt.Vertical)
+                panel_splitter.setSizes([300, 160])
+
+    def _on_panel_location_change(self, location: str) -> None:
+        self._apply_panel_layout(location)
+
+    def _update_light_controls_enabled(self) -> None:
+        enabled = bool(self.lighting_group.isEnabled() and self._lighting_enabled)
+        for widget in (
+            self.light_azimuth_slider,
+            self.light_elevation_slider,
+            self.light_intensity_slider,
+        ):
+            widget.setEnabled(enabled)
+        for label in (
+            self.light_azimuth_label,
+            self.light_elevation_label,
+            self.light_intensity_label,
+        ):
+            label.setEnabled(enabled)
+
+    def _apply_mesh_shader(self) -> None:
+        if self._mesh_item is None:
+            return
+        if self._light_shader is not None and self._lighting_enabled:
+            self._mesh_item.setShader(self._light_shader)
+        elif self._flat_shader is not None:
+            self._mesh_item.setShader(self._flat_shader)
+        else:
+            self._mesh_item.setShader("shaded")
+
+    def _on_light_enabled_toggle(self, checked: bool) -> None:
+        self._lighting_enabled = bool(checked)
+        self._update_light_controls_enabled()
+        if self._lighting_enabled:
+            self._update_light_shader()
+        else:
+            self._apply_mesh_shader()
+        if not self._initialising and self._mesh_item is not None:
+            self._mesh_item.update()
+            self.view.update()
+
+    def _normalise_voxel_sizes(self, voxel_sizes):
+        if not voxel_sizes:
+            return (1.0, 1.0, 1.0)
+        values = tuple(float(v) for v in voxel_sizes[:3])
+        if len(values) < 3:
+            values = values + (1.0,) * (3 - len(values))
+        return tuple(max(1e-6, abs(v)) for v in values)
+
+    def _init_aggregator_options(self) -> None:
+        if self._raw.ndim <= 3:
+            self._aggregators["Intensity"] = "Intensity"
+            self.agg_combo.addItem("Intensity")
+            self.agg_combo.setEnabled(False)
+        else:
+            for name in ("RMS (DTI)", "Mean |value|", "Max |value|", "First volume"):
+                self._aggregators[name] = name
+                self.agg_combo.addItem(name)
+
+    def _on_agg_change(self):
+        if self._initialising:
+            return
+        self._compute_scalar_volume()
+        self._update_plot()
+
+    def _compute_scalar_volume(self) -> None:
+        arr = np.asarray(self._raw, dtype=np.float32)
+        if arr.ndim <= 3:
+            scalar = arr
+        else:
+            axis = arr.ndim - 1
+            mode = self.agg_combo.currentText()
+            if mode == "RMS (DTI)":
+                scalar = np.sqrt(np.nanmean(np.square(arr), axis=axis))
+            elif mode == "Max |value|":
+                scalar = np.nanmax(np.abs(arr), axis=axis)
+            elif mode == "First volume":
+                scalar = np.abs(np.take(arr, 0, axis=axis))
+            else:
+                scalar = np.nanmean(np.abs(arr), axis=axis)
+        scalar = np.nan_to_num(scalar, nan=0.0, posinf=0.0, neginf=0.0)
+        self._scalar_volume = scalar
+        finite = np.isfinite(scalar)
+        if not finite.any():
+            self._scalar_min = 0.0
+            self._scalar_max = 0.0
+            self._normalised_volume = np.zeros_like(scalar, dtype=np.float32)
+        else:
+            min_val = float(np.min(scalar[finite]))
+            max_val = float(np.max(scalar[finite]))
+            self._scalar_min = min_val
+            self._scalar_max = max_val
+            if abs(max_val - min_val) < 1e-6:
+                self._normalised_volume = np.zeros_like(scalar, dtype=np.float32)
+            else:
+                norm = (scalar - min_val) / (max_val - min_val)
+                self._normalised_volume = norm.astype(np.float32, copy=False)
+        self._build_scalar_histogram()
+        self._prepare_downsampled()
+
+    def _build_scalar_histogram(self) -> None:
+        self._scalar_hist_upper_edges = None
+        self._scalar_hist_cumulative = None
+        volume = self._normalised_volume
+        if volume is None:
+            return
+
+        flattened = np.asarray(volume, dtype=np.float32).ravel()
+        if flattened.size == 0:
+            self._scalar_hist_upper_edges = np.empty(0, dtype=np.float32)
+            self._scalar_hist_cumulative = np.empty(0, dtype=np.int64)
+            return
+
+        edges = np.linspace(0.0, 1.0, 513, dtype=np.float32)
+        counts, _ = np.histogram(flattened, bins=edges)
+        cumulative = np.cumsum(counts[::-1], dtype=np.int64)[::-1]
+        self._scalar_hist_upper_edges = edges[1:]
+        self._scalar_hist_cumulative = cumulative
+
+    def _prepare_downsampled(self) -> None:
+        vol = self._normalised_volume
+        if vol is None:
+            self._downsampled = None
+            self._downsample_step = 1
+            self._data_bounds = None
+            self._update_slice_labels()
+            return
+        manual_step = 0
+        if hasattr(self, "downsample_spin"):
+            manual_step = int(self.downsample_spin.value())
+        if manual_step > 0:
+            step = manual_step
+        else:
+            step = 1
+            total = float(vol.size)
+            if total > self._max_points:
+                step = int(np.ceil(np.cbrt(total / self._max_points)))
+        step = max(1, step)
+        slices = tuple(slice(None, None, step) for _ in range(3))
+        self._downsampled = vol[slices]
+        self._downsample_step = step
+        if self._downsampled.size == 0:
+            self._data_bounds = None
+        else:
+            ds_shape = np.ones(3, dtype=np.float32)
+            dims = min(self._downsampled.ndim, 3)
+            ds_shape[:dims] = np.asarray(self._downsampled.shape[:dims], dtype=np.float32)
+            scale = self._voxel_sizes_vec * float(step)
+            spans = np.maximum((ds_shape - 1.0) * scale, 0.0)
+            mins = np.zeros(3, dtype=np.float32)
+            self._data_bounds = (mins, mins + spans)
+        self._update_slice_labels()
+        self._rebuild_point_cache()
+
+    def _rebuild_point_cache(self) -> None:
+        self._point_sorted_values = None
+        self._point_sorted_indices = None
+        self._point_shape = None
+        downsampled = self._downsampled
+        if downsampled is None:
+            return
+
+        flat = np.asarray(downsampled, dtype=np.float32).ravel()
+        self._point_shape = downsampled.shape
+        if flat.size == 0:
+            self._point_sorted_values = np.empty(0, dtype=np.float32)
+            self._point_sorted_indices = np.empty(0, dtype=np.int64)
+            return
+
+        order = np.argsort(flat, kind="mergesort")
+        self._point_sorted_indices = order.astype(np.int64, copy=False)
+        self._point_sorted_values = flat.take(order)
+
+    def _indices_to_world(
+        self, indices: np.ndarray, shape: tuple[int, int, int], scale: np.ndarray
+    ) -> np.ndarray:
+        coords_mm = np.empty((indices.size, 3), dtype=np.float32)
+        if indices.size == 0:
+            return coords_mm
+
+        plane = int(shape[1]) * int(shape[2])
+        axis0 = indices // plane
+        remainder = indices - axis0 * plane
+        axis1 = remainder // int(shape[2])
+        axis2 = remainder - axis1 * int(shape[2])
+
+        coords_mm[:, 0] = axis0.astype(np.float32, copy=False)
+        coords_mm[:, 1] = axis1.astype(np.float32, copy=False)
+        coords_mm[:, 2] = axis2.astype(np.float32, copy=False)
+        coords_mm *= scale
+        return coords_mm
+
+    def _estimate_voxels_above_threshold(self, thr: float) -> int:
+        if self._scalar_hist_upper_edges is None or self._scalar_hist_cumulative is None:
+            if self._normalised_volume is None:
+                return 0
+            return int(np.count_nonzero(self._normalised_volume >= thr))
+
+        idx = int(np.searchsorted(self._scalar_hist_upper_edges, thr, side="left"))
+        if idx >= self._scalar_hist_cumulative.size:
+            return 0
+        return int(self._scalar_hist_cumulative[idx])
+
+    def _current_color_intensity(self) -> float:
+        slider = getattr(self, "intensity_slider", None)
+        if slider is None:
+            return 1.0
+        return max(0.1, slider.value() / 100.0)
+
+    def _get_adjusted_colormap(self, cmap_name: str) -> mcolors.Colormap:
+        intensity = round(self._current_color_intensity(), 3)
+        key = (cmap_name, intensity)
+        cached = self._colormap_cache.get(key)
+        if cached is not None:
+            return cached
+        base = plt.get_cmap(cmap_name)
+        samples = base(np.linspace(0.0, 1.0, 512))
+        samples[:, :3] = np.clip(samples[:, :3] * intensity, 0.0, 1.0)
+        cmap = mcolors.ListedColormap(samples, name=f"{cmap_name}_x{intensity:.3f}")
+        self._colormap_cache[key] = cmap
+        return cmap
+
+    def _map_colors(
+        self, values: np.ndarray, cmap: mcolors.Colormap, alpha: float
+    ) -> np.ndarray:
+        # Clamp to the normalised range and map to RGBA so OpenGL can upload a
+        # single colour array for all voxels.
+        colours = np.asarray(cmap(np.clip(values, 0.0, 1.0)), dtype=np.float32)
+        colours[:, 3] = np.clip(colours[:, 3] * alpha, 0.0, 1.0)
+        return colours
+
+    def _update_slice_labels(self) -> None:
+        if not self._slice_controls:
+            return
+        bounds = self._data_bounds
+        has_bounds = bounds is not None
+        mins: Optional[np.ndarray]
+        maxs: Optional[np.ndarray]
+        if has_bounds:
+            mins, maxs = bounds  # type: ignore[assignment]
+        else:
+            mins = maxs = None
+        for control in self._slice_controls.values():
+            slider_enabled = bool(has_bounds and control.checkbox.isChecked())
+            control.min_slider.setEnabled(slider_enabled)
+            control.max_slider.setEnabled(slider_enabled)
+            if mins is None or maxs is None:
+                control.min_value.setText("--")
+                control.max_value.setText("--")
+                continue
+            axis = control.axis
+            axis_min = float(mins[axis])
+            axis_max = float(maxs[axis])
+            span = axis_max - axis_min
+            min_frac = control.min_slider.value() / 100.0
+            max_frac = control.max_slider.value() / 100.0
+            min_mm = axis_min + span * min_frac
+            max_mm = axis_min + span * max_frac
+            control.min_value.setText(f"{min_mm:.1f} mm")
+            control.max_value.setText(f"{max_mm:.1f} mm")
+
+    def _active_slice_bounds(self) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        if not self._slice_controls or self._data_bounds is None:
+            return None
+        mins, maxs = self._data_bounds
+        min_bounds = np.asarray(mins, dtype=np.float32).copy()
+        max_bounds = np.asarray(maxs, dtype=np.float32).copy()
+        active = False
+        for control in self._slice_controls.values():
+            if not control.checkbox.isChecked():
+                continue
+            axis = control.axis
+            axis_min = float(mins[axis])
+            axis_max = float(maxs[axis])
+            span = axis_max - axis_min
+            min_frac = control.min_slider.value() / 100.0
+            max_frac = control.max_slider.value() / 100.0
+            min_bounds[axis] = float(axis_min + span * min_frac)
+            max_bounds[axis] = float(axis_min + span * max_frac)
+            active = True
+        if not active:
+            return None
+        return min_bounds, max_bounds
+
+    def _slice_status_suffix(self) -> str:
+        bounds = self._active_slice_bounds()
+        if bounds is None:
+            return ""
+        mins, maxs = bounds
+        parts: list[str] = []
+        for control in self._slice_controls.values():
+            if not control.checkbox.isChecked():
+                continue
+            axis = control.axis
+            parts.append(
+                f"{control.negative_name}–{control.positive_name} "
+                f"{mins[axis]:.1f}–{maxs[axis]:.1f} mm"
+            )
+        if not parts:
+            return ""
+        return " Slice windows: " + ", ".join(parts) + "."
+
+    def _mask_coords(
+        self, coords: np.ndarray, bounds: tuple[np.ndarray, np.ndarray]
+    ) -> np.ndarray:
+        mins, maxs = bounds
+        if coords.size == 0:
+            return np.zeros(0, dtype=bool)
+        mask = np.ones(coords.shape[0], dtype=bool)
+        for axis in range(3):
+            mask &= (coords[:, axis] >= mins[axis]) & (coords[:, axis] <= maxs[axis])
+        return mask
+
+    def _apply_slice_to_points(
+        self, coords: np.ndarray, values: Optional[np.ndarray]
+    ) -> tuple[np.ndarray, Optional[np.ndarray], Optional[tuple[np.ndarray, np.ndarray]]]:
+        bounds = self._active_slice_bounds()
+        if bounds is None or coords.size == 0:
+            return coords, values, None
+        mask = self._mask_coords(coords, bounds)
+        if not np.any(mask):
+            empty_coords = coords[:0].reshape(0, 3)
+            empty_vals = values[:0] if values is not None else None
+            return empty_coords, empty_vals, bounds
+        filtered_coords = coords[mask]
+        filtered_values = values[mask] if values is not None else None
+        return filtered_coords, filtered_values, bounds
+
+    def _clip_mesh_to_slices(
+        self,
+        verts: np.ndarray,
+        faces: np.ndarray,
+        values: Optional[np.ndarray],
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        Optional[np.ndarray],
+        Optional[tuple[np.ndarray, np.ndarray]],
+    ]:
+        bounds = self._active_slice_bounds()
+        if bounds is None or verts.size == 0:
+            return verts, faces, values, None
+        mask = self._mask_coords(verts, bounds)
+        if not np.any(mask):
+            empty_verts = verts[:0].reshape(0, 3)
+            empty_faces = faces[:0].reshape(0, 3)
+            empty_vals = values[:0] if values is not None else None
+            return empty_verts, empty_faces, empty_vals, bounds
+        selected = np.where(mask)[0]
+        index_map = -np.ones(mask.shape[0], dtype=np.int64)
+        index_map[selected] = np.arange(selected.size, dtype=np.int64)
+        mapped_faces = index_map[faces]
+        valid = (mapped_faces >= 0).all(axis=1)
+        mapped_faces = mapped_faces[valid]
+        if mapped_faces.size == 0:
+            empty_verts = verts[:0].reshape(0, 3)
+            empty_faces = faces[:0].reshape(0, 3)
+            empty_vals = values[:0] if values is not None else None
+            return empty_verts, empty_faces, empty_vals, bounds
+        new_verts = verts[selected]
+        new_values = values[selected] if values is not None else None
+        return new_verts, mapped_faces.astype(np.int32, copy=False), new_values, bounds
+
+    def _on_slice_toggle(self, name: str, _checked: bool) -> None:
+        if name not in self._slice_controls:
+            return
+        self._update_slice_labels()
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_slice_slider_change(self, name: str, which: str, value: int) -> None:
+        control = self._slice_controls.get(name)
+        if control is None:
+            return
+        if which == "min":
+            other = control.max_slider
+            if value > other.value():
+                other.blockSignals(True)
+                other.setValue(value)
+                other.blockSignals(False)
+        else:
+            other = control.min_slider
+            if value < other.value():
+                other.blockSignals(True)
+                other.setValue(value)
+                other.blockSignals(False)
+        self._update_slice_labels()
+        if not self._initialising and control.checkbox.isChecked():
+            self._update_plot()
+
+    def _remove_axis_labels(self) -> None:
+        if not self._axis_label_items:
+            return
+        for item in self._axis_label_items:
+            try:
+                self.view.removeItem(item)
+            except Exception:  # pragma: no cover - defensive cleanup
+                continue
+        self._axis_label_items.clear()
+
+    def _update_axis_labels(self) -> None:
+        self._remove_axis_labels()
+        if (
+            getattr(self, "axis_labels_checkbox", None) is None
+            or not self.axes_checkbox.isChecked()
+            or not self.axis_labels_checkbox.isChecked()
+            or self._current_bounds is None
+        ):
+            return
+        mins, maxs = self._current_bounds
+        spans = np.maximum(maxs - mins, 1e-6)
+        safe_spans = np.where(spans > 0, spans, 1.0)
+        centre = (mins + maxs) / 2.0
+        offsets = safe_spans * 0.05
+        colour = QColor(self._fg_color)
+        font = QFont("Helvetica", 13)
+
+        for _name, axis_idx, neg_name, pos_name in _SLICE_ORIENTATIONS:
+            if axis_idx == 0:
+                neg_pos = [
+                    float(mins[0] - offsets[0]),
+                    float(centre[1]),
+                    float(centre[2]),
+                ]
+                pos_pos = [
+                    float(maxs[0] + offsets[0]),
+                    float(centre[1]),
+                    float(centre[2]),
+                ]
+            elif axis_idx == 1:
+                neg_pos = [
+                    float(centre[0]),
+                    float(mins[1] - offsets[1]),
+                    float(centre[2]),
+                ]
+                pos_pos = [
+                    float(centre[0]),
+                    float(maxs[1] + offsets[1]),
+                    float(centre[2]),
+                ]
+            else:
+                neg_pos = [
+                    float(centre[0]),
+                    float(centre[1]),
+                    float(mins[2] - offsets[2]),
+                ]
+                pos_pos = [
+                    float(centre[0]),
+                    float(centre[1]),
+                    float(maxs[2] + offsets[2]),
+                ]
+            for text, position in ((neg_name, neg_pos), (pos_name, pos_pos)):
+                label = gl.GLTextItem()
+                label.setData(text=text, pos=position, color=colour, font=font)
+                self.view.addItem(label)
+                self._axis_label_items.append(label)
+
+    def _update_axis_item(self) -> None:
+        if self._axis_item is not None:
+            self.view.removeItem(self._axis_item)
+            self._axis_item = None
+        if not self.axes_checkbox.isChecked() or self._current_bounds is None:
+            self._remove_axis_labels()
+            return
+        mins, maxs = self._current_bounds
+        spans = np.maximum(maxs - mins, 1e-3)
+        axis = _AdjustableAxisItem() if "_AdjustableAxisItem" in globals() else gl.GLAxisItem()
+        axis.setSize(spans[0], spans[1], spans[2])
+        axis.translate(float(mins[0]), float(mins[1]), float(mins[2]))
+        thickness = getattr(self, "axis_thickness_slider", None)
+        if thickness is not None and hasattr(axis, "setLineWidth"):
+            axis.setLineWidth(float(thickness.value()))
+        self.view.addItem(axis)
+        self._axis_item = axis
+        self._update_axis_labels()
+
+    def _on_axes_toggle(self, checked: bool) -> None:
+        slider = getattr(self, "axis_thickness_slider", None)
+        if slider is not None:
+            slider.setEnabled(checked)
+        label_cb = getattr(self, "axis_labels_checkbox", None)
+        if label_cb is not None:
+            label_cb.setEnabled(checked)
+            if not checked:
+                self._remove_axis_labels()
+        self._update_axis_item()
+
+    def _on_axis_thickness_change(self, value: int) -> None:
+        if hasattr(self, "axis_thickness_value"):
+            self.axis_thickness_value.setText(f"{value} px")
+        if self._axis_item is not None and hasattr(self._axis_item, "setLineWidth"):
+            self._axis_item.setLineWidth(float(value))
+            self.view.update()
+
+    def _on_axis_labels_toggle(self, checked: bool) -> None:
+        if not checked:
+            self._remove_axis_labels()
+        else:
+            self._update_axis_labels()
+
+    def _on_intensity_change(self, value: int) -> None:
+        self.intensity_label.setText(f"{value / 100.0:.2f}×")
+        if not self._initialising:
+            self._update_plot()
+
+    def _update_light_labels(self) -> None:
+        self.light_azimuth_label.setText(f"{self.light_azimuth_slider.value():+d}°")
+        self.light_elevation_label.setText(
+            f"{self.light_elevation_slider.value():+d}°"
+        )
+        self.light_intensity_label.setText(
+            f"{self.light_intensity_slider.value() / 100.0:.2f}×"
+        )
+
+    def _update_light_shader(self) -> None:
+        shader = self._light_shader
+        if shader is None or not self._lighting_enabled:
+            self._apply_mesh_shader()
+            return
+        azimuth = math.radians(self.light_azimuth_slider.value())
+        elevation = math.radians(self.light_elevation_slider.value())
+        cos_el = math.cos(elevation)
+        direction = [
+            float(cos_el * math.cos(azimuth)),
+            float(cos_el * math.sin(azimuth)),
+            float(math.sin(elevation)),
+        ]
+        shader["lightDir"] = direction
+        shader["lightParams"] = [
+            max(0.0, self.light_intensity_slider.value() / 100.0),
+            0.35,
+        ]
+        self._apply_mesh_shader()
+
+    def _on_light_setting_change(self, _value: int) -> None:
+        self._update_light_labels()
+        self._update_light_shader()
+        if self._initialising:
+            return
+        if self.render_mode_combo.currentText() == "Surface mesh" and self._mesh_item is not None:
+            self._mesh_item.update()
+            self.view.update()
+
+    def _clear_colorbar(self) -> None:
+        fig = self._colorbar_canvas.figure
+        fig.clf()
+        fig.patch.set_facecolor(self._canvas_bg)
+        self._colorbar_canvas.draw_idle()
+
+    def _update_colorbar(
+        self,
+        cmap: mcolors.Colormap,
+        vmin: float = 0.0,
+        vmax: float = 1.0,
+        label: str = "Normalised intensity",
+    ) -> None:
+        fig = self._colorbar_canvas.figure
+        fig.clf()
+        # ``ScalarMappable`` draws a classic matplotlib colour bar giving users a
+        # persistent reference for the current normalisation range. We render it
+        # horizontally so it reads naturally underneath the legend label while
+        # leaving more vertical room for the surrounding controls.
+        ax = fig.add_axes([0.12, 0.35, 0.76, 0.32])
+        norm = plt.Normalize(vmin, vmax)
+        mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        colorbar = fig.colorbar(mappable, cax=ax, orientation="horizontal")
+        colorbar.set_label(label, color=self._fg_color, labelpad=6)
+        colorbar.ax.xaxis.set_ticks_position("bottom")
+        colorbar.ax.xaxis.set_label_position("bottom")
+        colorbar.ax.tick_params(colors=self._fg_color, which="both")
+        for spine in colorbar.ax.spines.values():
+            spine.set_color(self._fg_color)
+        colorbar.ax.set_facecolor(self._canvas_bg)
+        fig.patch.set_facecolor(self._canvas_bg)
+        self._colorbar_canvas.draw_idle()
+
+    def _remove_axis_labels(self) -> None:
+        if not self._axis_label_items:
+            return
+        for item in self._axis_label_items:
+            try:
+                self.view.removeItem(item)
+            except Exception:  # pragma: no cover - defensive cleanup
+                continue
+        self._axis_label_items.clear()
+
+    def _update_axis_labels(self) -> None:
+        self._remove_axis_labels()
+        if (
+            getattr(self, "axis_labels_checkbox", None) is None
+            or not self.axes_checkbox.isChecked()
+            or not self.axis_labels_checkbox.isChecked()
+            or self._current_bounds is None
+        ):
+            return
+        mins, maxs = self._current_bounds
+        spans = np.maximum(maxs - mins, 1e-6)
+        safe_spans = np.where(spans > 0, spans, 1.0)
+        centre = (mins + maxs) / 2.0
+        offsets = safe_spans * 0.05
+        colour = QColor(self._fg_color)
+        font = QFont("Helvetica", 13)
+
+        for _name, axis_idx, neg_name, pos_name in _SLICE_ORIENTATIONS:
+            if axis_idx == 0:
+                neg_pos = [
+                    float(mins[0] - offsets[0]),
+                    float(centre[1]),
+                    float(centre[2]),
+                ]
+                pos_pos = [
+                    float(maxs[0] + offsets[0]),
+                    float(centre[1]),
+                    float(centre[2]),
+                ]
+            elif axis_idx == 1:
+                neg_pos = [
+                    float(centre[0]),
+                    float(mins[1] - offsets[1]),
+                    float(centre[2]),
+                ]
+                pos_pos = [
+                    float(centre[0]),
+                    float(maxs[1] + offsets[1]),
+                    float(centre[2]),
+                ]
+            else:
+                neg_pos = [
+                    float(centre[0]),
+                    float(centre[1]),
+                    float(mins[2] - offsets[2]),
+                ]
+                pos_pos = [
+                    float(centre[0]),
+                    float(centre[1]),
+                    float(maxs[2] + offsets[2]),
+                ]
+            for text, position in ((neg_name, neg_pos), (pos_name, pos_pos)):
+                label = gl.GLTextItem()
+                label.setData(text=text, pos=position, color=colour, font=font)
+                self.view.addItem(label)
+                self._axis_label_items.append(label)
+
+    def _update_scene_bounds(self, mins: np.ndarray, maxs: np.ndarray) -> None:
+        spans = np.maximum(maxs - mins, 1e-3)
+        # Update the camera centre/distance so the current geometry fits snugly
+        # inside the viewport regardless of the downsampling level.
+        center = (mins + maxs) / 2.0
+        self._current_bounds = (mins, maxs)
+        self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
+        self.view.opts["distance"] = float(np.linalg.norm(spans) * 1.2)
+        self._update_axis_item()
+
+    def _update_axis_item(self) -> None:
+        if self._axis_item is not None:
+            self.view.removeItem(self._axis_item)
+            self._axis_item = None
+        if not self.axes_checkbox.isChecked() or self._current_bounds is None:
+            self._remove_axis_labels()
+            return
+        mins, maxs = self._current_bounds
+        spans = np.maximum(maxs - mins, 1e-3)
+        axis = _AdjustableAxisItem() if "_AdjustableAxisItem" in globals() else gl.GLAxisItem()
+        axis.setSize(spans[0], spans[1], spans[2])
+        axis.translate(float(mins[0]), float(mins[1]), float(mins[2]))
+        thickness = getattr(self, "axis_thickness_slider", None)
+        if thickness is not None and hasattr(axis, "setLineWidth"):
+            axis.setLineWidth(float(thickness.value()))
+        self.view.addItem(axis)
+        self._axis_item = axis
+        self._update_axis_labels()
+
+    def _on_axes_toggle(self, checked: bool) -> None:
+        slider = getattr(self, "axis_thickness_slider", None)
+        if slider is not None:
+            slider.setEnabled(checked)
+        label_cb = getattr(self, "axis_labels_checkbox", None)
+        if label_cb is not None:
+            label_cb.setEnabled(checked)
+            if not checked:
+                self._remove_axis_labels()
+        self._update_axis_item()
+
+    def _on_axis_thickness_change(self, value: int) -> None:
+        if hasattr(self, "axis_thickness_value"):
+            self.axis_thickness_value.setText(f"{value} px")
+        if self._axis_item is not None and hasattr(self._axis_item, "setLineWidth"):
+            self._axis_item.setLineWidth(float(value))
+            self.view.update()
+
+    def _on_axis_labels_toggle(self, checked: bool) -> None:
+        if not checked:
+            self._remove_axis_labels()
+        else:
+            self._update_axis_labels()
+
+    def _update_plot(self):
+        if self._downsampled is None or self._normalised_volume is None:
+            self.status_label.setText("No scalar volume available for rendering.")
+            self._clear_colorbar()
+            return
+
+        thr = self.thresh_slider.value() / 100.0
+        self.thresh_label.setText(f"{thr:.2f}")
+        cmap = self.colormap_combo.currentText() or "viridis"
+        alpha = self.opacity_slider.value() / 100.0
+        mode = self.render_mode_combo.currentText()
+
+        if mode == "Surface mesh":
+            self._draw_surface_mesh(thr, cmap, alpha)
+        else:
+            self._draw_point_cloud(thr, cmap, alpha)
+
+    def _handle_empty_point_cloud(self, shape: Sequence[int], scale: np.ndarray, thr: float) -> None:
+        if self._scatter_item is not None:
+            self.view.removeItem(self._scatter_item)
+            self._scatter_item = None
+        mins = np.zeros(3, dtype=np.float32)
+        spans = np.maximum((np.asarray(shape, dtype=np.float32) - 1.0) * scale, 1e-3)
+        maxs = mins + spans
+        self._update_scene_bounds(mins, maxs)
+        self._clear_colorbar()
+        self.status_label.setText(
+            f"No voxels above threshold {thr:.2f}. Lower the threshold to reveal data."
+        )
+
+    def _draw_point_cloud(self, thr: float, cmap_name: str, alpha: float) -> None:
+        downsampled = self._downsampled
+        if downsampled is None:
+            self.status_label.setText("No data available for point-cloud rendering.")
+            self._clear_colorbar()
+            return
+
+        if self._mesh_item is not None:
+            # Switching from the iso-surface to point-cloud view discards the
+            # cached ``GLMeshItem`` so only the scatter is redrawn.
+            self.view.removeItem(self._mesh_item)
+            self._mesh_item = None
+
+        step = self._downsample_step
+        scale = self._voxel_sizes_vec * float(step)
+        shape = self._point_shape or downsampled.shape
+        sorted_values = self._point_sorted_values
+        sorted_indices = self._point_sorted_indices
+
+        coords_mm: Optional[np.ndarray] = None
+        values: Optional[np.ndarray] = None
+
+        if (
+            sorted_values is None
+            or sorted_indices is None
+            or self._point_shape is None
+            or sorted_values.size == 0
+        ):
+            mask = downsampled >= thr
+            coords = np.argwhere(mask)
+            if coords.size == 0:
+                self._handle_empty_point_cloud(shape, scale, thr)
+                return
+            coords_mm = coords.astype(np.float32, copy=False)
+            coords_mm *= scale
+            values = downsampled[mask].astype(np.float32, copy=False)
+        else:
+            start = int(np.searchsorted(sorted_values, thr, side="left"))
+            if start >= sorted_values.size:
+                self._handle_empty_point_cloud(shape, scale, thr)
+                return
+
+            selected_indices = sorted_indices[start:]
+            selected_values = sorted_values[start:]
+            if selected_indices.size > self._max_points:
+                sample_idx = np.linspace(
+                    0, selected_indices.size - 1, self._max_points, dtype=np.int64
+                )
+                selected_indices = selected_indices[sample_idx]
+                selected_values = selected_values[sample_idx]
+
+            if selected_indices.size == 0:
+                self._handle_empty_point_cloud(shape, scale, thr)
+                return
+
+            if selected_indices.size > 1:
+                order = np.argsort(selected_indices, kind="mergesort")
+                selected_indices = selected_indices[order]
+                selected_values = selected_values[order]
+
+            coords_mm = self._indices_to_world(selected_indices, shape, scale)
+            values = selected_values.astype(np.float32, copy=False)
+
+        if coords_mm is None or values is None:
+            self._handle_empty_point_cloud(shape, scale, thr)
+            return
+
+        coords_mm, values, slice_bounds = self._apply_slice_to_points(coords_mm, values)
+        if coords_mm.size == 0:
+            if slice_bounds is not None:
+                if self._scatter_item is not None:
+                    self.view.removeItem(self._scatter_item)
+                    self._scatter_item = None
+                self._clear_colorbar()
+                mins, maxs = slice_bounds
+                self._update_scene_bounds(mins, maxs)
+                self.status_label.setText(
+                    "Slice planes removed all voxels at threshold "
+                    f"{thr:.2f}. Adjust the slicer sliders or disable slicing."
+                )
+                return
+            self._handle_empty_point_cloud(shape, scale, thr)
+            return
+
+        if values is None:
+            values = np.empty(coords_mm.shape[0], dtype=np.float32)
+        cmap = self._get_adjusted_colormap(cmap_name)
+        colors = self._map_colors(values, cmap, alpha)
+
+        if self._scatter_item is None:
+            # ``pxMode`` keeps the slider-controlled marker size in screen
+            # pixels, mirroring the behaviour of the original matplotlib view.
+            self._scatter_item = gl.GLScatterPlotItem(pxMode=True)
+            self.view.addItem(self._scatter_item)
+        self._scatter_item.setData(pos=coords_mm, color=colors, size=float(self.point_slider.value()))
+        self._scatter_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+
+        mins = coords_mm.min(axis=0)
+        maxs = coords_mm.max(axis=0)
+        self._update_scene_bounds(mins, maxs)
+        self._update_colorbar(cmap)
+
+        total_voxels = self._estimate_voxels_above_threshold(thr)
+        spin = getattr(self, "downsample_spin", None)
+        downsample_source = "manual" if spin and spin.value() > 0 else "auto"
+        lighting_suffix = ""
+        if self._light_shader is not None or self._flat_shader is not None:
+            lighting_suffix = " Lighting " + ("enabled." if self._lighting_enabled else "disabled.")
+        self.status_label.setText(
+            "Point cloud: "
+            f"{coords_mm.shape[0]:,} voxels (threshold {thr:.2f}, opacity {alpha:.2f}, "
+            f"point size {self.point_slider.value()}). "
+            f"Downsample step {step} ({downsample_source}); "
+            f"≈ total voxels ≥ threshold {total_voxels:,}.{lighting_suffix}"
+            f"{self._slice_status_suffix()}"
+        )
+
+    def _draw_surface_mesh(self, thr: float, cmap_name: str, alpha: float) -> None:
+        if not HAS_SKIMAGE:
+            if self._mesh_item is not None:
+                self.view.removeItem(self._mesh_item)
+                self._mesh_item = None
+            self._clear_colorbar()
+            self.status_label.setText(
+                "Surface rendering requires the optional 'scikit-image' dependency."
+            )
+            return
+
+        volume = self._normalised_volume
+        if volume is None:
+            self.status_label.setText("No scalar volume available for rendering.")
+            self._clear_colorbar()
+            return
+
+        if self._scatter_item is not None:
+            self.view.removeItem(self._scatter_item)
+            self._scatter_item = None
+
+        step = self._downsample_step
+        slices = tuple(slice(None, None, step) for _ in range(3))
+        reduced = volume[slices]
+
+        if min(reduced.shape) < 2:
+            if self._mesh_item is not None:
+                self.view.removeItem(self._mesh_item)
+                self._mesh_item = None
+            self._clear_colorbar()
+            self.status_label.setText(
+                "Volume is too small after downsampling to compute a surface mesh."
+            )
+            return
+
+        vol_min = float(np.min(reduced))
+        vol_max = float(np.max(reduced))
+        if not (vol_min < thr < vol_max):
+            if self._mesh_item is not None:
+                self.view.removeItem(self._mesh_item)
+                self._mesh_item = None
+            self._clear_colorbar()
+            self.status_label.setText(
+                f"Iso level {thr:.2f} is outside the volume range [{vol_min:.2f}, {vol_max:.2f}]."
+            )
+            return
+
+        try:
+            verts, faces, _normals, values = sk_measure.marching_cubes(
+                reduced,
+                level=thr,
+                step_size=max(1, self._surface_step),
+                spacing=(
+                    step * self._voxel_sizes[0],
+                    step * self._voxel_sizes[1],
+                    step * self._voxel_sizes[2],
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            if self._mesh_item is not None:
+                self.view.removeItem(self._mesh_item)
+                self._mesh_item = None
+            self._clear_colorbar()
+            self.status_label.setText(f"Marching cubes failed: {exc}")
+            return
+
+        vertex_values = np.clip(values, 0.0, 1.0)
+        verts, faces, vertex_values, slice_bounds = self._clip_mesh_to_slices(
+            verts, faces, vertex_values
+        )
+        if verts.size == 0 or faces.size == 0:
+            if slice_bounds is not None:
+                if self._mesh_item is not None:
+                    self.view.removeItem(self._mesh_item)
+                    self._mesh_item = None
+                self._clear_colorbar()
+                mins, maxs = slice_bounds
+                self._update_scene_bounds(mins, maxs)
+                self.status_label.setText(
+                    f"Slice planes removed all surface triangles at iso level {thr:.2f}. "
+                    "Adjust the slicer sliders or disable slicing."
+                )
+                return
+            if self._mesh_item is not None:
+                self.view.removeItem(self._mesh_item)
+                self._mesh_item = None
+            self._clear_colorbar()
+            self.status_label.setText(
+                f"No closed surface found at iso level {thr:.2f}; adjust the slider."
+            )
+            return
+
+        if vertex_values is None:
+            vertex_values = np.zeros(verts.shape[0], dtype=np.float32)
+
+        meshdata = gl.MeshData(vertexes=verts, faces=faces)
+        cmap = self._get_adjusted_colormap(cmap_name)
+        vertex_colors = self._map_colors(vertex_values, cmap, alpha)
+        meshdata.setVertexColors(vertex_colors)
+
+        if self._mesh_item is None:
+            # ``GLMeshItem`` retains the uploaded vertex buffers so subsequent
+            # slider tweaks only update colours instead of reallocating the mesh.
+            self._mesh_item = gl.GLMeshItem(
+                meshdata=meshdata,
+                smooth=False,
+                shader="shaded",
+                drawEdges=False,
+            )
+            self.view.addItem(self._mesh_item)
+        else:
+            self._mesh_item.setMeshData(meshdata=meshdata)
+
+        self._update_light_shader()
+        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+
+        mins = np.min(verts, axis=0)
+        maxs = np.max(verts, axis=0)
+        self._update_scene_bounds(mins, maxs)
+        self._update_colorbar(cmap, vmin=thr, vmax=1.0, label="Iso level (normalised)")
+
+        total_voxels = int(np.count_nonzero(self._normalised_volume >= thr))
+        spin = getattr(self, "downsample_spin", None)
+        downsample_source = "manual" if spin and spin.value() > 0 else "auto"
+        lighting_suffix = ""
+        if self._light_shader is not None or self._flat_shader is not None:
+            lighting_suffix = " Lighting " + ("enabled." if self._lighting_enabled else "disabled.")
+        self.status_label.setText(
+            "Surface mesh: "
+            f"{verts.shape[0]:,} vertices / {faces.shape[0]:,} faces (iso {thr:.2f}, "
+            f"opacity {alpha:.2f}). Downsample step {step} ({downsample_source}); "
+            f"marching step {self._surface_step}. Total voxels ≥ level {total_voxels:,}.{lighting_suffix}"
+            f"{self._slice_status_suffix()}"
+        )
+
+    def _on_render_mode_change(self, _mode: str) -> None:
+        if self._initialising:
+            return
+        self._update_mode_dependent_controls()
+        self._update_plot()
+
+    def _update_mode_dependent_controls(self) -> None:
+        mode = self.render_mode_combo.currentText()
+        is_surface = mode == "Surface mesh"
+        self.point_label.setVisible(not is_surface)
+        self.point_slider.setVisible(not is_surface)
+        self.point_slider.setEnabled(not is_surface)
+        self.surface_step_label.setEnabled(is_surface)
+        self.surface_step_spin.setEnabled(is_surface)
+        if hasattr(self, "lighting_group"):
+            self.lighting_group.setEnabled(
+                is_surface
+                and (self._light_shader is not None or self._flat_shader is not None)
+            )
+            self._update_light_controls_enabled()
+        if is_surface:
+            self.thresh_text.setText("Iso level:")
+            self.thresh_slider.setToolTip(
+                "Iso-surface level within the normalised volume (0–1)."
+            )
+        else:
+            self.thresh_text.setText("Threshold:")
+            self.thresh_slider.setToolTip(
+                "Minimum normalised intensity included in the rendering."
+            )
+
+    def _on_opacity_change(self, value: int) -> None:
+        self.opacity_label.setText(f"{value / 100.0:.2f}")
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_max_points_change(self, value: int) -> None:
+        self._max_points = int(value)
+        self._prepare_downsampled()
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_downsample_change(self, _value: int) -> None:
+        self._prepare_downsampled()
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_surface_step_change(self, value: int) -> None:
+        self._surface_step = max(1, int(value))
+        if not self._initialising and self.render_mode_combo.currentText() == "Surface mesh":
+            self._update_plot()
+
+
+class Surface3DDialog(QDialog):
+    """Interactive renderer for surface meshes from GIFTI or FreeSurfer."""
+
+    def __init__(
+        self,
+        parent,
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        scalars: Optional[dict[str, np.ndarray]] = None,
+        meta: Optional[dict[str, Any]] = None,
+        title: Optional[str] = None,
+        dark_theme: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        if not HAS_PYQTGRAPH:
+            raise RuntimeError(
+                "Surface rendering requires the optional 'pyqtgraph' dependency."
+            )
+        self._initialising = True
+        self.setWindowTitle(title or "Surface Viewer")
+        self.resize(1200, 900)
+        self.setMinimumSize(780, 560)
+        self.setSizeGripEnabled(True)
+
+        verts = np.asarray(vertices, dtype=np.float32)
+        faces_arr = np.asarray(faces, dtype=np.int32)
+        if verts.ndim != 2 or verts.shape[1] != 3:
+            raise ValueError("Surface vertices must be an (N, 3) array")
+        if faces_arr.ndim != 2 or faces_arr.shape[1] != 3:
+            raise ValueError("Surface faces must be an (M, 3) array")
+        if faces_arr.size and int(faces_arr.max(initial=-1)) >= verts.shape[0]:
+            raise ValueError("Face indices exceed available vertices")
+
+        self._vertices = verts
+        self._faces = faces_arr
+        self._meta = meta or {}
+        self._dark_theme = bool(dark_theme)
+        self._fg_color = "#f0f0f0" if self._dark_theme else "#202020"
+        self._canvas_bg = "#202020" if self._dark_theme else "#ffffff"
+        self._axis_label_items: list[gl.GLTextItem] = []
+        self._data_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._slice_controls: dict[str, _SliceControl] = {}
+
+        self._scalar_fields: dict[str, np.ndarray] = {}
+        if scalars:
+            for name, values in scalars.items():
+                arr = np.asarray(values, dtype=np.float32).reshape(-1)
+                if arr.shape[0] != verts.shape[0]:
+                    continue
+                safe_name = str(name).strip() or f"Field {len(self._scalar_fields) + 1}"
+                self._scalar_fields[safe_name] = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+        self._mesh_item: Optional[gl.GLMeshItem] = None
+        self._axis_item: Optional[gl.GLAxisItem] = None
+        self._current_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._colormap_cache: dict[tuple[str, float], mcolors.Colormap] = {}
+        self._light_shader = _create_directional_light_shader()
+        self._flat_shader = _create_flat_color_shader()
+        self._lighting_enabled = True
+
+        if self._vertices.size:
+            mins = np.min(self._vertices, axis=0).astype(np.float32, copy=False)
+            maxs = np.max(self._vertices, axis=0).astype(np.float32, copy=False)
+            self._data_bounds = (mins.copy(), maxs.copy())
+
+        layout = QVBoxLayout(self)
+
+        self._splitter = QSplitter(Qt.Vertical)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setHandleWidth(12)
+        layout.addWidget(self._splitter)
+
+        self._view_container = QWidget()
+        view_layout = QVBoxLayout(self._view_container)
+        view_layout.setContentsMargins(0, 0, 0, 0)
+        view_layout.setSpacing(0)
+
+        # ``GLViewWidget`` renders using OpenGL so panning/zooming the scene does
+        # not require recomputing the mesh when interacting with the viewport.
+        self.view = gl.GLViewWidget()
+        self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.view.setBackgroundColor(self._canvas_bg)
+        self.view.opts["distance"] = 200
+        self.view.opts["elevation"] = 20
+        self.view.opts["azimuth"] = -60
+        view_layout.addWidget(self.view)
+
+        self._splitter.addWidget(self._view_container)
+
+        settings_container = QWidget()
+        settings_layout = QVBoxLayout(settings_container)
+        settings_layout.setContentsMargins(6, 6, 6, 6)
+        settings_layout.setSpacing(10)
+
+        # Allow the combined colour bar + control pane to be docked on the
+        # side or bottom of the viewport.
+        placement_layout = QHBoxLayout()
+        placement_layout.setSpacing(6)
+        placement_layout.addWidget(QLabel("Panel placement:"))
+        self.panel_location_combo = QComboBox()
+        self.panel_location_combo.addItems(["Bottom", "Left", "Right"])
+        placement_layout.addWidget(self.panel_location_combo)
+        placement_layout.addStretch()
+        settings_layout.addLayout(placement_layout)
+
+        scalar_row = QHBoxLayout()
+        scalar_row.setContentsMargins(0, 0, 0, 0)
+        scalar_row.setSpacing(8)
+        scalar_row.addWidget(QLabel("Scalar:"))
+        self.scalar_combo = QComboBox()
+        self.scalar_combo.addItem("Constant colour", userData=None)
+        for name in sorted(self._scalar_fields):
+            self.scalar_combo.addItem(name, userData=name)
+        self.scalar_combo.setEnabled(bool(self._scalar_fields))
+        scalar_row.addWidget(self.scalar_combo, 1)
+        scalar_row.addStretch()
+        settings_layout.addLayout(scalar_row)
+
+        appearance_group = QGroupBox("Appearance")
+        appearance_layout = QGridLayout(appearance_group)
+        appearance_layout.setColumnStretch(1, 1)
+
+        row = 0
+        appearance_layout.addWidget(QLabel("Colormap:"), row, 0)
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.addItems([
+            "viridis",
+            "plasma",
+            "inferno",
+            "magma",
+            "cividis",
+            "turbo",
+            "twilight",
+            "cubehelix",
+            "Spectral",
+            "coolwarm",
+            "YlGnBu",
+            "Greys",
+            "bone",
+        ])
+        self.colormap_combo.setToolTip(
+            "Select the matplotlib colormap for vertex intensities.",
+        )
+        appearance_layout.addWidget(self.colormap_combo, row, 1)
+
+        row += 1
+        appearance_layout.addWidget(QLabel("Opacity:"), row, 0)
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(10, 100)
+        self.opacity_slider.setValue(80)
+        self.opacity_slider.setToolTip(
+            "Global alpha applied to rendered surfaces.",
+        )
+        appearance_layout.addWidget(self.opacity_slider, row, 1)
+        self.opacity_label = QLabel("0.80")
+        appearance_layout.addWidget(self.opacity_label, row, 2)
+
+        row += 1
+        appearance_layout.addWidget(QLabel("Colour intensity:"), row, 0)
+        self.color_intensity_slider = QSlider(Qt.Horizontal)
+        self.color_intensity_slider.setRange(10, 200)
+        self.color_intensity_slider.setValue(100)
+        self.color_intensity_slider.setToolTip(
+            "Scale factor applied to RGB values after colormap lookup (0.1–2.0×).",
+        )
+        appearance_layout.addWidget(self.color_intensity_slider, row, 1)
+        self.color_intensity_label = QLabel("1.00×")
+        appearance_layout.addWidget(self.color_intensity_label, row, 2)
+        settings_layout.addWidget(appearance_group)
+
+        # Keep the colour bar within the scroll area so it collapses together
+        # with the rest of the surface controls.
+        colorbar_group = QGroupBox("Colour bar")
+        colorbar_layout = QVBoxLayout(colorbar_group)
+        colorbar_layout.setContentsMargins(8, 6, 8, 6)
+        colorbar_layout.setSpacing(4)
+        self._colorbar_canvas = FigureCanvas(plt.Figure(figsize=(2.6, 1.4)))
+        self._colorbar_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._colorbar_canvas.setFixedHeight(180)
+        self._colorbar_canvas.figure.patch.set_facecolor(self._canvas_bg)
+        colorbar_layout.addWidget(self._colorbar_canvas)
+        settings_layout.addWidget(colorbar_group)
+
+        axes_group = QGroupBox("Axes")
+        axes_layout = QGridLayout(axes_group)
+        axes_layout.setColumnStretch(1, 1)
+
+        row = 0
+        self.axes_checkbox = QCheckBox("Show axes")
+        self.axes_checkbox.setChecked(False)
+        axes_layout.addWidget(self.axes_checkbox, row, 0, 1, 3)
+
+        row += 1
+        axes_layout.addWidget(QLabel("Axis thickness:"), row, 0)
+        self.axis_thickness_slider = QSlider(Qt.Horizontal)
+        self.axis_thickness_slider.setRange(1, 12)
+        self.axis_thickness_slider.setValue(3)
+        self.axis_thickness_slider.setToolTip(
+            "Line width of the anatomical axes (pixels).",
+        )
+        self.axis_thickness_slider.setEnabled(False)
+        axes_layout.addWidget(self.axis_thickness_slider, row, 1)
+        self.axis_thickness_value = QLabel("3 px")
+        axes_layout.addWidget(self.axis_thickness_value, row, 2)
+
+        row += 1
+        self.axis_labels_checkbox = QCheckBox("Show axis labels")
+        self.axis_labels_checkbox.setChecked(False)
+        self.axis_labels_checkbox.setEnabled(False)
+        axes_layout.addWidget(self.axis_labels_checkbox, row, 0, 1, 3)
+        settings_layout.addWidget(axes_group)
+
+        slice_group = QGroupBox("Slice planes")
+        slice_layout = QVBoxLayout(slice_group)
+        slice_layout.setContentsMargins(8, 4, 8, 4)
+        slice_layout.setSpacing(6)
+        self._slice_controls.clear()
+        for key, axis_idx, neg_name, pos_name in _SLICE_ORIENTATIONS:
+            row_layout = QHBoxLayout()
+            row_layout.setSpacing(6)
+            checkbox = QCheckBox(key.capitalize())
+            checkbox.setChecked(False)
+            row_layout.addWidget(checkbox)
+            row_layout.addSpacing(4)
+            row_layout.addWidget(QLabel(f"{neg_name}:"))
+            min_slider = QSlider(Qt.Horizontal)
+            min_slider.setRange(0, 100)
+            min_slider.setValue(0)
+            min_slider.setEnabled(False)
+            row_layout.addWidget(min_slider, 1)
+            min_value = QLabel("0.0 mm")
+            row_layout.addWidget(min_value)
+            row_layout.addSpacing(6)
+            row_layout.addWidget(QLabel(f"{pos_name}:"))
+            max_slider = QSlider(Qt.Horizontal)
+            max_slider.setRange(0, 100)
+            max_slider.setValue(100)
+            max_slider.setEnabled(False)
+            row_layout.addWidget(max_slider, 1)
+            max_value = QLabel("0.0 mm")
+            row_layout.addWidget(max_value)
+            row_layout.addStretch()
+            slice_layout.addLayout(row_layout)
+            control = _SliceControl(
+                checkbox=checkbox,
+                min_slider=min_slider,
+                max_slider=max_slider,
+                min_value=min_value,
+                max_value=max_value,
+                axis=axis_idx,
+                negative_name=neg_name,
+                positive_name=pos_name,
+            )
+            self._slice_controls[key] = control
+            checkbox.toggled.connect(lambda checked, name=key: self._on_slice_toggle(name, checked))
+            min_slider.valueChanged.connect(
+                lambda value, name=key: self._on_slice_slider_change(name, "min", value)
+            )
+            max_slider.valueChanged.connect(
+                lambda value, name=key: self._on_slice_slider_change(name, "max", value)
+            )
+        slice_layout.addStretch()
+        settings_layout.addWidget(slice_group)
+
+        self.lighting_group = QGroupBox("Lighting")
+        light_layout = QGridLayout(self.lighting_group)
+        light_row = 0
+        self.light_enable_checkbox = QCheckBox("Enable lighting")
+        self.light_enable_checkbox.setChecked(True)
+        light_layout.addWidget(self.light_enable_checkbox, light_row, 0, 1, 3)
+        light_row += 1
+        light_layout.addWidget(QLabel("Azimuth:"), light_row, 0)
+        self.light_azimuth_slider = QSlider(Qt.Horizontal)
+        self.light_azimuth_slider.setRange(-180, 180)
+        self.light_azimuth_slider.setValue(-45)
+        self.light_azimuth_slider.setToolTip(
+            "Horizontal direction of the light source relative to the mesh (°).",
+        )
+        light_layout.addWidget(self.light_azimuth_slider, light_row, 1)
+        self.light_azimuth_label = QLabel("-45°")
+        light_layout.addWidget(self.light_azimuth_label, light_row, 2)
+
+        light_row += 1
+        light_layout.addWidget(QLabel("Elevation:"), light_row, 0)
+        self.light_elevation_slider = QSlider(Qt.Horizontal)
+        self.light_elevation_slider.setRange(-90, 90)
+        self.light_elevation_slider.setValue(30)
+        self.light_elevation_slider.setToolTip(
+            "Vertical angle of the light source relative to the mesh (°).",
+        )
+        light_layout.addWidget(self.light_elevation_slider, light_row, 1)
+        self.light_elevation_label = QLabel("30°")
+        light_layout.addWidget(self.light_elevation_label, light_row, 2)
+
+        light_row += 1
+        light_layout.addWidget(QLabel("Intensity:"), light_row, 0)
+        self.light_intensity_slider = QSlider(Qt.Horizontal)
+        self.light_intensity_slider.setRange(10, 300)
+        self.light_intensity_slider.setValue(130)
+        self.light_intensity_slider.setToolTip(
+            "Diffuse lighting strength (0.1–3.0×). Ambient light stays constant.",
+        )
+        light_layout.addWidget(self.light_intensity_slider, light_row, 1)
+        self.light_intensity_label = QLabel("1.30×")
+        light_layout.addWidget(self.light_intensity_label, light_row, 2)
+        if self._light_shader is None and self._flat_shader is None:
+            self.lighting_group.setEnabled(False)
+        settings_layout.addWidget(self.lighting_group)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        settings_layout.addWidget(self.status_label)
+        settings_layout.addStretch()
+
+        self._panel_scroll = QScrollArea()
+        self._panel_scroll.setWidget(settings_container)
+        self._panel_scroll.setWidgetResizable(True)
+        self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._splitter.addWidget(self._panel_scroll)
+        self._splitter.setStretchFactor(0, 4)
+        self._splitter.setStretchFactor(1, 1)
+
+        self.panel_location_combo.currentTextChanged.connect(self._on_panel_location_change)
+        self.scalar_combo.currentIndexChanged.connect(self._on_scalar_change)
+        self.colormap_combo.currentTextChanged.connect(self._on_colormap_change)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_change)
+        self.color_intensity_slider.valueChanged.connect(self._on_color_intensity_change)
+        self.axes_checkbox.toggled.connect(self._on_axes_toggle)
+        self.axis_thickness_slider.valueChanged.connect(self._on_axis_thickness_change)
+        self.axis_labels_checkbox.toggled.connect(self._on_axis_labels_toggle)
+        self.light_enable_checkbox.toggled.connect(self._on_light_enabled_toggle)
+        self.light_azimuth_slider.valueChanged.connect(self._on_light_setting_change)
+        self.light_elevation_slider.valueChanged.connect(self._on_light_setting_change)
+        self.light_intensity_slider.valueChanged.connect(self._on_light_setting_change)
+
+        self._apply_panel_layout(self.panel_location_combo.currentText())
+        self._update_light_controls_enabled()
+
+        # Prepare labels and shader uniforms before the first draw call.
+        self._on_axis_thickness_change(self.axis_thickness_slider.value())
+        self._update_slice_labels()
+        self._on_color_intensity_change(self.color_intensity_slider.value())
+        self._update_light_labels()
+        self._update_light_shader()
+
+        self._initialising = False
+        self._update_plot()
+
+    def _apply_panel_layout(self, location: str) -> None:
+        """Reorder the settings splitter when users move the control pane."""
+
+        if not hasattr(self, "_splitter"):
+            return
+
+        normalised = (location or "bottom").strip().lower()
+        if normalised not in {"bottom", "left", "right"}:
+            normalised = "bottom"
+
+        view_first = True
+        if normalised == "bottom":
+            self._splitter.setOrientation(Qt.Vertical)
+            view_first = True
+        else:
+            self._splitter.setOrientation(Qt.Horizontal)
+            view_first = normalised != "left"
+
+        widgets = [self._view_container, self._panel_scroll]
+        if not view_first:
+            widgets.reverse()
+        for index, widget in enumerate(widgets):
+            if self._splitter.indexOf(widget) != index:
+                self._splitter.insertWidget(index, widget)
+
+        if view_first:
+            self._splitter.setStretchFactor(0, 4)
+            self._splitter.setStretchFactor(1, 1)
+        else:
+            self._splitter.setStretchFactor(0, 1)
+            self._splitter.setStretchFactor(1, 4)
+
+    def _on_panel_location_change(self, location: str) -> None:
+        self._apply_panel_layout(location)
+
+    def _update_light_controls_enabled(self) -> None:
+        enabled = bool(self.lighting_group.isEnabled() and self._lighting_enabled)
+        for widget in (
+            self.light_azimuth_slider,
+            self.light_elevation_slider,
+            self.light_intensity_slider,
+        ):
+            widget.setEnabled(enabled)
+        for label in (
+            self.light_azimuth_label,
+            self.light_elevation_label,
+            self.light_intensity_label,
+        ):
+            label.setEnabled(enabled)
+
+    def _apply_mesh_shader(self) -> None:
+        if self._mesh_item is None:
+            return
+        if self._light_shader is not None and self._lighting_enabled:
+            self._mesh_item.setShader(self._light_shader)
+        elif self._flat_shader is not None:
+            self._mesh_item.setShader(self._flat_shader)
+        else:
+            self._mesh_item.setShader("shaded")
+
+    def _on_light_enabled_toggle(self, checked: bool) -> None:
+        self._lighting_enabled = bool(checked)
+        self._update_light_controls_enabled()
+        if self._lighting_enabled:
+            self._update_light_shader()
+        else:
+            self._apply_mesh_shader()
+        if not self._initialising and self._mesh_item is not None:
+            self._mesh_item.update()
+            self.view.update()
+
+    def _current_color_intensity(self) -> float:
+        return max(0.1, self.color_intensity_slider.value() / 100.0)
+
+    def _get_adjusted_colormap(self, cmap_name: str) -> mcolors.Colormap:
+        intensity = round(self._current_color_intensity(), 3)
+        key = (cmap_name, intensity)
+        cached = self._colormap_cache.get(key)
+        if cached is not None:
+            return cached
+        base = plt.get_cmap(cmap_name)
+        samples = base(np.linspace(0.0, 1.0, 512))
+        samples[:, :3] = np.clip(samples[:, :3] * intensity, 0.0, 1.0)
+        cmap = mcolors.ListedColormap(samples, name=f"{cmap_name}_x{intensity:.3f}")
+        self._colormap_cache[key] = cmap
+        return cmap
+
+    def _map_colors(
+        self, values: np.ndarray, cmap: mcolors.Colormap, alpha: float
+    ) -> np.ndarray:
+        # ``values`` are pre-normalised to [0, 1] so we can reuse matplotlib
+        # colour maps and simply blend in the requested opacity.
+        colours = np.asarray(cmap(np.clip(values, 0.0, 1.0)), dtype=np.float32)
+        colours[:, 3] = np.clip(colours[:, 3] * alpha, 0.0, 1.0)
+        return colours
+
+    def _update_slice_labels(self) -> None:
+        if not self._slice_controls:
+            return
+        bounds = self._data_bounds
+        has_bounds = bounds is not None
+        mins: Optional[np.ndarray]
+        maxs: Optional[np.ndarray]
+        if has_bounds:
+            mins, maxs = bounds  # type: ignore[assignment]
+        else:
+            mins = maxs = None
+        for control in self._slice_controls.values():
+            slider_enabled = bool(has_bounds and control.checkbox.isChecked())
+            control.min_slider.setEnabled(slider_enabled)
+            control.max_slider.setEnabled(slider_enabled)
+            if mins is None or maxs is None:
+                control.min_value.setText("--")
+                control.max_value.setText("--")
+                continue
+            axis = control.axis
+            axis_min = float(mins[axis])
+            axis_max = float(maxs[axis])
+            span = axis_max - axis_min
+            min_frac = control.min_slider.value() / 100.0
+            max_frac = control.max_slider.value() / 100.0
+            min_mm = axis_min + span * min_frac
+            max_mm = axis_min + span * max_frac
+            control.min_value.setText(f"{min_mm:.1f} mm")
+            control.max_value.setText(f"{max_mm:.1f} mm")
+
+    def _active_slice_bounds(self) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        if not self._slice_controls or self._data_bounds is None:
+            return None
+        mins, maxs = self._data_bounds
+        min_bounds = np.asarray(mins, dtype=np.float32).copy()
+        max_bounds = np.asarray(maxs, dtype=np.float32).copy()
+        active = False
+        for control in self._slice_controls.values():
+            if not control.checkbox.isChecked():
+                continue
+            axis = control.axis
+            axis_min = float(mins[axis])
+            axis_max = float(maxs[axis])
+            span = axis_max - axis_min
+            min_frac = control.min_slider.value() / 100.0
+            max_frac = control.max_slider.value() / 100.0
+            min_bounds[axis] = float(axis_min + span * min_frac)
+            max_bounds[axis] = float(axis_min + span * max_frac)
+            active = True
+        if not active:
+            return None
+        return min_bounds, max_bounds
+
+    def _slice_status_suffix(self) -> str:
+        bounds = self._active_slice_bounds()
+        if bounds is None:
+            return ""
+        mins, maxs = bounds
+        parts: list[str] = []
+        for control in self._slice_controls.values():
+            if not control.checkbox.isChecked():
+                continue
+            axis = control.axis
+            parts.append(
+                f"{control.negative_name}–{control.positive_name} "
+                f"{mins[axis]:.1f}–{maxs[axis]:.1f} mm"
+            )
+        if not parts:
+            return ""
+        return " Slice windows: " + ", ".join(parts) + "."
+
+    def _mask_coords(
+        self, coords: np.ndarray, bounds: tuple[np.ndarray, np.ndarray]
+    ) -> np.ndarray:
+        mins, maxs = bounds
+        if coords.size == 0:
+            return np.zeros(0, dtype=bool)
+        mask = np.ones(coords.shape[0], dtype=bool)
+        for axis in range(3):
+            mask &= (coords[:, axis] >= mins[axis]) & (coords[:, axis] <= maxs[axis])
+        return mask
+
+    def _apply_slice_to_points(
+        self, coords: np.ndarray, values: Optional[np.ndarray]
+    ) -> tuple[np.ndarray, Optional[np.ndarray], Optional[tuple[np.ndarray, np.ndarray]]]:
+        bounds = self._active_slice_bounds()
+        if bounds is None or coords.size == 0:
+            return coords, values, None
+        mask = self._mask_coords(coords, bounds)
+        if not np.any(mask):
+            empty_coords = coords[:0].reshape(0, 3)
+            empty_vals = values[:0] if values is not None else None
+            return empty_coords, empty_vals, bounds
+        filtered_coords = coords[mask]
+        filtered_values = values[mask] if values is not None else None
+        return filtered_coords, filtered_values, bounds
+
+    def _clip_mesh_to_slices(
+        self,
+        verts: np.ndarray,
+        faces: np.ndarray,
+        values: Optional[np.ndarray],
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        Optional[np.ndarray],
+        Optional[tuple[np.ndarray, np.ndarray]],
+    ]:
+        bounds = self._active_slice_bounds()
+        if bounds is None or verts.size == 0:
+            return verts, faces, values, None
+        mask = self._mask_coords(verts, bounds)
+        if not np.any(mask):
+            empty_verts = verts[:0].reshape(0, 3)
+            empty_faces = faces[:0].reshape(0, 3)
+            empty_vals = values[:0] if values is not None else None
+            return empty_verts, empty_faces, empty_vals, bounds
+        selected = np.where(mask)[0]
+        index_map = -np.ones(mask.shape[0], dtype=np.int64)
+        index_map[selected] = np.arange(selected.size, dtype=np.int64)
+        mapped_faces = index_map[faces]
+        valid = (mapped_faces >= 0).all(axis=1)
+        mapped_faces = mapped_faces[valid]
+        if mapped_faces.size == 0:
+            empty_verts = verts[:0].reshape(0, 3)
+            empty_faces = faces[:0].reshape(0, 3)
+            empty_vals = values[:0] if values is not None else None
+            return empty_verts, empty_faces, empty_vals, bounds
+        new_verts = verts[selected]
+        new_values = values[selected] if values is not None else None
+        return new_verts, mapped_faces.astype(np.int32, copy=False), new_values, bounds
+
+    def _on_slice_toggle(self, name: str, _checked: bool) -> None:
+        if name not in self._slice_controls:
+            return
+        self._update_slice_labels()
+        if not self._initialising:
+            self._update_plot()
+
+    def _on_slice_slider_change(self, name: str, which: str, value: int) -> None:
+        control = self._slice_controls.get(name)
+        if control is None:
+            return
+        if which == "min":
+            other = control.max_slider
+            if value > other.value():
+                other.blockSignals(True)
+                other.setValue(value)
+                other.blockSignals(False)
+        else:
+            other = control.min_slider
+            if value < other.value():
+                other.blockSignals(True)
+                other.setValue(value)
+                other.blockSignals(False)
+        self._update_slice_labels()
+        if not self._initialising and control.checkbox.isChecked():
+            self._update_plot()
+    def _clear_colorbar(self) -> None:
+        fig = self._colorbar_canvas.figure
+        fig.clf()
+        fig.patch.set_facecolor(self._canvas_bg)
+        self._colorbar_canvas.draw_idle()
+
+    def _update_colorbar(
+        self, cmap: mcolors.Colormap, vmin: float, vmax: float, label: str = "Scalar value"
+    ) -> None:
+        fig = self._colorbar_canvas.figure
+        fig.clf()
+        # Render the colour bar horizontally so it mirrors the slice legend above
+        # while preserving vertical space for the rest of the controls.
+        ax = fig.add_axes([0.12, 0.35, 0.76, 0.32])
+        norm = plt.Normalize(vmin, vmax)
+        mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        colorbar = fig.colorbar(mappable, cax=ax, orientation="horizontal")
+        colorbar.set_label(label, color=self._fg_color, labelpad=6)
+        colorbar.ax.xaxis.set_ticks_position("bottom")
+        colorbar.ax.xaxis.set_label_position("bottom")
+        colorbar.ax.tick_params(colors=self._fg_color, which="both")
+        for spine in colorbar.ax.spines.values():
+            spine.set_color(self._fg_color)
+        colorbar.ax.set_facecolor(self._canvas_bg)
+        fig.patch.set_facecolor(self._canvas_bg)
+        self._colorbar_canvas.draw_idle()
+
+    def _on_color_intensity_change(self, value: int) -> None:
+        self.color_intensity_label.setText(f"{value / 100.0:.2f}×")
+        if not self._initialising:
+            self._update_plot()
+
+    def _update_light_labels(self) -> None:
+        self.light_azimuth_label.setText(f"{self.light_azimuth_slider.value():+d}°")
+        self.light_elevation_label.setText(
+            f"{self.light_elevation_slider.value():+d}°"
+        )
+        self.light_intensity_label.setText(
+            f"{self.light_intensity_slider.value() / 100.0:.2f}×"
+        )
+
+    def _update_light_shader(self) -> None:
+        shader = self._light_shader
+        if shader is None or not self._lighting_enabled:
+            self._apply_mesh_shader()
+            return
+        azimuth = math.radians(self.light_azimuth_slider.value())
+        elevation = math.radians(self.light_elevation_slider.value())
+        cos_el = math.cos(elevation)
+        direction = [
+            float(cos_el * math.cos(azimuth)),
+            float(cos_el * math.sin(azimuth)),
+            float(math.sin(elevation)),
+        ]
+        shader["lightDir"] = direction
+        shader["lightParams"] = [
+            max(0.0, self.light_intensity_slider.value() / 100.0),
+            0.35,
+        ]
+        self._apply_mesh_shader()
+
+    def _on_light_setting_change(self, _value: int) -> None:
+        self._update_light_labels()
+        self._update_light_shader()
+        if self._initialising:
+            return
+        if self._mesh_item is not None:
+            self._mesh_item.update()
+            self.view.update()
+
+    def _update_scene_bounds(self, mins: np.ndarray, maxs: np.ndarray) -> None:
+        spans = np.maximum(maxs - mins, 1e-3)
+        # Keep the camera centred on the mesh to avoid jarring jumps when users
+        # switch between scalar fields or adjust opacity.
+        center = (mins + maxs) / 2.0
+        self._current_bounds = (mins, maxs)
+        self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
+        self.view.opts["distance"] = float(np.linalg.norm(spans) * 1.2)
+        self._update_axis_item()
+
+    def _on_scalar_change(self, _index: int) -> None:
+        self._update_plot()
+
+    def _on_colormap_change(self, _name: str) -> None:
+        self._update_plot()
+
+    def _on_opacity_change(self, value: int) -> None:
+        self.opacity_label.setText(f"{value / 100.0:.2f}")
+        self._update_plot()
+
+    def _update_plot(self) -> None:
+        self._clear_colorbar()
+        if self._faces.size == 0 or self._vertices.size == 0:
+            if self._mesh_item is not None:
+                self.view.removeItem(self._mesh_item)
+                self._mesh_item = None
+            self.status_label.setText("Surface mesh has no vertices or faces to render.")
+            return
+
+        alpha = self.opacity_slider.value() / 100.0
+        cmap_name = self.colormap_combo.currentText() or "viridis"
+        scalar_key = self.scalar_combo.currentData()
+        cmap = self._get_adjusted_colormap(cmap_name)
+
+        summary = (
+            f"Surface mesh: {self._vertices.shape[0]:,} vertices / {self._faces.shape[0]:,} faces. "
+        )
+
+        normalised_values: Optional[np.ndarray] = None
+        vmin: Optional[float] = None
+        vmax: Optional[float] = None
+        if scalar_key and scalar_key in self._scalar_fields:
+            raw_values = self._scalar_fields[scalar_key]
+            vmin = float(np.min(raw_values))
+            vmax = float(np.max(raw_values))
+            if math.isclose(vmin, vmax):
+                normalised_values = np.zeros_like(raw_values, dtype=np.float32)
+                vmin, vmax = vmin - 0.5, vmax + 0.5
+            else:
+                norm = (raw_values - vmin) / (vmax - vmin)
+                normalised_values = np.clip(norm.astype(np.float32, copy=False), 0.0, 1.0)
+
+        clipped_verts, clipped_faces, clipped_values, slice_bounds = self._clip_mesh_to_slices(
+            self._vertices, self._faces, normalised_values
+        )
+
+        if clipped_verts.size == 0 or clipped_faces.size == 0:
+            if slice_bounds is not None:
+                if self._mesh_item is not None:
+                    self.view.removeItem(self._mesh_item)
+                    self._mesh_item = None
+                self._clear_colorbar()
+                mins, maxs = slice_bounds
+                self._update_scene_bounds(mins, maxs)
+                self.status_label.setText(
+                    "Slice planes removed all surface triangles. "
+                    "Adjust the slicer sliders or disable slicing."
+                )
+                return
+            if self._mesh_item is not None:
+                self.view.removeItem(self._mesh_item)
+                self._mesh_item = None
+            self.status_label.setText("Surface mesh has no vertices or faces to render.")
+            return
+
+        meshdata = gl.MeshData(vertexes=clipped_verts, faces=clipped_faces)
+        if clipped_values is not None and scalar_key and scalar_key in self._scalar_fields:
+            colours = self._map_colors(clipped_values, cmap, alpha)
+            meshdata.setVertexColors(colours)
+            assert vmin is not None and vmax is not None
+            self._update_colorbar(cmap, vmin, vmax)
+            summary += f"Scalar '{scalar_key}' range {vmin:.4g} – {vmax:.4g}. "
+        else:
+            base_color = cmap(0.6)
+            colour = np.array(
+                [[base_color[0], base_color[1], base_color[2], base_color[3] * alpha]],
+                dtype=np.float32,
+            )
+            meshdata.setVertexColors(np.repeat(colour, clipped_verts.shape[0], axis=0))
+            self._update_colorbar(cmap, 0.0, 1.0, label="Colormap preview")
+            summary += "Constant colouring applied. "
+
+        if self._mesh_item is None:
+            self._mesh_item = gl.GLMeshItem(
+                meshdata=meshdata,
+                smooth=False,
+                shader="shaded",
+                drawEdges=False,
+            )
+            self.view.addItem(self._mesh_item)
+        else:
+            self._mesh_item.setMeshData(meshdata=meshdata)
+        self._update_light_shader()
+        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+
+        mins = np.min(clipped_verts, axis=0)
+        maxs = np.max(clipped_verts, axis=0)
+        self._update_scene_bounds(mins, maxs)
+
+        summary += f"Opacity {alpha:.2f}."
+        if self._light_shader is not None or self._flat_shader is not None:
+            summary += " Lighting " + ("enabled." if self._lighting_enabled else "disabled.")
+        if self._scalar_fields and (not scalar_key or scalar_key not in self._scalar_fields):
+            summary += " Select a scalar field to colour the surface."
+        summary += self._slice_status_suffix()
+        self.status_label.setText(summary)
+
+
+class FreeSurferSurfaceDialog(QDialog):
+    """Simplified viewer tailored for FreeSurfer ``*.pial``/``*.white`` meshes."""
+
+    def __init__(
+        self,
+        parent,
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        title: Optional[str] = None,
+        dark_theme: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        if not HAS_PYQTGRAPH:
+            raise RuntimeError(
+                "Surface rendering requires the optional 'pyqtgraph' dependency."
+            )
+
+        self.setWindowTitle(title or "FreeSurfer Surface")
+        self.resize(900, 720)
+        self.setMinimumSize(620, 480)
+        self.setSizeGripEnabled(True)
+
+        verts = np.asarray(vertices, dtype=np.float32)
+        faces_arr = np.asarray(faces, dtype=np.int32)
+        if verts.ndim != 2 or verts.shape[1] != 3:
+            raise ValueError("Surface vertices must be an (N, 3) array")
+        if faces_arr.ndim != 2 or faces_arr.shape[1] != 3:
+            raise ValueError("Surface faces must be an (M, 3) array")
+        if faces_arr.size and int(faces_arr.max(initial=-1)) >= verts.shape[0]:
+            raise ValueError("Face indices exceed available vertices")
+
+        self._vertices = verts
+        self._faces = faces_arr
+        self._fg_color = "#f0f0f0" if dark_theme else "#202020"
+        self._canvas_bg = "#202020" if dark_theme else "#ffffff"
+
+        self._mesh_item: Optional[gl.GLMeshItem] = None
+        self._axis_item: Optional[gl.GLAxisItem] = None
+        self._current_bounds: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._light_shader = _create_directional_light_shader()
+        self._flat_shader = _create_flat_color_shader()
+        self._lighting_enabled = self._light_shader is not None
+
+        layout = QVBoxLayout(self)
+
+        self.view = gl.GLViewWidget()
+        self.view.setBackgroundColor(self._canvas_bg)
+        self.view.opts["distance"] = 200
+        self.view.opts["elevation"] = 20
+        self.view.opts["azimuth"] = -60
+        layout.addWidget(self.view, 1)
+
+        controls = QGroupBox("Display settings")
+        controls_layout = QGridLayout(controls)
+        controls_layout.setColumnStretch(1, 1)
+
+        # Provide a handful of constant colours so users can quickly switch the
+        # appearance without diving into advanced scalar options.
+        self._colour_presets: list[tuple[str, str]] = [
+            ("Clay", "#d87c5a"),
+            ("Slate", "#4f6d7a"),
+            ("Bone", "#e9d8a6"),
+            ("Forest", "#2a9d8f"),
+            ("Carbon", "#5c5f66"),
+        ]
+
+        row = 0
+        controls_layout.addWidget(QLabel("Surface colour:"), row, 0)
+        self.color_combo = QComboBox()
+        for name, colour in self._colour_presets:
+            self.color_combo.addItem(name, userData=colour)
+        controls_layout.addWidget(self.color_combo, row, 1, 1, 2)
+
+        row += 1
+        controls_layout.addWidget(QLabel("Opacity:"), row, 0)
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(10, 100)
+        self.opacity_slider.setValue(85)
+        controls_layout.addWidget(self.opacity_slider, row, 1)
+        self.opacity_label = QLabel("0.85")
+        controls_layout.addWidget(self.opacity_label, row, 2)
+
+        row += 1
+        self.axes_checkbox = QCheckBox("Show axes")
+        controls_layout.addWidget(self.axes_checkbox, row, 0, 1, 3)
+
+        row += 1
+        self.light_checkbox = QCheckBox("Enable lighting")
+        self.light_checkbox.setChecked(self._lighting_enabled)
+        controls_layout.addWidget(self.light_checkbox, row, 0, 1, 3)
+        if self._light_shader is None and self._flat_shader is None:
+            self._lighting_enabled = False
+            self.light_checkbox.setEnabled(False)
+            self.light_checkbox.setChecked(False)
+
+        layout.addWidget(controls)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        self._initialising = True
+
+        self.color_combo.currentIndexChanged.connect(self._on_color_change)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_change)
+        self.axes_checkbox.toggled.connect(self._on_axes_toggle)
+        self.light_checkbox.toggled.connect(self._on_light_toggle)
+
+        if self._vertices.size:
+            mins = np.min(self._vertices, axis=0).astype(np.float32, copy=False)
+            maxs = np.max(self._vertices, axis=0).astype(np.float32, copy=False)
+        else:
+            mins = np.zeros(3, dtype=np.float32)
+            maxs = np.zeros(3, dtype=np.float32)
+        self._update_scene_bounds(mins, maxs)
+        self._update_axis_item()
+        self._update_light_shader()
+        self._update_mesh()
+
+        self._initialising = False
+        self._update_status()
+
+    def _current_colour_rgba(self) -> np.ndarray:
+        colour_hex = self.color_combo.currentData()
+        if not colour_hex:
+            colour_hex = "#d87c5a"
+        rgb = np.array(mcolors.to_rgb(str(colour_hex)), dtype=np.float32)
+        alpha = np.clip(self.opacity_slider.value() / 100.0, 0.1, 1.0)
+        colours = np.empty((self._vertices.shape[0], 4), dtype=np.float32)
+        colours[:, :3] = rgb
+        colours[:, 3] = alpha
+        return colours
+
+    def _update_mesh(self) -> None:
+        if self._vertices.size == 0 or self._faces.size == 0:
+            if self._mesh_item is not None:
+                self.view.removeItem(self._mesh_item)
+                self._mesh_item = None
+            self.status_label.setText("Surface mesh has no vertices or faces to render.")
+            return
+
+        meshdata = gl.MeshData(vertexes=self._vertices, faces=self._faces)
+        colours = self._current_colour_rgba()
+        meshdata.setVertexColors(colours)
+
+        if self._mesh_item is None:
+            self._mesh_item = gl.GLMeshItem(
+                meshdata=meshdata,
+                smooth=False,
+                shader="shaded",
+                drawEdges=False,
+            )
+            self.view.addItem(self._mesh_item)
+        else:
+            self._mesh_item.setMeshData(meshdata=meshdata)
+
+        self._apply_mesh_shader()
+        alpha = self.opacity_slider.value() / 100.0
+        self._mesh_item.setGLOptions("translucent" if alpha < 0.999 else "opaque")
+        if not self._initialising:
+            self.view.update()
+
+    def _update_status(self) -> None:
+        if self._vertices.size == 0 or self._faces.size == 0:
+            summary = "Surface mesh has no vertices or faces to render."
+        else:
+            mins, maxs = self._current_bounds if self._current_bounds else (
+                np.zeros(3, dtype=np.float32),
+                np.zeros(3, dtype=np.float32),
+            )
+            summary = (
+                f"Surface mesh: {self._vertices.shape[0]:,} vertices / "
+                f"{self._faces.shape[0]:,} faces. Opacity {self.opacity_slider.value() / 100.0:.2f}. "
+                f"Colour preset: {self.color_combo.currentText()}. "
+                f"Bounds X {mins[0]:.1f}–{maxs[0]:.1f} mm, "
+                f"Y {mins[1]:.1f}–{maxs[1]:.1f} mm, Z {mins[2]:.1f}–{maxs[2]:.1f} mm. "
+            )
+        if self._light_shader is None and self._flat_shader is None:
+            summary += " Lighting controls unavailable."
+        else:
+            summary += " Lighting " + ("enabled." if self._lighting_enabled else "disabled.")
+        self.status_label.setText(summary)
+
+    def _apply_mesh_shader(self) -> None:
+        if self._mesh_item is None:
+            return
+        if self._light_shader is not None and self._lighting_enabled:
+            self._mesh_item.setShader(self._light_shader)
+        elif self._flat_shader is not None:
+            self._mesh_item.setShader(self._flat_shader)
+        else:
+            self._mesh_item.setShader("shaded")
+
+    def _update_light_shader(self) -> None:
+        if self._light_shader is None:
+            return
+        self._light_shader["lightDir"] = [0.5, 0.3, 0.8]
+        self._light_shader["lightParams"] = [1.0, 0.35]
+        self._apply_mesh_shader()
+
+    def _update_scene_bounds(self, mins: np.ndarray, maxs: np.ndarray) -> None:
+        spans = np.maximum(maxs - mins, 1e-3)
+        center = (mins + maxs) / 2.0
+        self._current_bounds = (mins, maxs)
+        self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
+        self.view.opts["distance"] = float(np.linalg.norm(spans) * 1.2)
+
+    def _update_axis_item(self) -> None:
+        if not self.axes_checkbox.isChecked():
+            if self._axis_item is not None:
+                self.view.removeItem(self._axis_item)
+                self._axis_item = None
+            return
+        if self._axis_item is None:
+            axis = _AdjustableAxisItem() if '_AdjustableAxisItem' in globals() else gl.GLAxisItem()
+            axis.setSize(1, 1, 1)
+            self.view.addItem(axis)
+            self._axis_item = axis
+        mins, maxs = self._current_bounds if self._current_bounds else (
+            np.zeros(3, dtype=np.float32),
+            np.ones(3, dtype=np.float32),
+        )
+        spans = np.maximum(maxs - mins, 1e-3)
+        self._axis_item.setSize(spans[0], spans[1], spans[2])
+        if hasattr(self._axis_item, "setLineWidth"):
+            self._axis_item.setLineWidth(2.0)
+
+    def _on_color_change(self, _index: int) -> None:
+        self._update_mesh()
+        if not self._initialising:
+            self._update_status()
+
+    def _on_opacity_change(self, value: int) -> None:
+        self.opacity_label.setText(f"{value / 100.0:.2f}")
+        self._update_mesh()
+        if not self._initialising:
+            self._update_status()
+
+    def _on_axes_toggle(self, _checked: bool) -> None:
+        self._update_axis_item()
+        if not self._initialising:
+            self.view.update()
+
+    def _on_light_toggle(self, checked: bool) -> None:
+        self._lighting_enabled = bool(checked)
+        self._apply_mesh_shader()
+        if not self._initialising and self._mesh_item is not None:
+            self._mesh_item.update()
+        self._update_status()
+
+
 class MetadataViewer(QWidget):
     """
     Metadata viewer/editor for JSON and TSV sidecars (from bids_editor_ancpbids).
@@ -3758,6 +7492,7 @@ class MetadataViewer(QWidget):
         self.viewer = None
         self.current_path = None
         self.data = None  # holds loaded NIfTI data when viewing images
+        self.surface_data: Optional[dict[str, Any]] = None
 
     def clear(self):
         """Clear the toolbar and viewer when switching files."""
@@ -3786,6 +7521,10 @@ class MetadataViewer(QWidget):
             self.layout().removeWidget(self.viewer)
             self.viewer.deleteLater()
             self.viewer = None
+        self.data = None
+        self.surface_data = None
+        self.nifti_img = None
+        self._nifti_meta = {}
         self.loading_label.hide()
         self._load_timer.stop()
         self.welcome.show()
@@ -3894,28 +7633,44 @@ class MetadataViewer(QWidget):
         self.clear()
         self.welcome.hide()
         ext = _get_ext(path)
+        lower_name = path.name.lower()
+        gifti_candidate = any(lower_name.endswith(suffix) for suffix in GIFTI_SURFACE_SUFFIXES)
+        freesurfer_candidate = any(lower_name.endswith(suffix) for suffix in FREESURFER_SURFACE_SUFFIXES)
         dicom = is_dicom_file(str(path))
         self._start_loading("Loading")
         # ``worker`` reads the file in a separate thread so the UI can keep
         # updating the spinner while potentially large data is loaded.
         result = {}
+        load_error: Optional[Exception] = None
 
         def worker():
-            if ext == '.json':
-                result['data'] = json.loads(path.read_text(encoding='utf-8'))
-            elif ext == '.tsv':
-                result['df'] = pd.read_csv(path, sep='\t', keep_default_na=False)
-            elif ext in ['.nii', '.nii.gz']:
-                img = nib.load(str(path))
-                result['img'] = img
-                data, meta = self._get_nifti_data(img)
-                result['data'] = data
-                result['nifti_meta'] = meta
-            elif dicom:
-                # ``stop_before_pixels`` avoids loading heavy pixel data
-                result['ds'] = pydicom.dcmread(str(path), stop_before_pixels=True)
+            nonlocal load_error
+            try:
+                if ext == '.json':
+                    result['data'] = json.loads(path.read_text(encoding='utf-8'))
+                elif ext == '.tsv':
+                    result['df'] = pd.read_csv(path, sep='\t', keep_default_na=False)
+                elif ext in ['.nii', '.nii.gz']:
+                    img = nib.load(str(path))
+                    result['img'] = img
+                    data, meta = self._get_nifti_data(img)
+                    result['data'] = data
+                    result['nifti_meta'] = meta
+                elif gifti_candidate:
+                    surface = self._load_gifti_surface(path)
+                    result['surface'] = surface
+                    result['surface_type'] = 'gifti'
+                elif freesurfer_candidate:
+                    surface = self._load_freesurfer_surface(path)
+                    result['surface'] = surface
+                    result['surface_type'] = 'freesurfer'
+                elif dicom:
+                    # ``stop_before_pixels`` avoids loading heavy pixel data
+                    result['ds'] = pydicom.dcmread(str(path), stop_before_pixels=True)
+            except Exception as exc:  # pragma: no cover - interactive load errors
+                load_error = exc
 
-        if ext in ['.json', '.tsv', '.nii', '.nii.gz'] or dicom:
+        if ext in ['.json', '.tsv', '.nii', '.nii.gz'] or dicom or gifti_candidate or freesurfer_candidate:
             t = threading.Thread(target=worker)
             t.start()
             while t.is_alive():
@@ -3923,6 +7678,16 @@ class MetadataViewer(QWidget):
                 time.sleep(0.05)
             t.join()
         self._stop_loading()
+
+        if load_error is not None:
+            logging.exception("Failed to load %s", path)
+            QMessageBox.critical(
+                self,
+                "Open",
+                f"Unable to load {path.name}: {load_error}",
+            )
+            self.welcome.show()
+            return
 
         if ext == '.json':
             self._setup_json_toolbar()
@@ -3940,6 +7705,12 @@ class MetadataViewer(QWidget):
                     result.get('nifti_meta'),
                 ),
             )
+        elif result.get('surface'):
+            self.surface_data = result['surface']
+            if result.get('surface_type'):
+                self.surface_data['type'] = result['surface_type']
+            self._setup_surface_toolbar()
+            self.viewer = self._surface_view(path, self.surface_data)
         elif dicom:
             self.viewer = self._dicom_view(path, result.get('ds'))
             self.toolbar.addStretch()
@@ -3961,6 +7732,194 @@ class MetadataViewer(QWidget):
             and hasattr(self, 'img_label')
         ):
             self._update_slice()
+
+    def _setup_surface_toolbar(self) -> None:
+        """Toolbar for surface files featuring a single 3-D view button."""
+
+        self.view_surface_btn = QPushButton("Surface View")
+        self.view_surface_btn.clicked.connect(self._show_surface_view)
+        self.toolbar.addWidget(self.view_surface_btn)
+        self.toolbar.addStretch()
+
+    def _surface_view(self, path: Path, surface: dict[str, Any]) -> QWidget:
+        """Display a textual summary for a loaded surface mesh."""
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        info = QTextEdit()
+        info.setReadOnly(True)
+        info.setMinimumHeight(220)
+
+        raw_vertices = surface.get('vertices')
+        raw_faces = surface.get('faces')
+        vertices = np.asarray(
+            raw_vertices if raw_vertices is not None else np.empty((0, 3), dtype=np.float32),
+            dtype=np.float32,
+        )
+        faces = np.asarray(
+            raw_faces if raw_faces is not None else np.empty((0, 3), dtype=np.int32),
+            dtype=np.int32,
+        )
+        scalars = surface.get('scalars') or {}
+        meta = surface.get('meta') or {}
+
+        lines = [
+            f"File: {path.name}",
+            f"Vertices: {vertices.shape[0]:,}",
+            f"Faces: {faces.shape[0]:,}",
+        ]
+
+        if vertices.size:
+            mins = vertices.min(axis=0)
+            maxs = vertices.max(axis=0)
+            extent_text = (
+                f"Bounds (mm): X {mins[0]:.2f} – {maxs[0]:.2f}, "
+                f"Y {mins[1]:.2f} – {maxs[1]:.2f}, "
+                f"Z {mins[2]:.2f} – {maxs[2]:.2f}"
+            )
+            lines.append(extent_text)
+
+        if scalars:
+            lines.append("Scalar fields:")
+            for name, values in scalars.items():
+                arr = np.asarray(values, dtype=np.float32)
+                if arr.size == 0:
+                    continue
+                vmin = float(np.min(arr))
+                vmax = float(np.max(arr))
+                lines.append(f"  • {name}: range {vmin:.4g} – {vmax:.4g}")
+        else:
+            lines.append("No embedded scalar fields detected.")
+
+        structure = meta.get('structure')
+        if structure:
+            lines.append(f"Structure: {structure}")
+
+        coord = meta.get('coordinate_system') or {}
+        if coord:
+            dataspace = coord.get('dataspace') or 'unknown'
+            xformspace = coord.get('xformspace') or 'unknown'
+            lines.append(f"Coordinate system: {dataspace} → {xformspace}")
+
+        gifti_meta = meta.get('gifti_meta') or {}
+        if gifti_meta:
+            lines.append("GIFTI metadata:")
+            for key in sorted(gifti_meta):
+                lines.append(f"  • {key}: {gifti_meta[key]}")
+
+        fs_header = meta.get('freesurfer_header') or {}
+        if fs_header:
+            lines.append("FreeSurfer metadata:")
+            for key in sorted(fs_header):
+                lines.append(f"  • {key}: {fs_header[key]}")
+
+        info.setPlainText("\n".join(lines))
+        layout.addWidget(info)
+
+        hint = QLabel(
+            "Use the Surface View button above to explore the mesh interactively."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch()
+        return widget
+
+    def _load_gifti_surface(self, path: Path) -> dict[str, Any]:
+        """Load a GIFTI surface, returning vertices, faces and scalar data."""
+
+        img = nib.load(str(path))
+        coords = None
+        faces = None
+        scalars: dict[str, np.ndarray] = {}
+        structure = ""
+        coord_info: dict[str, Any] = {}
+
+        for arr in img.darrays:
+            intent = getattr(arr, 'intent', '') or ''
+            data = np.asarray(arr.data)
+            if intent == 'NIFTI_INTENT_POINTSET':
+                coords = data.astype(np.float32, copy=False)
+                structure = arr.meta.get('AnatomicalStructurePrimary') or structure
+                cs = getattr(arr, 'coordsys', None)
+                if cs is not None:
+                    coord_info = {
+                        'dataspace': getattr(cs, 'dataspace', ''),
+                        'xformspace': getattr(cs, 'xformspace', ''),
+                        'xform': getattr(cs, 'xform', None),
+                    }
+            elif intent == 'NIFTI_INTENT_TRIANGLE':
+                faces = data.astype(np.int32, copy=False)
+            else:
+                if coords is None or data.shape[0] != coords.shape[0]:
+                    continue
+                if data.ndim == 1:
+                    candidate = np.nan_to_num(
+                        data.astype(np.float32, copy=False),
+                        nan=0.0,
+                        posinf=0.0,
+                        neginf=0.0,
+                    )
+                    name = arr.meta.get('Name') or f"Field {len(scalars) + 1}"
+                    scalars[str(name)] = candidate
+                elif data.ndim == 2 and data.shape[1] == 1:
+                    candidate = np.nan_to_num(
+                        data[:, 0].astype(np.float32, copy=False),
+                        nan=0.0,
+                        posinf=0.0,
+                        neginf=0.0,
+                    )
+                    name = arr.meta.get('Name') or f"Field {len(scalars) + 1}"
+                    scalars[str(name)] = candidate
+
+        if coords is None or faces is None:
+            raise ValueError("GIFTI file does not contain surface geometry")
+
+        gifti_meta = {}
+        try:
+            pairs = getattr(img.meta, 'data', None) or []
+            gifti_meta = {str(item.name): str(item.value) for item in pairs}
+        except Exception:  # pragma: no cover - defensive fallback
+            gifti_meta = {}
+
+        return {
+            'vertices': coords,
+            'faces': faces,
+            'scalars': scalars,
+            'meta': {
+                'structure': structure,
+                'coordinate_system': coord_info,
+                'gifti_meta': gifti_meta,
+            },
+        }
+
+    def _load_freesurfer_surface(self, path: Path) -> dict[str, Any]:
+        """Load a FreeSurfer ``*.pial``/``*.white`` style surface mesh."""
+
+        try:
+            from nibabel.freesurfer import io as fsio
+        except Exception as exc:  # pragma: no cover - optional dependency issues
+            raise RuntimeError("nibabel FreeSurfer support is unavailable") from exc
+
+        try:
+            verts, faces, header = fsio.read_geometry(str(path), read_metadata=True)
+        except TypeError:  # pragma: no cover - older nibabel releases
+            verts, faces = fsio.read_geometry(str(path))
+            header = {}
+
+        header_dict = {}
+        if isinstance(header, dict):
+            header_dict = {str(k): str(v) for k, v in header.items()}
+
+        return {
+            'vertices': verts.astype(np.float32, copy=False),
+            'faces': faces.astype(np.int32, copy=False),
+            'scalars': {},
+            'meta': {
+                'structure': Path(path).stem,
+                'freesurfer_header': header_dict,
+            },
+        }
 
     def _setup_json_toolbar(self):
         """Add buttons for JSON editing: Add Field, Delete Field, Save."""
@@ -3997,6 +7956,10 @@ class MetadataViewer(QWidget):
         self.toolbar.addWidget(self.sa_btn)
         self.toolbar.addWidget(self.co_btn)
         self.toolbar.addWidget(self.ax_btn)
+
+        self.view3d_btn = QPushButton("3D View")
+        self.view3d_btn.clicked.connect(self._show_3d_view)
+        self.toolbar.addWidget(self.view3d_btn)
 
         self.graph_btn = QPushButton("Graph")
         self.graph_btn.setCheckable(True)
@@ -4045,6 +8008,99 @@ class MetadataViewer(QWidget):
         self.value_row.addWidget(self.voxel_val_label)
         self.value_row.addStretch()
         self.toolbar.addStretch()
+
+    def _show_3d_view(self) -> None:
+        """Launch the interactive 3-D renderer for the loaded volume."""
+
+        if getattr(self, "data", None) is None:
+            QMessageBox.warning(self, "3D Viewer", "No NIfTI volume is currently loaded.")
+            return
+
+        voxel_sizes = None
+        if getattr(self, "nifti_img", None) is not None:
+            try:
+                zooms = self.nifti_img.header.get_zooms()
+                voxel_sizes = tuple(float(v) for v in zooms[:3])
+            except Exception:  # pragma: no cover - defensive: malformed header
+                voxel_sizes = None
+
+        default_mode = None
+        if self.current_path:
+            name = self.current_path.name.lower()
+            if any(tag in name for tag in ("dwi", "dti", "diffusion")):
+                default_mode = "RMS (DTI)"
+
+        title = (
+            f"3D View – {self.current_path.name}"
+            if self.current_path is not None
+            else "3D Volume Viewer"
+        )
+
+        try:
+            dialog = Volume3DDialog(
+                self,
+                self.data,
+                meta=getattr(self, "_nifti_meta", {}),
+                voxel_sizes=voxel_sizes,
+                default_mode=default_mode,
+                title=title,
+                dark_theme=self._is_dark_theme(),
+            )
+        except Exception as exc:  # pragma: no cover - interactive error reporting
+            logging.exception("Failed to initialise 3-D viewer")
+            QMessageBox.critical(
+                self,
+                "3D Viewer",
+                f"Unable to open 3D view: {exc}",
+            )
+            return
+
+        dialog.exec_()
+
+    def _show_surface_view(self) -> None:
+        """Launch the interactive surface renderer for the loaded mesh."""
+
+        if not self.surface_data:
+            QMessageBox.warning(self, "Surface Viewer", "No surface mesh is currently loaded.")
+            return
+
+        title = (
+            f"Surface View – {self.current_path.name}"
+            if self.current_path is not None
+            else "Surface Viewer"
+        )
+
+        surface_type = str(self.surface_data.get('type') or '').lower()
+
+        try:
+            if surface_type == 'freesurfer':
+                dialog = FreeSurferSurfaceDialog(
+                    self,
+                    self.surface_data.get('vertices'),
+                    self.surface_data.get('faces'),
+                    title=title,
+                    dark_theme=self._is_dark_theme(),
+                )
+            else:
+                dialog = Surface3DDialog(
+                    self,
+                    self.surface_data.get('vertices'),
+                    self.surface_data.get('faces'),
+                    scalars=self.surface_data.get('scalars'),
+                    meta=self.surface_data.get('meta'),
+                    title=title,
+                    dark_theme=self._is_dark_theme(),
+                )
+        except Exception as exc:  # pragma: no cover - interactive error reporting
+            logging.exception("Failed to initialise surface viewer")
+            QMessageBox.critical(
+                self,
+                "Surface Viewer",
+                f"Unable to open surface view: {exc}",
+            )
+            return
+
+        dialog.exec_()
 
     def _add_field(self):
         """Insert a new key/value pair into JSON tree."""
@@ -4609,3 +8665,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+

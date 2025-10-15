@@ -26,12 +26,44 @@ _BIDS_EXTS = (".nii.gz", ".nii", ".json", ".bval", ".bvec", ".tsv")
 
 _SANITIZE_TOKEN = re.compile(r"[^a-zA-Z0-9]+")
 _TASK_TOKEN = re.compile(r"(?:^|[_-])task-([a-zA-Z0-9]+)", re.IGNORECASE)
+_ACQ_TOKEN = re.compile(r"(?:^|[_-])acq-([a-zA-Z0-9]+)", re.IGNORECASE)
 
 
 def _sanitize_token(x: Optional[str]) -> Optional[str]:
     if not x:
         return None
     return _SANITIZE_TOKEN.sub("", x).strip()
+
+
+def _extract_acq_token(sequence: Optional[str]) -> Optional[str]:
+    """Return the most descriptive ``acq-`` label embedded in ``sequence``.
+
+    Some scanners embed several ``acq-`` hints in the raw sequence text (for
+    example ``"acq-15_acq-15b0"``).  The historic implementation would return
+    the *first* match which often meant a richer discriminator was dropped.  To
+    preserve the most useful hint we inspect every match and keep the longest
+    sanitized label, breaking ties by favouring the right-most occurrence so the
+    selection remains deterministic.
+    """
+
+    if not sequence:
+        return None
+
+    candidates = []
+    for match in _ACQ_TOKEN.finditer(sequence):
+        token = _sanitize_token(match.group(1))
+        if token:
+            candidates.append((token, match.start()))
+
+    if not candidates:
+        return None
+
+    # ``max`` with a custom key favours the longer sanitized token which tends
+    # to carry the most context (e.g. ``acq-15b0`` vs ``acq-15``).  When two
+    # tokens share the same length we keep the right-most one so that repeated
+    # hints resolve to the most specific entry.
+    best_token, _ = max(candidates, key=lambda item: (len(item[0]), item[1]))
+    return best_token
 
 
 def _strip_run_tokens(sequence: str) -> str:
@@ -310,7 +342,7 @@ def load_bids_schema(schema_dir: Union[str, Path]) -> SchemaInfo:
         "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
         "bold": "func", "sbref": "func",
         "dwi": "dwi",
-        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "epi": "fmap",
+        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "fmap": "fmap",
     }
     for sfx, dt in fallback_dt.items():
         suffix_to_datatypes.setdefault(sfx, set()).add(dt)
@@ -369,7 +401,7 @@ def _choose_datatype(suffix: str, schema: SchemaInfo) -> str:
     return {
         "T1w": "anat", "T2w": "anat", "FLAIR": "anat", "T2star": "anat", "PD": "anat",
         "bold": "func", "sbref": "func", "physio": "func", "dwi": "dwi",
-        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "epi": "fmap",
+        "phasediff": "fmap", "fieldmap": "fmap", "magnitude1": "fmap", "magnitude2": "fmap", "fmap": "fmap",
     }.get(suffix, "misc")
 
 
@@ -451,12 +483,13 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
     # and suffix accordingly so Preview/Table point to the derivatives tree and
     # not raw dwi/.
     direction: Optional[str] = None
+    sequence_acq = _extract_acq_token(series.sequence)
     map_name = _detect_dwi_derivative(clean_sequence)
     if map_name:
         datatype = "derivatives"
         # Keep an acquisition discriminator for uniqueness between different
         # series descriptions.
-        acq_token = _sanitize_token(clean_sequence)[:32]
+        acq_token = sequence_acq or _sanitize_token(clean_sequence)[:32]
         if acq_token:
             parts.append(f"acq-{acq_token}")
         parts.append(f"desc-{map_name}")
@@ -469,8 +502,9 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
         # fallback to guarantee uniqueness, which produced long
         # ``acq-<pattern>`` tokens. These were confusing and not BIDS
         # recommended, so we now omit ``acq`` unless the caller supplies it.
-        acq = series.extra.get("acq") if series.extra else None
+        explicit_acq = series.extra.get("acq") if series.extra else None
         direction = series.extra.get("dir") if series.extra else None
+        inf_acq: Optional[str] = None
 
         if suffix == "dwi":
             # Infer missing ``acq``/``dir`` tokens from the sequence itself so
@@ -479,13 +513,19 @@ def propose_bids_basename(series: SeriesInfo, schema: SchemaInfo) -> Tuple[str, 
             inf_acq, inf_dir = _infer_dwi_acq_dir(clean_sequence)
             if not direction:
                 direction = inf_dir
-            if not acq:
-                acq = inf_acq
 
-        if acq:
-            acq = _sanitize_token(acq)
+        # Determine the final acquisition label prioritising explicit input,
+        # then the sequence token (to preserve existing ``acq-`` hints) and
+        # finally any heuristically inferred value for DWI series.
+        candidates = (
+            _sanitize_token(explicit_acq) if explicit_acq else None,
+            sequence_acq,
+            _sanitize_token(inf_acq) if inf_acq else None,
+        )
+        for acq in candidates:
             if acq:
                 parts.append(f"acq-{acq}")
+                break
 
     echo = series.extra.get("echo") if series.extra else None
     if echo:
