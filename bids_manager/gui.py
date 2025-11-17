@@ -64,7 +64,8 @@ except ModuleNotFoundError as exc:
 from pathlib import Path
 from collections import defaultdict
 from functools import cmp_to_key
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from joblib import Parallel, delayed
 from pandas.core.tools.datetimes import guess_datetime_format
 from dataclasses import dataclass
 from PyQt5.QtWidgets import (
@@ -74,7 +75,8 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTreeView, QFileSystemModel, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QMessageBox, QAction, QSplitter, QDialog, QAbstractItemView,
     QMenuBar, QMenu, QSizePolicy, QComboBox, QSlider, QSpinBox,
-    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea
+    QCheckBox, QStyledItemDelegate, QDialogButtonBox, QListWidget, QScrollArea,
+    QToolButton
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import (
@@ -87,6 +89,7 @@ from PyQt5.QtCore import (
     QPoint,
     QObject,
     QThread,
+    QSize,
     pyqtSignal,
     pyqtSlot,
 )
@@ -109,20 +112,19 @@ import signal
 import random
 import string
 import math
-from .schema_config import (
+from bids_manager import dicom_inventory
+from bids_manager.schema_renamer import (
     DEFAULT_SCHEMA_DIR,
-    ENABLE_SCHEMA_RENAMER,
-    ENABLE_FIELDMap_NORMALIZATION,
-    ENABLE_DWI_DERIVATIVES_MOVE,
     DERIVATIVES_PIPELINE_NAME,
-)
-from .schema_renamer import (
-    load_bids_schema,
+    ENABLE_DWI_DERIVATIVES_MOVE,
+    ENABLE_FIELDMap_NORMALIZATION,
+    ENABLE_SCHEMA_RENAMER,
     SeriesInfo,
-    build_preview_names,
     apply_post_conversion_rename,
+    build_preview_names,
+    load_bids_schema,
 )
-from ._study_utils import normalize_study_name
+from bids_manager.schema_renamer import normalize_study_name
 try:
     import psutil
     HAS_PSUTIL = True
@@ -164,17 +166,20 @@ class _ConflictScannerWorker(QObject):
     finished = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
-    def __init__(self, root_dir: str, finder: Callable[[str], dict]):
+    def __init__(self, root_dir: str, finder: Callable[[str, int], dict], n_jobs: int):
         super().__init__()
         self._root_dir = root_dir
         self._finder = finder
+        # ``n_jobs`` mirrors the CPU limit used for the main scanning step so we
+        # do not overwhelm the system when running both operations back-to-back.
+        self._n_jobs = max(1, n_jobs)
 
     @pyqtSlot()
     def run(self) -> None:
         """Execute the slow directory walk outside the GUI thread."""
 
         try:
-            conflicts = self._finder(self._root_dir)
+            conflicts = self._finder(self._root_dir, self._n_jobs)
         except Exception as exc:  # pragma: no cover - runtime safety
             # Forward the error message back to the GUI thread so the caller
             # can decide how to handle it without freezing the interface.
@@ -634,7 +639,6 @@ class AutoFillTableWidget(QTableWidget):
             max_bottom,
             max_right,
         )
-
     def _refresh_handle(self) -> None:
         """Trigger a repaint so the autofill handle reflects the selection."""
 
@@ -1144,6 +1148,18 @@ class SubjectDelegate(QStyledItemDelegate):
     def setModelData(self, editor, model, index):  # noqa: D401 - Qt override
         model.setData(index, "sub-" + editor.text(), Qt.EditRole)
 
+
+class ShrinkableScrollArea(QScrollArea):
+    """``QScrollArea`` variant that allows the parent splitter to shrink."""
+
+    def minimumSizeHint(self) -> QSize:  # noqa: D401 - Qt override
+        return QSize(0, 0)
+
+    def sizeHint(self) -> QSize:  # noqa: D401 - Qt override
+        hint = super().sizeHint()
+        return QSize(max(0, hint.width()), max(0, hint.height()))
+
+
 class BIDSManager(QMainWindow):
     """
     Main GUI for BIDS Manager.
@@ -1156,6 +1172,7 @@ class BIDSManager(QMainWindow):
         if ICON_FILE.exists():
             self.setWindowIcon(QIcon(str(ICON_FILE)))
         self.resize(900, 900)
+        self.setMinimumSize(640, 480)
 
         app = QApplication.instance()
         self._base_font = app.font()
@@ -1255,7 +1272,7 @@ class BIDSManager(QMainWindow):
                 saved_dpi = None
             if saved_dpi is not None:
                 self.dpi_scale = max(50, min(200, saved_dpi))
-        self.seq_dict_file = self.pref_dir / "sequence_dictionary.tsv"
+        self.seq_dict_file = dicom_inventory.SEQ_DICT_FILE
 
         # Spinner for long-running tasks
         self.spinner_label = None
@@ -1769,11 +1786,37 @@ class BIDSManager(QMainWindow):
         metadata_tab = QWidget()
         metadata_layout = QVBoxLayout(metadata_tab)
         metadata_toolbar = QHBoxLayout()
-        self.tsv_sort_button = QPushButton("Sort")
-        self.tsv_sort_button.setEnabled(False)
-        self.tsv_sort_button.setToolTip("Sort the scanned metadata table")
-        self.tsv_sort_button.clicked.connect(self._open_sort_dialog)
-        metadata_toolbar.addWidget(self.tsv_sort_button)
+        self.tsv_actions_button = QToolButton()
+        self.tsv_actions_button.setText("Actions")
+        self.tsv_actions_button.setPopupMode(QToolButton.InstantPopup)
+        self.tsv_actions_menu = QMenu(self.tsv_actions_button)
+
+        self.tsv_sort_action = QAction("Sort", self)
+        self.tsv_sort_action.setEnabled(False)
+        self.tsv_sort_action.setToolTip("Sort the scanned metadata table")
+        self.tsv_sort_action.triggered.connect(self._open_sort_dialog)
+        self.tsv_actions_menu.addAction(self.tsv_sort_action)
+
+        self.tsv_load_action = QAction("Load TSV…", self)
+        self.tsv_load_action.triggered.connect(self.selectAndLoadTSV)
+        self.tsv_actions_menu.addAction(self.tsv_load_action)
+
+        self.tsv_generate_ids_action = QAction("Generate unique IDs", self)
+        self.tsv_generate_ids_action.setEnabled(False)
+        self.tsv_generate_ids_action.triggered.connect(self.generateUniqueIDs)
+        self.tsv_actions_menu.addAction(self.tsv_generate_ids_action)
+
+        self.tsv_detect_rep_action = QAction("Detect repeats", self)
+        self.tsv_detect_rep_action.triggered.connect(self.detectRepeatedSequences)
+        self.tsv_actions_menu.addAction(self.tsv_detect_rep_action)
+
+        self.tsv_save_action = QAction("Save changes", self)
+        self.tsv_save_action.setEnabled(False)
+        self.tsv_save_action.triggered.connect(self.applyMappingChanges)
+        self.tsv_actions_menu.addAction(self.tsv_save_action)
+
+        self.tsv_actions_button.setMenu(self.tsv_actions_menu)
+        metadata_toolbar.addWidget(self.tsv_actions_button)
         metadata_toolbar.addStretch()
         metadata_layout.addLayout(metadata_toolbar)
         self.mapping_table = AutoFillTableWidget()
@@ -1808,39 +1851,48 @@ class BIDSManager(QMainWindow):
         self.mapping_table.setItemDelegateForColumn(5, SubjectDelegate(self.mapping_table))
         self.mapping_table.itemChanged.connect(self._updateDetectRepeatEnabled)
         self.mapping_table.itemChanged.connect(self._onMappingItemChanged)
-        btn_row_tsv = QHBoxLayout()
-        self.tsv_load_button = QPushButton("Load TSV…")
-        self.tsv_load_button.clicked.connect(self.selectAndLoadTSV)
-        self.tsv_apply_button = QPushButton("Apply changes")
-        self.tsv_apply_button.clicked.connect(self.applyMappingChanges)
-        self.tsv_generate_ids_button = QPushButton("Generate unique IDs")
-        self.tsv_generate_ids_button.setEnabled(False)
-        self.tsv_generate_ids_button.clicked.connect(self.generateUniqueIDs)
-        self.tsv_detect_rep_button = QPushButton("Detect repeats")
-        self.tsv_detect_rep_button.clicked.connect(self.detectRepeatedSequences)
         metadata_layout.addWidget(self.mapping_table)
-        btn_row_tsv.addStretch()
-        btn_row_tsv.addWidget(self.tsv_load_button)
-        btn_row_tsv.addWidget(self.tsv_apply_button)
-        btn_row_tsv.addWidget(self.tsv_generate_ids_button)
-        btn_row_tsv.addWidget(self.tsv_detect_rep_button)
-        btn_row_tsv.addStretch()
-        metadata_layout.addLayout(btn_row_tsv)
 
         self.tsv_tabs.addTab(metadata_tab, "Scanned metadata")
 
-        # --- Sequence dictionary tab ---
+        # --- Suffix dictionary tab ---
         dict_tab = QWidget()
         dict_layout = QVBoxLayout(dict_tab)
+        toggle_row = QHBoxLayout()
+        self.use_custom_patterns_box = QCheckBox("Use custom suffix patterns")
+        self.use_custom_patterns_box.toggled.connect(self._on_custom_toggle)
+        toggle_row.addWidget(self.use_custom_patterns_box)
+        toggle_row.addStretch()
+        dict_layout.addLayout(toggle_row)
+
         self.seq_tabs_widget = QTabWidget()
         dict_layout.addWidget(self.seq_tabs_widget)
+        dict_btn_row = QHBoxLayout()
+        dict_btn_row.addStretch()
+        self.seq_apply_button = QPushButton("Apply")
+        self.seq_apply_button.clicked.connect(self.applySequenceDictionary)
+        dict_btn_row.addWidget(self.seq_apply_button)
+        self.seq_save_button = QPushButton("Save")
+        self.seq_save_button.clicked.connect(self.saveSequenceDictionary)
+        dict_btn_row.addWidget(self.seq_save_button)
         restore_btn = QPushButton("Restore defaults")
         restore_btn.clicked.connect(self.restoreSequenceDefaults)
-        dict_layout.addWidget(restore_btn, alignment=Qt.AlignRight)
+        dict_btn_row.addWidget(restore_btn)
+        dict_btn_row.addStretch()
+        dict_layout.addLayout(dict_btn_row)
 
-        self.tsv_tabs.addTab(dict_tab, "Sequence dictionary")
+        self.tsv_tabs.addTab(dict_tab, "Suffix dictionary")
         self.loadSequenceDictionary()
-        self.left_split.addWidget(self.tsv_group)
+
+        self.tsv_scroll = ShrinkableScrollArea()
+        self.tsv_scroll.setWidgetResizable(True)
+        self.tsv_scroll.setWidget(self.tsv_group)
+        self.tsv_container = QWidget()
+        tsv_container_layout = QVBoxLayout(self.tsv_container)
+        tsv_container_layout.setContentsMargins(0, 0, 0, 0)
+        tsv_container_layout.addWidget(self.tsv_scroll)
+
+        self.left_split.addWidget(self.tsv_container)
 
         self.filter_group = QGroupBox("Filter")
         modal_layout = QVBoxLayout(self.filter_group)
@@ -1889,16 +1941,11 @@ class BIDSManager(QMainWindow):
         self.naming_table.setItemDelegateForColumn(2, SubjectDelegate(self.naming_table))
         naming_layout.addWidget(self.naming_table)
         self.naming_table.itemChanged.connect(self._onNamingEdited)
-        self.naming_table.itemChanged.connect(self._updateScanExistingEnabled)
         self.name_choice = QComboBox()
         self.name_choice.addItems(["Use BIDS names", "Use given names"])
         self.name_choice.setEnabled(False)
         self.name_choice.currentIndexChanged.connect(self._onNameChoiceChanged)
         naming_layout.addWidget(self.name_choice)
-        self.scan_existing_button = QPushButton("Scan existing studies")
-        self.scan_existing_button.setEnabled(False)
-        self.scan_existing_button.clicked.connect(self.scanExistingStudies)
-        naming_layout.addWidget(self.scan_existing_button)
         self.modal_tabs.addTab(naming_tab, "Edit naming")
 
         # Always Exclude tab
@@ -1939,7 +1986,15 @@ class BIDSManager(QMainWindow):
         modal_layout.addLayout(header_row_filter)
         modal_layout.addWidget(self.modal_tabs)
 
-        self.right_split.addWidget(self.filter_group)
+        self.filter_scroll = ShrinkableScrollArea()
+        self.filter_scroll.setWidgetResizable(True)
+        self.filter_scroll.setWidget(self.filter_group)
+        self.filter_container = QWidget()
+        filter_container_layout = QVBoxLayout(self.filter_container)
+        filter_container_layout.setContentsMargins(0, 0, 0, 0)
+        filter_container_layout.addWidget(self.filter_scroll)
+
+        self.right_split.addWidget(self.filter_container)
         self.left_split.setStretchFactor(0, 1)
         self.left_split.setStretchFactor(1, 1)
         self.right_split.setStretchFactor(0, 1)
@@ -1996,7 +2051,10 @@ class BIDSManager(QMainWindow):
         pv_lay = QVBoxLayout(self.preview_container)
         pv_lay.setContentsMargins(0, 0, 0, 0)
         pv_lay.setSpacing(6)
-        pv_lay.addWidget(self.preview_group)
+        self.preview_scroll = ShrinkableScrollArea()
+        self.preview_scroll.setWidgetResizable(True)
+        self.preview_scroll.setWidget(self.preview_group)
+        pv_lay.addWidget(self.preview_scroll)
         pv_lay.addLayout(btn_row)
 
         log_group = QGroupBox("Log Output")
@@ -2349,9 +2407,7 @@ class BIDSManager(QMainWindow):
                 pass
 
         self._rebuild_lookup_maps()
-        QTimer.singleShot(0, self.populateModalitiesTree)
-        QTimer.singleShot(0, self.populateSpecificTree)
-        self._updateMappingControlsEnabled()
+        self._schedule_mapping_refresh()
 
         if hasattr(self, "log_text"):
             summary = ", ".join(
@@ -2392,14 +2448,14 @@ class BIDSManager(QMainWindow):
         self.tsv_dialog = QDialog(self, flags=Qt.Window)
         self.tsv_dialog.setWindowTitle("Scanned data viewer")
         lay = QVBoxLayout(self.tsv_dialog)
-        self.tsv_group.setParent(None)
-        lay.addWidget(self.tsv_group)
+        self.tsv_container.setParent(None)
+        lay.addWidget(self.tsv_container)
         self.tsv_dialog.finished.connect(self._reattachTSVWindow)
         self.tsv_dialog.showMaximized()
 
     def _reattachTSVWindow(self, *args):
-        self.tsv_group.setParent(None)
-        self.left_split.insertWidget(0, self.tsv_group)
+        self.tsv_container.setParent(None)
+        self.left_split.insertWidget(0, self.tsv_container)
         self.tsv_dialog = None
 
     def detachFilterWindow(self):
@@ -2410,15 +2466,15 @@ class BIDSManager(QMainWindow):
         self.filter_dialog = QDialog(self, flags=Qt.Window)
         self.filter_dialog.setWindowTitle("Filter")
         lay = QVBoxLayout(self.filter_dialog)
-        self.filter_group.setParent(None)
-        lay.addWidget(self.filter_group)
+        self.filter_container.setParent(None)
+        lay.addWidget(self.filter_container)
         self.filter_dialog.finished.connect(self._reattachFilterWindow)
         self.filter_dialog.showMaximized()
 
     def _reattachFilterWindow(self, *args):
-        self.filter_group.setParent(None)
-        # Insert after tsv_group but before preview_container
-        self.right_split.insertWidget(0, self.filter_group)
+        self.filter_container.setParent(None)
+        # Insert after the TSV panel but before preview_container
+        self.right_split.insertWidget(0, self.filter_container)
         self.filter_dialog = None
 
     def detachPreviewWindow(self):
@@ -2436,7 +2492,7 @@ class BIDSManager(QMainWindow):
 
     def _reattachPreviewWindow(self, *args):
         self.preview_container.setParent(None)
-        if self.left_split.indexOf(self.tsv_group) == -1:
+        if self.left_split.indexOf(self.tsv_container) == -1:
             self.left_split.addWidget(self.preview_container)
         else:
             self.left_split.insertWidget(1, self.preview_container)
@@ -2493,7 +2549,7 @@ class BIDSManager(QMainWindow):
     # Helpers for detecting and reorganising multiple sessions in a
     # single folder
     # ------------------------------------------------------------------
-    def _find_conflicting_studies(self, root_dir: str) -> dict:
+    def _find_conflicting_studies(self, root_dir: str, n_jobs: int = 1) -> dict:
         """Return folders containing more than one StudyInstanceUID.
 
         Parameters
@@ -2509,22 +2565,55 @@ class BIDSManager(QMainWindow):
         """
 
         conflicts: dict[str, dict[str, list[str]]] = {}
+
+        # Gather the folders containing DICOM files so we can evaluate them in
+        # parallel without paying the scheduling cost for empty directories.
+        folders_to_scan: List[Tuple[str, List[str]]] = []
         for folder, _dirs, files in os.walk(root_dir):
-            study_map: dict[str, list[str]] = {}
+            dicom_files: List[str] = []
             for fname in files:
                 fpath = os.path.join(folder, fname)
-                if not is_dicom_file(fpath):
-                    continue
+                if is_dicom_file(fpath):
+                    dicom_files.append(fpath)
+            if dicom_files:
+                folders_to_scan.append((folder, dicom_files))
+
+        def _scan_folder(data: Tuple[str, List[str]]) -> Optional[Tuple[str, Dict[str, List[str]]]]:
+            folder, dicom_files = data
+            study_map: Dict[str, List[str]] = {}
+            for fpath in dicom_files:
                 try:
                     ds = pydicom.dcmread(
-                        fpath, stop_before_pixels=True, specific_tags=["StudyInstanceUID"]
+                        fpath,
+                        stop_before_pixels=True,
+                        specific_tags=["StudyInstanceUID"],
                     )
                     uid = str(getattr(ds, "StudyInstanceUID", "")).strip()
                 except Exception:
+                    # Maintain the previous best-effort behaviour: unreadable
+                    # files are skipped silently so the scan keeps running.
                     continue
                 study_map.setdefault(uid, []).append(fpath)
             if len(study_map) > 1:
-                conflicts[folder] = study_map
+                return folder, study_map
+            return None
+
+        workers = max(1, n_jobs)
+        if workers == 1:
+            results = (_scan_folder(entry) for entry in folders_to_scan)
+        else:
+            # ``Parallel`` confines the evaluation to the configured number of
+            # workers, matching the CPU limit used for the initial DICOM scan.
+            results = Parallel(n_jobs=workers)(
+                delayed(_scan_folder)(entry) for entry in folders_to_scan
+            )
+
+        for result in results:
+            if result is None:
+                continue
+            folder, study_map = result
+            conflicts[folder] = study_map
+
         return conflicts
 
     def _reorganize_conflicting_sessions(self, conflicts: dict) -> None:
@@ -2597,7 +2686,11 @@ class BIDSManager(QMainWindow):
         self._start_spinner("Checking sessions")
         self.log_text.append("Checking for multiple sessions in scan folders…")
 
-        self._conflict_worker = _ConflictScannerWorker(self.dicom_dir, self._find_conflicting_studies)
+        self._conflict_worker = _ConflictScannerWorker(
+            self.dicom_dir,
+            self._find_conflicting_studies,
+            self.num_cpus,
+        )
         self._conflict_thread = QThread(self)
         self._conflict_worker.moveToThread(self._conflict_thread)
         self._conflict_thread.started.connect(self._conflict_worker.run)
@@ -2767,29 +2860,16 @@ class BIDSManager(QMainWindow):
             existing_ids.add(sid)
 
         self._rebuild_lookup_maps()
-        QTimer.singleShot(0, self.populateModalitiesTree)
+        self._schedule_mapping_refresh()
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.generatePreview)
-        QTimer.singleShot(0, self._updateScanExistingEnabled)
         QTimer.singleShot(0, self._updateDetectRepeatEnabled)
         QTimer.singleShot(0, self._updateMappingControlsEnabled)
-
-    def _updateScanExistingEnabled(self, _item=None):
-        """Enable scan button when all given names are filled."""
-        if not hasattr(self, "scan_existing_button"):
-            return
-        enabled = self.naming_table.rowCount() > 0
-        if enabled:
-            for r in range(self.naming_table.rowCount()):
-                item = self.naming_table.item(r, 1)
-                if item is None or not item.text().strip():
-                    enabled = False
-                    break
-        self.scan_existing_button.setEnabled(enabled)
+        QTimer.singleShot(0, self._auto_apply_existing_study_mappings)
 
     def _updateDetectRepeatEnabled(self, _item=None):
         """Enable repeat detection when BIDS and Given names are filled."""
-        if not hasattr(self, "tsv_detect_rep_button"):
+        if not hasattr(self, "tsv_detect_rep_action"):
             return
         enabled = self.mapping_table.rowCount() > 0
         if enabled:
@@ -2799,49 +2879,213 @@ class BIDSManager(QMainWindow):
                 if bids is None or given is None or not bids.text().strip() or not given.text().strip():
                     enabled = False
                     break
-        self.tsv_detect_rep_button.setEnabled(enabled)
+        self.tsv_detect_rep_action.setEnabled(enabled)
+
+    def _auto_apply_existing_study_mappings(self) -> None:
+        """Queue a silent sync of BIDS names with existing output datasets."""
+
+        # ``QTimer.singleShot`` triggers this helper outside of the current
+        # signal handler, so keep the method lightweight and delegate the heavy
+        # lifting to the shared implementation below.
+        self._apply_existing_study_mappings(silent=True)
+
+    def _apply_existing_study_mappings(self, *, silent: bool = True) -> None:
+        """Align BIDS subject names with prior conversions stored on disk.
+
+        Parameters
+        ----------
+        silent
+            When ``True`` the method skips modal warnings if the BIDS output
+            directory has not been configured yet.  This is the default for the
+            automatic calls that happen after scans or when generating IDs.
+        """
+
+        out_dir = Path(self.bids_out_dir or "")
+        if not out_dir.is_dir():
+            if silent:
+                logging.info(
+                    "Skipping existing-study sync because no BIDS output "
+                    "directory is available."
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "No BIDS Output Directory",
+                    "Please select a BIDS output directory.",
+                )
+            return
+
+        if self.naming_table.rowCount() == 0:
+            return
+
+        # Gather the studies present in the naming table so we only touch the
+        # datasets that are relevant for the current scan.
+        studies: set[str] = set()
+        for row in range(self.naming_table.rowCount()):
+            study_item = self.naming_table.item(row, 0)
+            if study_item is None:
+                continue
+            study_text = study_item.text().strip()
+            if study_text:
+                studies.add(study_text)
+
+        if not studies:
+            return
+
+        # ``existing_by_given`` and ``existing_by_uid`` map (study, key) pairs
+        # to the BIDS names already present on disk.  We keep track of both the
+        # ``GivenName`` (which becomes the generated unique ID) and the
+        # ``subject`` column written by the converter so that we can preserve
+        # names even if only one identifier is available.
+        existing_by_given: dict[tuple[str, str], str] = {}
+        existing_by_uid: dict[tuple[str, str], str] = {}
+        used_by_study: dict[str, set[str]] = {}
+        has_existing: dict[str, bool] = {}
+
+        for study in studies:
+            safe = _safe_stem(str(study))
+            s_path = out_dir / safe / ".bids_manager" / "subject_summary.tsv"
+            has_existing[study] = s_path.exists()
+            if not s_path.exists():
+                continue
+            try:
+                df = pd.read_csv(s_path, sep="\t", keep_default_na=False)
+            except Exception as exc:  # pragma: no cover - runtime resilience
+                logging.warning("Failed to read %s: %s", s_path, exc)
+                continue
+
+            for _, row in df.iterrows():
+                given_val = str(row.get("GivenName", "")).strip()
+                bids_val = str(row.get("BIDS_name", "")).strip()
+                uid_val = str(row.get("subject", "")).strip()
+                if bids_val:
+                    used_by_study.setdefault(study, set()).add(bids_val)
+                if given_val and bids_val:
+                    existing_by_given[(study, given_val)] = bids_val
+                if uid_val and bids_val:
+                    existing_by_uid[(study, uid_val)] = bids_val
+
+        if not any(has_existing.values()):
+            # Nothing to reconcile – leave the manually assigned names untouched.
+            return
+
+        self.naming_table.blockSignals(True)
+        self.mapping_table.blockSignals(True)
+
+        for row in range(self.naming_table.rowCount()):
+            study_item = self.naming_table.item(row, 0)
+            given_item = self.naming_table.item(row, 1)
+            bids_item = self.naming_table.item(row, 2)
+            if None in (study_item, given_item, bids_item):
+                continue
+
+            study = study_item.text().strip()
+            given = given_item.text().strip()
+            current = bids_item.text().strip()
+            if not study:
+                continue
+
+            # Derive the subject unique ID from the mapping table if present.
+            subject_uid = ""
+            for idx, info in enumerate(self.row_info):
+                if info['study'] == study and info['given'] == given:
+                    subj_col = self.mapping_table.item(idx, 6)
+                    if subj_col is not None:
+                        subject_uid = subj_col.text().strip()
+                    break
+
+            used = used_by_study.setdefault(study, set()).copy()
+
+            mapped = None
+            if subject_uid:
+                mapped = existing_by_uid.get((study, subject_uid))
+            if mapped is None and given:
+                mapped = existing_by_given.get((study, given))
+
+            if mapped:
+                new_bids = mapped
+            elif not has_existing.get(study, False):
+                new_bids = current
+            else:
+                if current and current not in used:
+                    new_bids = current
+                else:
+                    new_bids = _next_numeric_id(used)
+
+            if new_bids != current:
+                bids_item.setText(new_bids)
+
+            # Update downstream structures so future duplicate detection and
+            # preview generation operate on the adjusted BIDS identifiers.
+            used_by_study.setdefault(study, set()).add(new_bids)
+            for idx, info in enumerate(self.row_info):
+                if info['study'] == study and info['given'] == given:
+                    info['bids'] = new_bids
+                    table_item = self.mapping_table.item(idx, 5)
+                    if table_item is not None:
+                        table_item.setText(new_bids)
+
+            key_for_map = given or subject_uid
+            if key_for_map:
+                self.existing_maps.setdefault(study, {})[key_for_map] = new_bids
+            if subject_uid and subject_uid != given:
+                self.existing_maps.setdefault(study, {})[subject_uid] = new_bids
+            self.existing_used.setdefault(study, set()).add(new_bids)
+
+        self.naming_table.blockSignals(False)
+        self.mapping_table.blockSignals(False)
+
+        self._rebuild_lookup_maps()
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.generatePreview)
+        QTimer.singleShot(0, self._updateDetectRepeatEnabled)
+        QTimer.singleShot(0, self._updateMappingControlsEnabled)
 
     def _updateMappingControlsEnabled(self):
         """Enable controls that require scanned data."""
-        if not hasattr(self, "tsv_generate_ids_button"):
+        if not hasattr(self, "tsv_generate_ids_action"):
             return
         has_data = self.mapping_table.rowCount() > 0
-        self.tsv_generate_ids_button.setEnabled(has_data)
-        if hasattr(self, "tsv_sort_button"):
-            self.tsv_sort_button.setEnabled(has_data)
+        self.tsv_generate_ids_action.setEnabled(has_data)
+        if hasattr(self, "tsv_sort_action"):
+            self.tsv_sort_action.setEnabled(has_data)
+        if hasattr(self, "tsv_save_action"):
+            self.tsv_save_action.setEnabled(has_data)
         self.last_rep_box.setEnabled(has_data)
         self.name_choice.setEnabled(has_data)
         if not has_data:
             self.last_rep_box.setChecked(False)
 
-    def _onMappingItemChanged(self, item):
-        """Handle edits in the scanned data table."""
-        if self._loading_mapping_table or item is None:
-            return
-        if item.column() != 2:
-            # We only care about changes to the StudyDescription column here.
+    def _sync_row_info_from_table(self, row: int) -> None:
+        """Update cached ``row_info`` details after an in-place table edit."""
+        if not (0 <= row < len(self.row_info)):
             return
 
-        raw_text = item.text().strip()
-        cleaned = normalize_study_name(raw_text)
+        def _text(col: int) -> str:
+            item = self.mapping_table.item(row, col)
+            return item.text().strip() if item is not None else ""
 
-        if cleaned != item.text():
-            # Temporarily block signals so updating the text does not trigger
-            # additional ``itemChanged`` notifications.
-            self.mapping_table.blockSignals(True)
-            item.setText(cleaned)
-            self.mapping_table.blockSignals(False)
+        info = self.row_info[row]
+        info['study'] = _text(2)
+        info['bids'] = _text(5)
+        info['given'] = _text(7)
+        info['ses'] = _text(8)
+        info['seq'] = _text(9)
+        info['rep'] = _text(13)
+        info['mod'] = _text(14)
+        info['modb'] = _text(15)
 
-        row = item.row()
-        if 0 <= row < len(self.row_info):
-            self.row_info[row]['study'] = cleaned
+    def _schedule_mapping_refresh(self) -> None:
+        """Queue UI updates that reflect the current mapping table."""
+        QTimer.singleShot(0, self.populateModalitiesTree)
+        QTimer.singleShot(0, self.populateSpecificTree)
+        QTimer.singleShot(0, self.generatePreview)
+        QTimer.singleShot(0, self._updateDetectRepeatEnabled)
+        QTimer.singleShot(0, self._updateMappingControlsEnabled)
 
-        bids_item = self.mapping_table.item(row, 5)
-        if bids_item is not None:
-            bids_item.setData(Qt.UserRole, cleaned)
-
-        # Recompute the set of known studies so preview generation detects when
-        # multiple studies are present after the edit.
+    def _update_study_set(self) -> None:
+        """Recompute list of studies present in the mapping table."""
         self.study_set = set()
         for r in range(self.mapping_table.rowCount()):
             study_item = self.mapping_table.item(r, 2)
@@ -2851,11 +3095,45 @@ class BIDSManager(QMainWindow):
             if study_text:
                 self.study_set.add(study_text)
 
-        self._rebuild_lookup_maps()
-        QTimer.singleShot(0, self.populateModalitiesTree)
-        QTimer.singleShot(0, self.populateSpecificTree)
-        QTimer.singleShot(0, self.generatePreview)
-        self._updateDetectRepeatEnabled()
+    def _onMappingItemChanged(self, item):
+        """Handle edits in the scanned data table."""
+        if self._loading_mapping_table or item is None:
+            return
+
+        column = item.column()
+        row = item.row()
+
+        if column == 2:
+            raw_text = item.text().strip()
+            cleaned = normalize_study_name(raw_text)
+
+            if cleaned != item.text():
+                # Temporarily block signals so updating the text does not trigger
+                # additional ``itemChanged`` notifications.
+                self.mapping_table.blockSignals(True)
+                item.setText(cleaned)
+                self.mapping_table.blockSignals(False)
+
+            self._sync_row_info_from_table(row)
+
+            bids_item = self.mapping_table.item(row, 5)
+            if bids_item is not None:
+                bids_item.setData(Qt.UserRole, cleaned)
+
+            self._update_study_set()
+            self._rebuild_lookup_maps()
+            self._schedule_mapping_refresh()
+            return
+
+        if column == 0:
+            # Checkbox state changed; refresh dependent views.
+            self._schedule_mapping_refresh()
+            return
+
+        if column in {5, 7, 8, 9, 13, 14, 15}:
+            self._sync_row_info_from_table(row)
+            self._rebuild_lookup_maps()
+            self._schedule_mapping_refresh()
 
     def detectRepeatedSequences(self):
         """Detect repeated sequences within each subject and assign numbers."""
@@ -2894,72 +3172,13 @@ class BIDSManager(QMainWindow):
         QTimer.singleShot(0, self.generatePreview)
 
     def scanExistingStudies(self):
-        """Update BIDS names based on existing datasets."""
-        out_dir = Path(self.bids_out_dir)
-        if not out_dir.is_dir():
-            QMessageBox.warning(self, "No BIDS Output Directory", "Please select a BIDS output directory.")
-            return
+        """Manually trigger a sync with existing converted studies."""
 
-        studies = {self.naming_table.item(r, 0).text().strip() for r in range(self.naming_table.rowCount())}
-        existing: dict[tuple[str, str], str] = {}
-        used_by_study: dict[str, set[str]] = {}
-        has_existing: dict[str, bool] = {}
-        for study in studies:
-            safe = _safe_stem(str(study))
-            s_path = out_dir / safe / ".bids_manager" / "subject_summary.tsv"
-            has_existing[study] = s_path.exists()
-            if has_existing[study]:
-                try:
-                    df = pd.read_csv(s_path, sep="\t", keep_default_na=False)
-                    for _, row in df.iterrows():
-                        gname = str(row.get("GivenName", "")).strip()
-                        bids = str(row.get("BIDS_name", "")).strip()
-                        if gname and bids:
-                            existing[(study, gname)] = bids
-                            used_by_study.setdefault(study, set()).add(bids)
-                except Exception:
-                    pass
-
-
-        self.naming_table.blockSignals(True)
-        self.mapping_table.blockSignals(True)
-
-        for row in range(self.naming_table.rowCount()):
-            study = self.naming_table.item(row, 0).text().strip()
-            given = self.naming_table.item(row, 1).text().strip()
-            item = self.naming_table.item(row, 2)
-            current = item.text().strip()
-            mapped = existing.get((study, given))
-            used = used_by_study.setdefault(study, set())
-            if mapped:
-                new_bids = mapped
-            elif not has_existing.get(study, False):
-                new_bids = current
-            else:
-                if current and current not in used:
-                    new_bids = current
-                else:
-                    new_bids = _next_numeric_id(used)
-            if new_bids != current:
-                item.setText(new_bids)
-            used.add(new_bids)
-            for idx, info in enumerate(self.row_info):
-                if info['study'] == study and info['given'] == given:
-                    info['bids'] = new_bids
-                    self.mapping_table.item(idx, 5).setText(new_bids)
-            self.existing_maps.setdefault(study, {})[given] = new_bids
-            self.existing_used.setdefault(study, set()).add(new_bids)
-
-        self.naming_table.blockSignals(False)
-        self.mapping_table.blockSignals(False)
-
-        self._rebuild_lookup_maps()
-        QTimer.singleShot(0, self.populateModalitiesTree)
-        QTimer.singleShot(0, self.populateSpecificTree)
-        QTimer.singleShot(0, self.generatePreview)
-        QTimer.singleShot(0, self._updateScanExistingEnabled)
-        QTimer.singleShot(0, self._updateDetectRepeatEnabled)
-        QTimer.singleShot(0, self._updateMappingControlsEnabled)
+        # Keep a public wrapper so automated tests and power users can still
+        # force a rescan from the console if needed.  The heavy lifting is
+        # performed by :meth:`_apply_existing_study_mappings` which is also
+        # used by the automated workflows.
+        self._apply_existing_study_mappings(silent=False)
 
 
     def loadMappingTable(self):
@@ -3162,8 +3381,8 @@ class BIDSManager(QMainWindow):
                 bitem.setFlags(bitem.flags() | Qt.ItemIsEditable)
                 self.naming_table.setItem(nr, 2, bitem)
             self.naming_table.blockSignals(False)
-            self._updateScanExistingEnabled()
             self._updateMappingControlsEnabled()
+            QTimer.singleShot(0, self._auto_apply_existing_study_mappings)
         finally:
             self._loading_mapping_table = False
 
@@ -3486,119 +3705,186 @@ class BIDSManager(QMainWindow):
             if any(p in seq for p in patterns):
                 self.mapping_table.item(r, 0).setCheckState(Qt.Unchecked)
 
-    # ----- sequence dictionary helpers -----
-    def _seq_add(self, mod: str) -> None:
-        if mod not in self.seq_inputs or mod not in self.seq_lists:
+    # ----- suffix dictionary helpers -----
+    def _custom_add(self, suffix: str) -> None:
+        table = self.custom_tables.get(suffix)
+        edit = self.custom_inputs.get(suffix)
+        if table is None or edit is None:
             return
-        pat = self.seq_inputs[mod].text().strip()
+        pat = edit.text().strip()
         if not pat:
             return
-        table = self.seq_lists[mod]
-        r = table.rowCount()
-        table.insertRow(r)
-        table.setItem(r, 0, QTableWidgetItem(pat))
-        self.seq_inputs[mod].clear()
+        row = table.rowCount()
+        table.insertRow(row)
+        table.setItem(row, 0, QTableWidgetItem(pat))
+        edit.clear()
 
-    def _seq_remove(self, mod: str) -> None:
-        if mod not in self.seq_lists:
+    def _custom_remove(self, suffix: str) -> None:
+        table = self.custom_tables.get(suffix)
+        if table is None:
             return
-        table = self.seq_lists[mod]
         rows = sorted({item.row() for item in table.selectedItems()}, reverse=True)
         for r in rows:
             table.removeRow(r)
+
+    def _collect_custom_patterns(self) -> Dict[str, Tuple[str, ...]]:
+        patterns: Dict[str, Tuple[str, ...]] = {}
+        for suffix, table in self.custom_tables.items():
+            entries: list[str] = []
+            for r in range(table.rowCount()):
+                item = table.item(r, 0)
+                if item is None:
+                    continue
+                text = item.text().strip()
+                if text:
+                    entries.append(text)
+            if entries:
+                patterns[suffix] = tuple(entries)
+        return patterns
+
+    def _set_custom_pattern_enabled(self, enabled: bool) -> None:
+        for table in self.custom_tables.values():
+            table.setEnabled(enabled)
+        for edit in self.custom_inputs.values():
+            edit.setEnabled(enabled)
+        for button in self.custom_add_buttons.values():
+            button.setEnabled(enabled)
+        for button in self.custom_remove_buttons.values():
+            button.setEnabled(enabled)
+        if hasattr(self, "seq_apply_button"):
+            self.seq_apply_button.setEnabled(enabled)
+        if hasattr(self, "seq_save_button"):
+            self.seq_save_button.setEnabled(enabled)
+
+    def _refresh_suffix_dictionary(self) -> None:
+        active = dicom_inventory.get_sequence_hint_patterns()
+        custom = dicom_inventory.get_custom_sequence_dictionary()
+        use_custom = dicom_inventory.is_sequence_dictionary_enabled()
+        for suffix, label in self.active_labels.items():
+            active_list = active.get(suffix, ())
+            source = "Custom" if use_custom and custom.get(suffix) else "Default"
+            label.setText(f"Active source: {source} ({len(active_list)} patterns)")
+
+    def _on_custom_toggle(self, enabled: bool) -> None:
+        dicom_inventory.set_sequence_dictionary_enabled(enabled)
+        self._set_custom_pattern_enabled(enabled)
+        self._refresh_suffix_dictionary()
+        self.applySequenceDictionary()
 
     def loadSequenceDictionary(self) -> None:
         if not hasattr(self, "seq_tabs_widget"):
             return
 
+        default_patterns = dicom_inventory.get_sequence_hint_patterns(source="default")
+        custom_patterns = dicom_inventory.get_custom_sequence_dictionary()
+        suffixes = sorted(set(default_patterns) | set(custom_patterns))
+        use_custom = dicom_inventory.is_sequence_dictionary_enabled()
+
         self.seq_tabs_widget.clear()
-        self.seq_lists = {}
-        self.seq_inputs = {}
-        entries: defaultdict[str, list[str]] = defaultdict(list)
-        if self.seq_dict_file.exists():
-            try:
-                df = pd.read_csv(self.seq_dict_file, sep="\t", keep_default_na=False)
-                for _, row in df.iterrows():
-                    pat = str(row.get("pattern", "")).strip()
-                    mod = str(row.get("modality", "")).strip()
-                    if pat and mod:
-                        entries[mod].append(pat)
-            except Exception:
-                pass
-        if not entries:
-            from . import dicom_inventory
+        self.default_pattern_lists = {}
+        self.custom_tables = {}
+        self.custom_inputs = {}
+        self.custom_add_buttons = {}
+        self.custom_remove_buttons = {}
+        self.active_labels = {}
 
-            for mod, pats in dicom_inventory.BIDS_PATTERNS.items():
-                entries[mod].extend(pats)
-
-        for mod in sorted(entries.keys()):
+        for suffix in suffixes:
             tab = QWidget()
-            lay = QVBoxLayout(tab)
+            layout = QVBoxLayout(tab)
+
+            active_label = QLabel()
+            self.active_labels[suffix] = active_label
+            layout.addWidget(active_label)
+
+            default_group = QGroupBox("Default patterns")
+            default_layout = QVBoxLayout(default_group)
+            default_list = QListWidget()
+            default_list.addItems(default_patterns.get(suffix, ()))
+            default_list.setEnabled(False)
+            self.default_pattern_lists[suffix] = default_list
+            default_layout.addWidget(default_list)
+            layout.addWidget(default_group)
+
+            custom_group = QGroupBox("Custom patterns")
+            custom_layout = QVBoxLayout(custom_group)
             table = QTableWidget()
             table.setColumnCount(1)
             table.setHorizontalHeaderLabels(["Pattern"])
             table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-            for pat in entries[mod]:
-                r = table.rowCount()
-                table.insertRow(r)
-                table.setItem(r, 0, QTableWidgetItem(pat))
-            self.seq_lists[mod] = table
-            lay.addWidget(table)
+            for pat in custom_patterns.get(suffix, ()):  # populate stored entries
+                row = table.rowCount()
+                table.insertRow(row)
+                table.setItem(row, 0, QTableWidgetItem(pat))
+            self.custom_tables[suffix] = table
+            custom_layout.addWidget(table)
 
-            row = QHBoxLayout()
+            controls = QHBoxLayout()
             edit = QLineEdit()
-            self.seq_inputs[mod] = edit
-            row.addWidget(edit)
+            self.custom_inputs[suffix] = edit
+            controls.addWidget(edit)
             add_btn = QPushButton("Add")
-            add_btn.clicked.connect(lambda _=False, m=mod: self._seq_add(m))
-            row.addWidget(add_btn)
+            add_btn.clicked.connect(lambda _=False, s=suffix: self._custom_add(s))
+            self.custom_add_buttons[suffix] = add_btn
+            controls.addWidget(add_btn)
             rm_btn = QPushButton("Remove")
-            rm_btn.clicked.connect(lambda _=False, m=mod: self._seq_remove(m))
-            row.addWidget(rm_btn)
-            lay.addLayout(row)
+            rm_btn.clicked.connect(lambda _=False, s=suffix: self._custom_remove(s))
+            self.custom_remove_buttons[suffix] = rm_btn
+            controls.addWidget(rm_btn)
+            custom_layout.addLayout(controls)
+            layout.addWidget(custom_group)
 
-            save_btn = QPushButton("Save")
-            save_btn.clicked.connect(self.saveSequenceDictionary)
-            lay.addWidget(save_btn, alignment=Qt.AlignRight)
+            self.seq_tabs_widget.addTab(tab, suffix)
 
-            self.seq_tabs_widget.addTab(tab, mod)
-
+        self.use_custom_patterns_box.blockSignals(True)
+        self.use_custom_patterns_box.setChecked(use_custom)
+        self.use_custom_patterns_box.blockSignals(False)
+        self._set_custom_pattern_enabled(use_custom)
+        self._refresh_suffix_dictionary()
         self.applySequenceDictionary()
 
     def saveSequenceDictionary(self) -> None:
-        if not hasattr(self, "seq_lists"):
-            return
-        self.seq_dict_file.parent.mkdir(exist_ok=True, parents=True)
-        rows = []
-        for mod, table in self.seq_lists.items():
-            for r in range(table.rowCount()):
-                pat = table.item(r, 0).text().strip()
-                if pat:
-                    rows.append({"modality": mod, "pattern": pat})
-        pd.DataFrame(rows).to_csv(self.seq_dict_file, sep="\t", index=False)
-        QMessageBox.information(self, "Saved", f"Updated {self.seq_dict_file}")
+        patterns = self._collect_custom_patterns()
+        data = [
+            {"modality": suffix, "pattern": pat}
+            for suffix, pats in patterns.items()
+            for pat in pats
+        ]
+        if data:
+            self.seq_dict_file.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(data).to_csv(self.seq_dict_file, sep="\t", index=False)
+        else:
+            try:
+                self.seq_dict_file.unlink()
+            except Exception:
+                pass
+        dicom_inventory.update_sequence_dictionary(patterns)
+        dicom_inventory.set_sequence_dictionary_enabled(self.use_custom_patterns_box.isChecked())
+        QMessageBox.information(
+            self,
+            "Saved",
+            f"Updated suffix patterns in {self.seq_dict_file}",
+        )
+        self._refresh_suffix_dictionary()
         self.applySequenceDictionary()
 
     def restoreSequenceDefaults(self) -> None:
-        """Restore the built-in sequence dictionary."""
-        from . import dicom_inventory
-
         dicom_inventory.restore_sequence_dictionary()
         self.loadSequenceDictionary()
-        QMessageBox.information(self, "Restored", "Default sequence dictionary restored")
+        QMessageBox.information(
+            self,
+            "Restored",
+            "Default suffix dictionary restored",
+        )
 
     def applySequenceDictionary(self) -> None:
-        if not hasattr(self, "seq_lists"):
+        if not hasattr(self, "custom_tables"):
             return
-        from . import dicom_inventory
 
-        patterns = defaultdict(list)
-        for mod, table in self.seq_lists.items():
-            for r in range(table.rowCount()):
-                pat = table.item(r, 0).text().strip().lower()
-                if pat:
-                    patterns[mod].append(pat)
-        dicom_inventory.BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
+        patterns = self._collect_custom_patterns()
+        dicom_inventory.update_sequence_dictionary(patterns)
+        dicom_inventory.set_sequence_dictionary_enabled(self.use_custom_patterns_box.isChecked())
+        self._refresh_suffix_dictionary()
+
         if self.mapping_table.rowCount() > 0:
             for i in range(self.mapping_table.rowCount()):
                 seq = self.mapping_table.item(i, 9).text()
@@ -3712,11 +3998,21 @@ class BIDSManager(QMainWindow):
                 return Qt.PartiallyChecked
             return Qt.Unchecked
 
+        multi_study = len(tree_map) > 1
+
         for study, sub_map in sorted(tree_map.items()):
             st_item = QTreeWidgetItem([study])
-            st_item.setFlags(st_item.flags() | Qt.ItemIsUserCheckable)
-            st_item.setCheckState(0, _state(self.study_rows.get(study, [])))
-            st_item.setData(0, Qt.UserRole, ('study', study))
+            if multi_study:
+                # Only expose the study-level checkbox when the dataset includes
+                # multiple studies so that users do not see a redundant single
+                # checkbox for the only available study.
+                st_item.setFlags(st_item.flags() | Qt.ItemIsUserCheckable)
+                st_item.setCheckState(0, _state(self.study_rows.get(study, [])))
+                st_item.setData(0, Qt.UserRole, ('study', study))
+            else:
+                # Remove the user-checkable flag to hide the checkbox while
+                # keeping the study label visible for context.
+                st_item.setFlags(st_item.flags() & ~Qt.ItemIsUserCheckable)
             for subj, ses_map in sorted(sub_map.items()):
                 su_item = QTreeWidgetItem([subj])
                 su_item.setFlags(su_item.flags() | Qt.ItemIsUserCheckable)
@@ -5269,7 +5565,7 @@ class Volume3DDialog(QDialog):
         settings_layout.addWidget(self.status_label)
         settings_layout.addStretch()
 
-        self._panel_scroll = QScrollArea()
+        self._panel_scroll = ShrinkableScrollArea()
         self._panel_scroll.setWidget(settings_container)
         self._panel_scroll.setWidgetResizable(True)
         self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -6727,7 +7023,7 @@ class Surface3DDialog(QDialog):
         settings_layout.addWidget(self.status_label)
         settings_layout.addStretch()
 
-        self._panel_scroll = QScrollArea()
+        self._panel_scroll = ShrinkableScrollArea()
         self._panel_scroll.setWidget(settings_container)
         self._panel_scroll.setWidgetResizable(True)
         self._panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -7666,7 +7962,12 @@ class MetadataViewer(QWidget):
                     result['surface_type'] = 'freesurfer'
                 elif dicom:
                     # ``stop_before_pixels`` avoids loading heavy pixel data
-                    result['ds'] = pydicom.dcmread(str(path), stop_before_pixels=True)
+                    dataset = pydicom.dcmread(str(path), stop_before_pixels=True)
+                    result['ds'] = dataset
+                    # Preparing the nested metadata representation inside the
+                    # worker keeps the GUI responsive when large headers are
+                    # parsed.
+                    result['dicom_tree'] = self._dicom_dataset_to_tree(dataset)
             except Exception as exc:  # pragma: no cover - interactive load errors
                 load_error = exc
 
@@ -7712,7 +8013,7 @@ class MetadataViewer(QWidget):
             self._setup_surface_toolbar()
             self.viewer = self._surface_view(path, self.surface_data)
         elif dicom:
-            self.viewer = self._dicom_view(path, result.get('ds'))
+            self.viewer = self._dicom_view(path, result.get('dicom_tree'))
             self.toolbar.addStretch()
         elif ext in ['.html', '.htm']:
             self.viewer = self._html_view(path)
@@ -8583,8 +8884,40 @@ class MetadataViewer(QWidget):
         tbl.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         return tbl
 
-    def _dicom_view(self, path: Path, dataset) -> QTreeWidget:
-        """Display DICOM metadata in a read-only tree."""
+    def _dicom_dataset_to_tree(self, dataset) -> Dict[str, Any]:
+        """Return a nested mapping representing the supplied DICOM dataset.
+
+        Iterating over all elements, especially sequences, can be expensive for
+        large headers.  Performing the conversion in a worker thread keeps the
+        GUI responsive while still producing a structure that mirrors the
+        hierarchical layout of the dataset for display.
+        """
+
+        def ds_to_dict(ds) -> Dict[str, Any]:
+            mapping: Dict[str, Any] = {}
+            if ds is None:
+                return mapping
+            for elem in ds:
+                name = elem.keyword or elem.name
+                if elem.VR == "SQ":  # Sequence elements contain nested datasets
+                    mapping[name] = [ds_to_dict(item) for item in elem.value]
+                else:
+                    # ``str`` ensures even binary/text values are rendered in a
+                    # readable form inside the tree widget.
+                    try:
+                        mapping[name] = str(elem.value)
+                    except Exception:
+                        mapping[name] = "<unavailable>"
+            return mapping
+
+        file_meta = getattr(dataset, "file_meta", None)
+        return {
+            "File Meta Information": ds_to_dict(file_meta),
+            "Dataset": ds_to_dict(dataset),
+        }
+
+    def _dicom_view(self, path: Path, metadata: Optional[Dict[str, Any]]) -> QTreeWidget:
+        """Display precomputed DICOM metadata in a read-only tree."""
 
         tree = QTreeWidget()
         tree.setColumnCount(2)
@@ -8594,23 +8927,7 @@ class MetadataViewer(QWidget):
         hdr.setSectionResizeMode(0, QHeaderView.Interactive)
         hdr.setSectionResizeMode(1, QHeaderView.Interactive)
 
-        # Convert ``pydicom`` dataset to nested dictionaries for display
-        def ds_to_dict(ds):
-            out = {}
-            for elem in ds:
-                name = elem.keyword or elem.name
-                if elem.VR == "SQ":  # sequence of items
-                    out[name] = [ds_to_dict(item) for item in elem.value]
-                else:
-                    out[name] = str(elem.value)
-            return out
-
-        data = {
-            "File Meta Information": ds_to_dict(dataset.file_meta)
-            if getattr(dataset, "file_meta", None)
-            else {},
-            "Dataset": ds_to_dict(dataset),
-        }
+        data = metadata or {"File Meta Information": {}, "Dataset": {}}
         self._populate_json(tree.invisibleRootItem(), data, editable=False)
         tree.expandAll()
         tree.setEditTriggers(QAbstractItemView.NoEditTriggers)

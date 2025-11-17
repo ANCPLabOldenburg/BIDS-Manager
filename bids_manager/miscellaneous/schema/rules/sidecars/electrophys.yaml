@@ -1,8 +1,0 @@
-# Common rules for electrophysiological types
----
-EpochedData:
-  selectors:
-    - intersects([datatype], ['eeg', 'meg', 'ieeg'])
-    - sidecar.RecordingType == 'epoched'
-  fields:
-    EpochLength: recommended

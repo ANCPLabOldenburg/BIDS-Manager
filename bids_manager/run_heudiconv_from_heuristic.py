@@ -16,11 +16,11 @@ from typing import Dict, Iterable, List, Optional
 import pandas as pd
 import re
 
-from bidsphysio import dcm2bidsphysio
+from bidsphysio.dcm2bids import dcm2bidsphysio
 from pydicom import dcmread
 from pydicom.dataset import Dataset
 
-from bids_manager._study_utils import normalize_study_name
+from bids_manager.schema_renamer import normalize_study_name
 
 # Acceptable DICOM file extensions (lower case)
 # Some Siemens datasets omit file extensions; we therefore supplement the
@@ -337,7 +337,8 @@ def convert_physio_series(raw_root: Path,
             continue
 
         print(f"Converting physio {dicom_path} → {prefix_path}")
-        dcm2bidsphysio.dcm2bids(str(dicom_path), prefix_str)
+        physio_data = dcm2bidsphysio.dcm2bids(dicom_path)
+        physio_data.save_to_bids_with_trigger(prefix_str)
         converted.add(prefix_str)
 
 

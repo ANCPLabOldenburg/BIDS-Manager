@@ -1,5 +1,3 @@
 include README.md
 include LICENSE
 recursive-include bids_manager/miscellaneous/images *
-recursive-include bids_manager/miscellaneous/schema *
-recursive-include bids_manager/renaming *

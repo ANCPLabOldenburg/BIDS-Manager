@@ -4,6 +4,10 @@
 **BIDS Manager** is a **PyQt-based** GUI that converts **DICOM** folders into **BIDS**-compliant datasets and allows easy metadata editing.
 
 ---
+# Documentation
+
+You can access to documentation through this [link](https://ancplaboldenburg.github.io/bids_manager_documentation/). You will find information on how to install and use BIDS-Manager.
+
 
 ## Requirements
 

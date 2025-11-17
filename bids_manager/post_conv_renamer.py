@@ -22,10 +22,12 @@ Usage in PyCharm:
 
 No CLI arguments required.
 """
-from pathlib import Path
 import json
 import re
 import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 # -----------------------------------------------------------------------------
 # Configuration: EDIT this path to point to your BIDS dataset
@@ -104,6 +106,174 @@ def post_fmap_rename(bids_root: Path) -> None:
     update_scans_tsv(bids_root)
 
 
+def _parse_acq_time(value: Optional[str]) -> Optional[float]:
+    """Convert various acquisition time representations to sortable seconds.
+
+    The GUI exposes acquisition metadata as strings that may either follow the
+    DICOM ``HHMMSS(.ffffff)`` convention, be colon separated, or be expressed as
+    ISO date-times.  Returning a float keeps ordering stable while remaining
+    agnostic to the exact formatting originally stored in the JSON/TSV files.
+    """
+
+    if not value:
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    # ``datetime.fromisoformat`` gracefully handles values containing dates,
+    # optional timezone offsets, or fractional seconds.
+    cleaned = text.rstrip("Z")
+    try:
+        dt = datetime.fromisoformat(cleaned)
+    except ValueError:
+        # Normalise plain ``HHMMSS`` or ``HHMMSS.ffffff`` strings by inserting
+        # the missing colons so that ``strptime`` can understand them.
+        if re.fullmatch(r"\d{6}(?:\.\d+)?", cleaned):
+            cleaned = f"{cleaned[0:2]}:{cleaned[2:4]}:{cleaned[4:]}"
+
+        for fmt in ("%H:%M:%S.%f", "%H:%M:%S"):
+            try:
+                dt = datetime.strptime(cleaned, fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+
+        # Anchor the time to seconds from midnight for consistent ordering.
+        return (
+            dt.hour * 3600
+            + dt.minute * 60
+            + dt.second
+            + dt.microsecond / 1_000_000
+        )
+
+    # When a date is present we can rely on the absolute timestamp for
+    # ordering.  ``timestamp`` requires ``tzinfo``; treat naïve datetimes as
+    # local without conversion which is sufficient for relative comparisons.
+    if dt.tzinfo:
+        return dt.timestamp()
+    return (
+        dt.hour * 3600
+        + dt.minute * 60
+        + dt.second
+        + dt.microsecond / 1_000_000
+    )
+
+
+def _load_json_metadata(path: Path) -> Dict:
+    """Return the JSON metadata stored in ``path`` if available."""
+
+    if not path.is_file():
+        return {}
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _matching_json(image: Path) -> Path:
+    """Return the JSON sidecar corresponding to ``image`` (nii or nii.gz)."""
+
+    if image.suffix == ".gz" and image.name.endswith(".nii.gz"):
+        return image.with_suffix("").with_suffix(".json")
+    return image.with_suffix(".json")
+
+
+def _fieldmap_group_key(json_path: Path) -> str:
+    """Derive a stable group identifier for fieldmap components.
+
+    Fieldmap acquisitions typically produce ``magnitude1``, ``magnitude2`` and a
+    phase-derived file.  Grouping by the file stem without those suffixes lets us
+    assign the same ``IntendedFor`` list to all three sidecars.
+    """
+
+    stem = json_path.stem
+    stem = re.sub(r"_magnitude[12]$", "", stem)
+    stem = re.sub(r"_phasediff$", "", stem)
+    stem = re.sub(r"_phase[12]$", "", stem)
+    return stem
+
+
+def _format_intended_for(path: Path, bids_root: Path) -> str:
+    """Convert ``path`` into the ``bids::`` reference expected by the GUI."""
+
+    rel = path.relative_to(bids_root).as_posix()
+    return f"bids::{rel}"
+
+
+def _collect_func_runs(func_dir: Path) -> Tuple[List[Tuple[Path, float]], List[Path]]:
+    """Gather BOLD images and their acquisition times.
+
+    Returns
+    -------
+    tuple
+        A tuple containing:
+        1. A list of ``(image_path, acq_time_seconds)`` pairs for runs that
+           possess timing information.
+        2. A list of image paths lacking timing data so the caller can decide on
+           a fallback strategy.
+    """
+
+    timed_runs: List[Tuple[Path, float]] = []
+    missing_time: List[Path] = []
+
+    for image in sorted(func_dir.glob("*.nii*")):
+        name_lower = image.name.lower()
+        if "ref" in name_lower or not name_lower.endswith("bold.nii") and not name_lower.endswith("bold.nii.gz"):
+            # Skip reference volumes and non-BOLD acquisitions.
+            continue
+
+        meta = _load_json_metadata(_matching_json(image))
+        acq_time = _parse_acq_time(
+            meta.get("acq_time")
+            or meta.get("AcquisitionTime")
+            or meta.get("AcquisitionDateTime")
+        )
+
+        if acq_time is None:
+            missing_time.append(image)
+        else:
+            timed_runs.append((image, acq_time))
+
+    return timed_runs, missing_time
+
+
+def _collect_fieldmaps(
+    fmap_dir: Path
+) -> Tuple[List[Tuple[str, List[Path], float]], List[List[Path]]]:
+    """Group fieldmap JSON files by acquisition and capture timing data."""
+
+    grouped: Dict[str, Dict[str, object]] = {}
+    missing: List[List[Path]] = []
+
+    for sidecar in sorted(fmap_dir.glob("*.json")):
+        key = _fieldmap_group_key(sidecar)
+        meta = _load_json_metadata(sidecar)
+        acq_time = _parse_acq_time(
+            meta.get("acq_time")
+            or meta.get("AcquisitionTime")
+            or meta.get("AcquisitionDateTime")
+        )
+
+        group = grouped.setdefault(key, {"members": [], "time": None})
+        group["members"].append(sidecar)
+        if group["time"] is None and acq_time is not None:
+            group["time"] = acq_time
+
+    timed_groups: List[Tuple[str, List[Path], float]] = []
+
+    for key, info in grouped.items():
+        members: List[Path] = info["members"]  # type: ignore[assignment]
+        time_val = info.get("time")
+        if time_val is None:
+            missing.append(members)
+        else:
+            timed_groups.append((key, members, float(time_val)))
+
+    return timed_groups, missing
+
+
 def _update_intended_for(root: Path, bids_root: Path) -> None:
     """Add ``IntendedFor`` entries to fieldmap JSONs under ``root``."""
     # ``root`` points to either ``sub-<id>`` or ``sub-<id>/ses-<id>``
@@ -116,27 +286,57 @@ def _update_intended_for(root: Path, bids_root: Path) -> None:
     if not (fmap_dir.is_dir() and func_dir.is_dir()):
         return
 
-    # Collect paths of all functional images relative to the subject/session
-    # directory so that ``IntendedFor`` entries omit the ``sub-*`` prefix.
-    # Skip reference volumes (e.g. ``*_sbref``) as they should not appear in the
-    # ``IntendedFor`` lists.
-    func_files = [
-        f for f in sorted(func_dir.glob("*.nii*")) if "ref" not in f.name.lower()
-    ]
-    if not func_files:
+    timed_runs, runs_missing_time = _collect_func_runs(func_dir)
+    if not timed_runs and not runs_missing_time:
         return
 
-    rel_paths = [f.relative_to(root).as_posix() for f in func_files]
+    timed_fmaps, fmap_missing_time = _collect_fieldmaps(fmap_dir)
+    if not timed_fmaps and not fmap_missing_time:
+        return
 
-    # Update each JSON sidecar under ``fmap`` with the collected paths.
-    for js in fmap_dir.glob("*.json"):
-        with open(js, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        meta["IntendedFor"] = rel_paths
-        with open(js, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=4)
-            f.write("\n")
-        print(f"Updated IntendedFor in {js.relative_to(bids_root)}")
+    # Decide whether we can honour the acquisition-based association.  If any
+    # run or fieldmap lacks timing data we fall back to the legacy behaviour of
+    # linking every fieldmap to every run.  This preserves previous
+    # functionality rather than making incorrect assumptions.
+    if runs_missing_time or fmap_missing_time:
+        all_runs = sorted([image for image, _ in timed_runs] + runs_missing_time)
+        rel_paths = [
+            _format_intended_for(image, bids_root)
+            for image in all_runs
+        ]
+
+        for group in [members for _, members, _ in timed_fmaps] + fmap_missing_time:
+            for sidecar in group:
+                meta = _load_json_metadata(sidecar)
+                meta["IntendedFor"] = rel_paths
+                with open(sidecar, "w", encoding="utf-8") as handle:
+                    json.dump(meta, handle, indent=4)
+                    handle.write("\n")
+                print(f"Updated IntendedFor in {sidecar.relative_to(bids_root)}")
+        return
+
+    # With reliable timing information, assign each fieldmap to the functional
+    # runs acquired after it until the next fieldmap occurs.
+    timed_runs.sort(key=lambda item: item[1])
+    timed_fmaps.sort(key=lambda item: item[2])
+
+    run_queue: List[Tuple[Path, float]] = list(timed_runs)
+
+    for idx, (_, members, fmap_time) in enumerate(timed_fmaps):
+        next_time = timed_fmaps[idx + 1][2] if idx + 1 < len(timed_fmaps) else float("inf")
+        intended = [
+            _format_intended_for(image, bids_root)
+            for image, acq in run_queue
+            if fmap_time <= acq < next_time
+        ]
+
+        for sidecar in members:
+            meta = _load_json_metadata(sidecar)
+            meta["IntendedFor"] = intended
+            with open(sidecar, "w", encoding="utf-8") as handle:
+                json.dump(meta, handle, indent=4)
+                handle.write("\n")
+            print(f"Updated IntendedFor in {sidecar.relative_to(bids_root)}")
 
 
 def add_intended_for(bids_root: Path) -> None:

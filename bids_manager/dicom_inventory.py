@@ -9,8 +9,8 @@ Why you want this
 -----------------
 * Lets you review **all** SeriesDescriptions, subjects, sessions and file counts
   before converting anything.
-* Column `include` defaults to 1 except for scout/report/physio/physlog
-  sequences, which start at 0 so they are skipped by default.
+* Column `include` defaults to 1 except for scout/report sequences, which
+  start at 0 so they are skipped by default.
 * Generated table is the single source of truth you feed into a helper script
   that writes the HeuDiConv heuristic.
 
@@ -22,7 +22,7 @@ session        – `ses-<label>` if exactly one unique session tag is present in
                  that folder, otherwise blank
 source_folder  – relative path from the DICOM root to the folder containing the
                  series
-include        – defaults to 1 but scout/report/physlog rows start at 0
+include        – defaults to 1 but scout/report rows start at 0
 sequence       – original SeriesDescription
 series_uid     – DICOM SeriesInstanceUID identifying a specific acquisition
 rep            – 1, 2, … if multiple SeriesInstanceUIDs share the same description
@@ -37,7 +37,7 @@ GivenName … StudyDescription – demographics copied from the first header see
 import os
 import re
 from collections import defaultdict
-from typing import Optional
+from typing import Dict, Iterable, Mapping, Optional, Tuple
 from pathlib import Path
 from joblib import Parallel, delayed
 
@@ -45,27 +45,57 @@ import pandas as pd
 import pydicom
 from pydicom.multival import MultiValue
 
-from ._study_utils import normalize_study_name
+from bids_manager.schema_renamer import normalize_study_name
 
 # Preview name helpers – loaded lazily so ``scan_dicoms_long`` can store
 # proposed BIDS names directly in the TSV.  We guard the import to keep the
 # inventory script functional even if the renamer dependencies are missing.
 try:  # pragma: no cover - import errors simply disable preview generation
-    from .schema_renamer import (
-        load_bids_schema,
+    from bids_manager.schema_renamer import (
+        DEFAULT_SCHEMA_DIR,
+        SKIP_MODALITIES,
         SeriesInfo,
         build_preview_names,
+        get_sequence_hint_patterns,
+        guess_modality,
+        load_bids_schema,
+        modality_to_container,
+        restore_default_sequence_hints,
+        set_sequence_hint_patterns,
     )
-    from .schema_config import DEFAULT_SCHEMA_DIR
 except Exception:  # pragma: no cover - best effort
-    load_bids_schema = None  # type: ignore
+    DEFAULT_SCHEMA_DIR = None  # type: ignore
     SeriesInfo = None  # type: ignore
     build_preview_names = None  # type: ignore
-    DEFAULT_SCHEMA_DIR = Path(".")  # type: ignore
+    load_bids_schema = None  # type: ignore
+
+    def guess_modality(series: str) -> str:  # type: ignore
+        return "unknown"
+
+    def modality_to_container(mod: str) -> str:  # type: ignore
+        return ""
+
+    def get_sequence_hint_patterns() -> Dict[str, Tuple[str, ...]]:  # type: ignore
+        return {}
+
+    def set_sequence_hint_patterns(patterns):  # type: ignore
+        return None
+
+    def restore_default_sequence_hints() -> None:  # type: ignore
+        return None
+
+    SKIP_MODALITIES = {"scout", "report"}
+
+
+RENAMER_AVAILABLE = build_preview_names is not None
 
 # Directory used to store persistent user preferences
 PREF_DIR = Path(__file__).resolve().parent / "user_preferences"
 SEQ_DICT_FILE = PREF_DIR / "sequence_dictionary.tsv"
+SEQ_DICT_ENABLED_FILE = PREF_DIR / "sequence_dictionary.enabled"
+
+_CUSTOM_PATTERNS: Dict[str, Tuple[str, ...]] = {}
+_CUSTOM_PATTERNS_ENABLED: bool = False
 
 # Acceptable DICOM file extensions (lower case)
 # Siemens scanners sometimes omit extensions altogether, so we also
@@ -95,120 +125,118 @@ def is_dicom_file(path: str) -> bool:
     except Exception:
         return False
 
-# ----------------------------------------------------------------------
-# 1.  Patterns: SeriesDescription → fine-grained modality label
-#    (order matters: first match wins)
-# ----------------------------------------------------------------------
-BIDS_PATTERNS = {
-    # anatomy
-    "T1w"    : (
-        "t1w",
-        "t1-weight",
-        "t1_",
-        "t1 ",
-        "mprage",
-        "tfl3d",
-        "fspgr",
-    ),
-    "T2w"    : ("t2w", "space", "tse"),
-    "FLAIR"  : ("flair",),
-    "MTw"    : ("gre-mt", "gre_mt", "mt"),
-    "PDw"    : ("gre-nm", "gre_nm"),
-    "scout"  : ("localizer", "scout"),
-    "report" : ("phoenixzipreport", "phoenix document", ".pdf", "report"),
-    # functional
-    # SBRef must precede bold to avoid misclassification when sequences
-    # contain both "sbref" and "bold" tokens.
-    "SBRef"  : (
-        "sbref",
-        "type-ref",
-        "reference",
-        "refscan",
-        " ref",
-        "_ref",
-        "ref",
-    ),
-    # Physiological recordings also tend to include "fmri" or "bold" in
-    # their sequence names.  List them before the generic bold patterns so
-    # they are detected correctly.
-    "physio" : ("physiolog", "physio", "pulse", "resp"),
-    "bold"   : ("fmri", "bold", "task-"),
-    # diffusion
-    "dwi"    : ("dti", "dwi", "diff"),
-    # field maps
-    "fmap"   : (
-        "gre_field",
-        "fieldmapping",
-        "_fmap",
-        "fmap",
-        "phase",
-        "magnitude",
-        "b0rf",
-        "b0_map",
-        "b0map",
-    ),
-}
+def _load_enabled_flag() -> bool:
+    try:
+        return SEQ_DICT_ENABLED_FILE.read_text().strip() == "1"
+    except Exception:
+        return False
 
-# Keep a pristine copy of the default patterns so the GUI can restore them
-DEFAULT_BIDS_PATTERNS = {m: tuple(pats) for m, pats in BIDS_PATTERNS.items()}
+
+def _write_enabled_flag(enabled: bool) -> None:
+    try:
+        if enabled:
+            PREF_DIR.mkdir(parents=True, exist_ok=True)
+            SEQ_DICT_ENABLED_FILE.write_text("1")
+        else:
+            try:
+                SEQ_DICT_ENABLED_FILE.unlink()
+            except FileNotFoundError:
+                pass
+    except Exception:
+        pass
+
+
+def _apply_sequence_dictionary() -> None:
+    if not RENAMER_AVAILABLE:
+        return
+    if _CUSTOM_PATTERNS_ENABLED and _CUSTOM_PATTERNS:
+        set_sequence_hint_patterns(_CUSTOM_PATTERNS)
+    else:
+        restore_default_sequence_hints()
 
 
 def load_sequence_dictionary() -> None:
     """Load user-modified sequence patterns from :data:`SEQ_DICT_FILE`."""
-    global BIDS_PATTERNS
-    if not SEQ_DICT_FILE.exists():
+    global _CUSTOM_PATTERNS, _CUSTOM_PATTERNS_ENABLED
+
+    if not RENAMER_AVAILABLE:
         return
-    try:
-        df = pd.read_csv(SEQ_DICT_FILE, sep="\t", keep_default_na=False)
-    except Exception:
+
+    patterns: Dict[str, list[str]] = defaultdict(list)
+    if SEQ_DICT_FILE.exists():
+        try:
+            df = pd.read_csv(SEQ_DICT_FILE, sep="\t", keep_default_na=False)
+            for _, row in df.iterrows():
+                mod = str(row.get("modality", "")).strip()
+                pat = str(row.get("pattern", "")).strip()
+                if mod and pat:
+                    patterns[mod].append(pat)
+        except Exception:
+            patterns = {}
+
+    _CUSTOM_PATTERNS = {m: tuple(pats) for m, pats in patterns.items() if pats}
+    _CUSTOM_PATTERNS_ENABLED = _load_enabled_flag()
+    _apply_sequence_dictionary()
+
+
+def is_sequence_dictionary_enabled() -> bool:
+    return _CUSTOM_PATTERNS_ENABLED
+
+
+def set_sequence_dictionary_enabled(enabled: bool) -> None:
+    """Persist the custom pattern toggle and apply the active source."""
+
+    global _CUSTOM_PATTERNS_ENABLED
+    if not RENAMER_AVAILABLE:
         return
-    patterns: defaultdict[str, list[str]] = defaultdict(list)
-    for _, row in df.iterrows():
-        mod = str(row.get("modality", "")).strip()
-        pat = str(row.get("pattern", "")).strip().lower()
-        if mod and pat:
-            patterns[mod].append(pat)
-    if patterns:
-        BIDS_PATTERNS = {m: tuple(pats) for m, pats in patterns.items()}
+
+    _CUSTOM_PATTERNS_ENABLED = bool(enabled)
+    _write_enabled_flag(_CUSTOM_PATTERNS_ENABLED)
+    _apply_sequence_dictionary()
+
+
+def update_sequence_dictionary(patterns: Mapping[str, Iterable[str]]) -> None:
+    """Replace the stored custom sequence patterns."""
+
+    global _CUSTOM_PATTERNS
+    cleaned: Dict[str, Tuple[str, ...]] = {}
+    for label, pats in patterns.items():
+        entries = []
+        for pat in pats:
+            text = str(pat).strip()
+            if text:
+                entries.append(text)
+        if entries:
+            cleaned[label] = tuple(entries)
+
+    _CUSTOM_PATTERNS = cleaned
+    _apply_sequence_dictionary()
 
 
 def restore_sequence_dictionary() -> None:
-    """Revert :data:`BIDS_PATTERNS` to the bundled defaults."""
-    global BIDS_PATTERNS
-    BIDS_PATTERNS = {m: tuple(pats) for m, pats in DEFAULT_BIDS_PATTERNS.items()}
+    """Revert sequence hint patterns to the bundled defaults."""
+
+    global _CUSTOM_PATTERNS, _CUSTOM_PATTERNS_ENABLED
+    if not RENAMER_AVAILABLE:
+        return
+
+    _CUSTOM_PATTERNS = {}
+    _CUSTOM_PATTERNS_ENABLED = False
+    _apply_sequence_dictionary()
+    _write_enabled_flag(False)
     try:
         SEQ_DICT_FILE.unlink()
     except Exception:
         pass
 
 
+def get_custom_sequence_dictionary() -> Dict[str, Tuple[str, ...]]:
+    """Return the stored custom patterns without altering the active state."""
+
+    return {label: tuple(pats) for label, pats in _CUSTOM_PATTERNS.items()}
+
+
 load_sequence_dictionary()
-
-def guess_modality(series: str) -> str:
-    """Return first matching fine-grained modality label or 'unknown'.
-
-    Important details:
-    - We classify common vendor DWI derivative maps (ADC/FA/TRACEW/ColFA/expADC)
-      before general DWI detection to keep them out of the raw `dwi/` tree.
-    - Matching is performed on the lower-cased SeriesDescription.
-    """
-    s = series.lower()
-
-    # Recognize common scanner-generated maps as derivatives
-    dwi_derivatives = [
-        "_adc", "_fa", "_tracew", "_colfa", "_expadc",
-        " adc", " fa", " tracew", " colfa", " expadc",
-        "adc", "fa", "tracew", "colfa", "expadc",
-    ]
-    for deriv in dwi_derivatives:
-        if deriv in s:
-            return "dwi_derivative"
-
-    for label, pats in BIDS_PATTERNS.items():
-        if any(p in s for p in pats):
-            return label
-
-    return "unknown"
 
 
 MAGNITUDE_IMGTYPE = ["ORIGINAL", "PRIMARY", "M", "ND", "NORM"]
@@ -238,22 +266,6 @@ def classify_fieldmap_type(img_list: list) -> str:
         return "P"
     return ""
 
-
-# ----------------------------------------------------------------------
-# 2.  Map fine label → top-level BIDS container (anat, func, …)
-# ----------------------------------------------------------------------
-BIDS_CONTAINER = {
-    "T1w":"anat", "T2w":"anat", "FLAIR":"anat",
-    "MTw":"anat", "PDw":"anat",
-    "scout":"anat", "report":"anat",
-    "bold":"func", "SBRef":"func", "physio":"func",
-    "dwi":"dwi",
-    "dwi_derivative":"derivatives",  # DWI derivatives go to derivatives folder
-    "fmap":"fmap",
-}
-def modality_to_container(mod: str) -> str:
-    """Translate T1w → anat, bold → func, etc.; unknown → ''."""
-    return BIDS_CONTAINER.get(mod, "")
 
 # session detector (e.g. ses-pre, ses-01) -- case-insensitive
 SESSION_RE = re.compile(r"ses-([a-zA-Z0-9]+)", re.IGNORECASE)
@@ -409,9 +421,7 @@ def scan_dicoms_long(
             for (series, uid), n_files in sorted(counts[subj_key][folder].items()):
                 fine_mod = mods[subj_key][folder][(series, uid)]
                 img3 = imgtypes[subj_key][folder].get((series, uid), "")
-                include = 1
-                if fine_mod in {"scout", "report"}:
-                    include = 0
+                include = 0 if fine_mod in SKIP_MODALITIES else 1
                 # Do not consider image type when counting scout duplicates
                 rep_key = series if fine_mod == "scout" else (series, img3)
                 rep_counter[rep_key] += 1
