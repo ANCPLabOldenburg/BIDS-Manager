@@ -1177,21 +1177,18 @@ class BIDSManager(QMainWindow):
         app = QApplication.instance()
         self._base_font = app.font()
         screen = app.primaryScreen()
-        # Detect the OS DPI scaling.  ``logicalDotsPerInch`` returns the
-        # effective DPI taking the system scaling factor into account.  We store
-        # the percentage relative to the base 96 DPI.
-        if screen is not None:
-            try:
-                self._os_dpi = round(screen.logicalDotsPerInch() / 96 * 100)
-            except Exception:
-                self._os_dpi = 100
-        else:
-            self._os_dpi = 100
+        # Detect the OS DPI scaling in a resilient way.  ``logicalDotsPerInch``
+        # is usually the most accurate value because it already factors in the
+        # operating-system scale factor.  On some platforms (e.g. X11 with
+        # unusual monitor reporting) this can be inaccurate, so we fall back to
+        # the device pixel ratio when needed.  The result is stored as a
+        # percentage relative to the 96 DPI base expected by Qt.
+        self._os_dpi = self._detect_system_dpi(screen)
 
-        # User requested DPI scale (100% by default).  The actual font scaling
-        # is calculated relative to ``self._os_dpi`` so that the GUI renders at
-        # the expected size even when the system DPI is above 100%.
-        self.dpi_scale = 100
+        # User-requested DPI scale.  By default we start from the detected
+        # system value so that the UI matches the OS scaling out of the box.
+        # Users can still fine-tune the value manually via the DPI dialog.
+        self.dpi_scale = self._os_dpi
 
         # Paths
         self.dicom_dir = ""         # Raw DICOM directory
@@ -1222,6 +1219,10 @@ class BIDSManager(QMainWindow):
         self.existing_maps = {}
         self.existing_used = {}
         self.use_bids_names = True
+
+        # Track repeat-detection state so we can notify the user when new
+        # duplicates are found and keep the "Only last repeats" option in sync.
+        self._last_repeat_count = 0
 
         # Flag used to skip expensive updates while the mapping table is being
         # populated programmatically.  ``QTableWidget`` emits ``itemChanged``
@@ -1262,7 +1263,8 @@ class BIDSManager(QMainWindow):
         self.dpi_file = self.pref_dir / "dpi_scale.txt"
         # Load any previously stored DPI preference so the UI scale persists
         # across sessions.  Invalid or out-of-range values fall back to the
-        # default of 100%.
+        # detected system scale.  This keeps the first launch aligned with the
+        # host environment while preserving user tweaks afterwards.
         if self.dpi_file.exists():
             try:
                 saved_dpi = int(self.dpi_file.read_text().strip())
@@ -1273,6 +1275,11 @@ class BIDSManager(QMainWindow):
             if saved_dpi is not None:
                 self.dpi_scale = max(50, min(200, saved_dpi))
         self.seq_dict_file = dicom_inventory.SEQ_DICT_FILE
+        # Flag used to automatically reapply the suffix dictionary after a fresh
+        # scan.  This keeps the scanned data table in sync with the latest
+        # custom patterns without overriding manual edits made later via
+        # ``applyMappingChanges``.
+        self._apply_sequence_on_load = False
 
         # Spinner for long-running tasks
         self.spinner_label = None
@@ -1670,24 +1677,68 @@ class BIDSManager(QMainWindow):
         """Apply current DPI scaling to the application font."""
         app = QApplication.instance()
         font = QFont(self._base_font)
-        # Calculate font size relative to the system DPI so that ``dpi_scale``
-        # represents the desired scaling independent of the OS setting.
-        scaled = max(
-            1, int(self._base_font.pointSize() * self.dpi_scale / self._os_dpi)
-        )
+        base_size = self._base_font.pointSizeF() or float(self._base_font.pointSize())
+        # Calculate the font size relative to the detected system DPI so that
+        # ``dpi_scale`` always represents the intended scale percentage of the
+        # 96-DPI baseline.  Using a ratio keeps the default matching the OS while
+        # letting users make incremental adjustments without surprises.
+        scale_ratio = max(0.5, min(2.0, self.dpi_scale / max(self._os_dpi, 1)))
+        scaled = max(1.0, base_size * scale_ratio)
         if self.current_theme in ("Contrast", "Contrast White"):
             font.setWeight(QFont.Bold)
-            font.setPointSize(scaled + 1)
+            font.setPointSizeF(scaled + 1)
         else:
             font.setWeight(QFont.Normal)
-            font.setPointSize(scaled)
+            font.setPointSizeF(scaled)
         app.setFont(font)
 
         # Ensure the tab labels also scale with the selected DPI
         if hasattr(self, "tabs"):
             tab_font = QFont(font)
-            tab_font.setPointSize(font.pointSize() + 1)
+            tab_font.setPointSizeF(font.pointSizeF() + 1)
             self.tabs.setFont(tab_font)
+
+    def _detect_system_dpi(self, screen):
+        """Return the system DPI percentage relative to 96 with fallbacks.
+
+        The logic prefers ``logicalDotsPerInch`` (Qt's effective DPI that already
+        accounts for the OS scale).  When that value is implausible we try the
+        physical DPI and the device pixel ratio, selecting the first reasonable
+        candidate.  This helps avoid wildly large or tiny UI defaults on
+        platforms that misreport DPI values.
+        """
+
+        if screen is None:
+            return 100
+
+        candidates = []
+        try:
+            logical = screen.logicalDotsPerInch()
+            if logical > 1:
+                candidates.append(logical / 96 * 100)
+        except Exception:
+            pass
+
+        try:
+            physical = screen.physicalDotsPerInch()
+            if physical > 1:
+                candidates.append(physical / 96 * 100)
+        except Exception:
+            pass
+
+        try:
+            ratio = screen.devicePixelRatio()
+            if ratio > 0:
+                candidates.append(ratio * 100)
+        except Exception:
+            pass
+
+        for candidate in candidates:
+            if 25 <= candidate <= 400:
+                return int(round(candidate))
+
+        # Fallback to a safe default when nothing sensible is reported.
+        return 100
 
     def _update_logo(self) -> None:
         """Update logo pixmap based on current theme."""
@@ -1869,10 +1920,9 @@ class BIDSManager(QMainWindow):
         dict_layout.addWidget(self.seq_tabs_widget)
         dict_btn_row = QHBoxLayout()
         dict_btn_row.addStretch()
-        self.seq_apply_button = QPushButton("Apply")
-        self.seq_apply_button.clicked.connect(self.applySequenceDictionary)
-        dict_btn_row.addWidget(self.seq_apply_button)
         self.seq_save_button = QPushButton("Save")
+        # Saving the suffix dictionary also applies the changes immediately so
+        # users do not need a separate "Apply" step.
         self.seq_save_button.clicked.connect(self.saveSequenceDictionary)
         dict_btn_row.addWidget(self.seq_save_button)
         restore_btn = QPushButton("Restore defaults")
@@ -2519,6 +2569,12 @@ class BIDSManager(QMainWindow):
         if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
             return
 
+        # Remember to reapply the suffix dictionary automatically once the new
+        # scan results have been loaded.  This ensures custom patterns take
+        # effect immediately after a rescan without requiring another manual
+        # save on the suffix tab.
+        self._apply_sequence_on_load = self.use_custom_patterns_box.isChecked()
+
         # Clear the log so each scan run starts with a fresh history for the
         # user.
         self.log_text.clear()
@@ -2745,6 +2801,10 @@ class BIDSManager(QMainWindow):
             self._start_conflict_scan()
         else:
             self.log_text.append("TSV generation failed.")
+            # Avoid auto-applying the suffix dictionary when the scan failed;
+            # the mapping table will not be refreshed and we should not reuse
+            # the pending flag for future loads.
+            self._apply_sequence_on_load = False
 
     def stopInventory(self):
         if self.inventory_process and self.inventory_process.state() != QProcess.NotRunning:
@@ -2755,6 +2815,9 @@ class BIDSManager(QMainWindow):
             self.tsv_stop_button.setEnabled(False)
             self._stop_spinner()
             self.log_text.append("TSV generation cancelled.")
+            # Reset pending suffix reapplication because no new TSV will be
+            # loaded after a cancellation.
+            self._apply_sequence_on_load = False
 
     def applyMappingChanges(self):
         """Save edits in the scanned data table back to the TSV and refresh."""
@@ -2880,6 +2943,85 @@ class BIDSManager(QMainWindow):
                     enabled = False
                     break
         self.tsv_detect_rep_action.setEnabled(enabled)
+
+    @staticmethod
+    def _is_visual_only_sequence(sequence: str, modality: str = "") -> bool:
+        """Return ``True`` when the sequence should remain view-only."""
+
+        seq_lower = (sequence or "").lower()
+        mod_lower = (modality or "").lower()
+        # The check is intentionally substring-based so variations such as
+        # "Phoenix Report" or "Scout Image" are also captured.
+        visual_tokens = ("phoenix report", "scout", "report")
+        return any(tok in seq_lower for tok in visual_tokens) or any(
+            tok in mod_lower for tok in visual_tokens
+        )
+
+    def _apply_visual_only_rules(self, row: int) -> None:
+        """Disable inclusion toggles for rows that must stay view-only."""
+
+        if not (0 <= row < self.mapping_table.rowCount()):
+            return
+        include_item = self.mapping_table.item(row, 0)
+        if include_item is None or row >= len(self.row_info):
+            return
+
+        is_visual_only = bool(self.row_info[row].get("visual_only"))
+        # Temporarily silence table signals while we adjust checkbox flags so
+        # we do not trigger downstream refreshes.
+        prev_block = self.mapping_table.signalsBlocked()
+        self.mapping_table.blockSignals(True)
+        try:
+            if is_visual_only:
+                include_item.setCheckState(Qt.Unchecked)
+                include_item.setFlags(
+                    (include_item.flags() & ~Qt.ItemIsEditable)
+                    & ~Qt.ItemIsUserCheckable
+                    & ~Qt.ItemIsEnabled
+                )
+                include_item.setToolTip(
+                    "Reports and scout images are shown for reference only."
+                )
+            else:
+                include_item.setFlags(
+                    (include_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                    & ~Qt.ItemIsEditable
+                )
+                include_item.setToolTip("")
+        finally:
+            self.mapping_table.blockSignals(prev_block)
+
+    def _count_non_visual_repeats(self) -> int:
+        """Return the number of repeated acquisitions excluding visual-only rows."""
+
+        count = 0
+        for info in self.row_info:
+            if info.get("visual_only"):
+                continue
+            rep_val = str(info.get("rep") or "").strip()
+            if rep_val.isdigit() and int(rep_val) > 1:
+                count += 1
+        return count
+
+    def _maybe_notify_repeats(self) -> None:
+        """Inform the user when new repeats are detected and sync selection."""
+
+        if not hasattr(self, "last_rep_box"):
+            return
+        repeat_count = self._count_non_visual_repeats()
+        if repeat_count > 0:
+            if not self.last_rep_box.isChecked():
+                self.last_rep_box.setChecked(True)
+            if self._last_repeat_count == 0:
+                QMessageBox.information(
+                    self,
+                    "Repeated sequences detected",
+                    (
+                        "Repeated acquisitions were found. The \"Only last repeats\" "
+                        "option is now active to keep the latest instance selected."
+                    ),
+                )
+        self._last_repeat_count = repeat_count
 
     def _auto_apply_existing_study_mappings(self) -> None:
         """Queue a silent sync of BIDS names with existing output datasets."""
@@ -3075,6 +3217,8 @@ class BIDSManager(QMainWindow):
         info['rep'] = _text(13)
         info['mod'] = _text(14)
         info['modb'] = _text(15)
+        info['visual_only'] = self._is_visual_only_sequence(info['seq'], info['mod'])
+        self._apply_visual_only_rules(row)
 
     def _schedule_mapping_refresh(self) -> None:
         """Queue UI updates that reflect the current mapping table."""
@@ -3167,6 +3311,7 @@ class BIDSManager(QMainWindow):
             self.row_info[i]['rep'] = str(val) if str(val) else ''
 
         self._rebuild_lookup_maps()
+        self._maybe_notify_repeats()
         QTimer.singleShot(0, self.populateModalitiesTree)
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.generatePreview)
@@ -3195,6 +3340,20 @@ class BIDSManager(QMainWindow):
         self._loading_mapping_table = True
         try:
             df = pd.read_csv(self.tsv_path, sep="\t", keep_default_na=False)
+
+            # Respect custom suffix patterns when building preview names by
+            # re-deriving modalities with the active dictionary before
+            # computing BIDS proposals.  This keeps freshly scanned tables in
+            # sync with the "Use custom suffix patterns" toggle without
+            # requiring a manual "Save" on the suffix tab first.
+            if self.use_custom_patterns_box.isChecked():
+                for idx, row in df.iterrows():
+                    seq = str(row.get("sequence") or "")
+                    mod = dicom_inventory.guess_modality(seq)
+                    modb = dicom_inventory.modality_to_container(mod)
+                    df.at[idx, "modality"] = mod
+                    df.at[idx, "modality_bids"] = modb
+
             preview_map = _compute_bids_preview(df, self._schema)
             df["proposed_datatype"] = [preview_map.get(i, ("", ""))[0] for i in df.index]
             df["proposed_basename"] = [preview_map.get(i, ("", ""))[1] for i in df.index]
@@ -3288,11 +3447,17 @@ class BIDSManager(QMainWindow):
                 self.mapping_table.setItem(r, 5, bids_item)
 
                 subj_item = QTableWidgetItem(_clean(row.get('subject')))
-                subj_item.setFlags(subj_item.flags() | Qt.ItemIsEditable)
+                # Subject identifiers come from generated mappings or utilities
+                # such as ``generateUniqueIDs``; keep them read-only in the
+                # scanned data viewer so users do not alter them manually.
+                subj_item.setFlags(subj_item.flags() & ~Qt.ItemIsEditable)
                 self.mapping_table.setItem(r, 6, subj_item)
 
                 given_item = QTableWidgetItem(_clean(row.get('GivenName')))
-                given_item.setFlags(given_item.flags() | Qt.ItemIsEditable)
+                # "GivenName" (the generated unique ID) must not be edited
+                # directly in the scanned data table to avoid inconsistencies
+                # with the subject mapping utilities.
+                given_item.setFlags(given_item.flags() & ~Qt.ItemIsEditable)
                 self.mapping_table.setItem(r, 7, given_item)
 
                 session = _clean(row.get('session'))
@@ -3301,7 +3466,9 @@ class BIDSManager(QMainWindow):
                 self.mapping_table.setItem(r, 8, ses_item)
 
                 seq_item = QTableWidgetItem(_clean(row.get('sequence')))
-                seq_item.setFlags(seq_item.flags() | Qt.ItemIsEditable)
+                # Preserve the original DICOM sequence information as read-only
+                # so the viewer remains a faithful reflection of the scan data.
+                seq_item.setFlags(seq_item.flags() & ~Qt.ItemIsEditable)
                 self.mapping_table.setItem(r, 9, seq_item)
 
                 preview_item = QTableWidgetItem(_clean(row.get('Proposed BIDS name')))
@@ -3349,7 +3516,9 @@ class BIDSManager(QMainWindow):
                     'prop_base': prop_base,
                     'n_files': _clean(row.get('n_files')),
                     'acq_time': _clean(row.get('acq_time')),
+                    'visual_only': self._is_visual_only_sequence(seq, mod),
                 })
+                self._apply_visual_only_rules(r)
             self.log_text.append("Loaded TSV into mapping table.")
 
             # Apply always-exclude patterns before building lookup tables
@@ -3357,11 +3526,19 @@ class BIDSManager(QMainWindow):
 
             # Build modality/sequence lookup for tree interactions
             self._rebuild_lookup_maps()
+            self._maybe_notify_repeats()
 
             self.populateModalitiesTree()
             self.populateSpecificTree()
             if getattr(self, 'last_rep_box', None) is not None and self.last_rep_box.isChecked():
                 self._onLastRepToggled(True)
+
+            if self._apply_sequence_on_load:
+                # Auto-apply the suffix dictionary after a fresh scan so the
+                # latest custom patterns are reflected in the newly loaded
+                # mapping table without requiring another manual save.
+                self.applySequenceDictionary()
+                self._apply_sequence_on_load = False
 
             # Populate naming table
             self.naming_table.blockSignals(True)
@@ -3487,11 +3664,17 @@ class BIDSManager(QMainWindow):
                     mod_item.setCheckState(0, Qt.Unchecked)
                 mod_item.setData(0, Qt.UserRole, ('mod', modb, mod))
                 for (seq, rep), info in sorted(seqs.items()):
+                    visual_only = bool(info.get("visual_only"))
                     label = seq
                     if rep:
                         label = f"{seq} (rep {rep})"
                     seq_item = QTreeWidgetItem([label])
-                    seq_item.setFlags(seq_item.flags() | Qt.ItemIsUserCheckable)
+                    if visual_only:
+                        seq_item.setFlags(
+                            (seq_item.flags() & ~Qt.ItemIsUserCheckable) & ~Qt.ItemIsEnabled
+                        )
+                    else:
+                        seq_item.setFlags(seq_item.flags() | Qt.ItemIsUserCheckable)
                     rows = self.seq_rows.get((modb, mod, seq, rep), [])
                     states = [self.mapping_table.item(r, 0).checkState() == Qt.Checked for r in rows]
                     if states and all(states):
@@ -3551,6 +3734,8 @@ class BIDSManager(QMainWindow):
         else:
             rows = []
         for r in rows:
+            if self.row_info[r].get("visual_only"):
+                continue
             self.mapping_table.item(r, 0).setCheckState(state)
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.populateModalitiesTree)
@@ -3618,15 +3803,16 @@ class BIDSManager(QMainWindow):
             rep_num = int(info['rep']) if str(info['rep']).isdigit() else 1
             groups.setdefault(key, []).append((rep_num, idx))
         for items in groups.values():
-            if len(items) < 2:
+            filtered = [entry for entry in items if not self.row_info[entry[1]].get("visual_only")]
+            if len(filtered) < 2:
                 continue
             if checked:
-                max_idx = max(items, key=lambda x: x[0])[1]
-                for _, i in items:
+                max_idx = max(filtered, key=lambda x: x[0])[1]
+                for _, i in filtered:
                     st = Qt.Checked if i == max_idx else Qt.Unchecked
                     self.mapping_table.item(i, 0).setCheckState(st)
             else:
-                for _, i in items:
+                for _, i in filtered:
                     self.mapping_table.item(i, 0).setCheckState(Qt.Checked)
         QTimer.singleShot(0, self.populateSpecificTree)
         QTimer.singleShot(0, self.populateModalitiesTree)
@@ -3751,8 +3937,6 @@ class BIDSManager(QMainWindow):
             button.setEnabled(enabled)
         for button in self.custom_remove_buttons.values():
             button.setEnabled(enabled)
-        if hasattr(self, "seq_apply_button"):
-            self.seq_apply_button.setEnabled(enabled)
         if hasattr(self, "seq_save_button"):
             self.seq_save_button.setEnabled(enabled)
 
@@ -3865,7 +4049,10 @@ class BIDSManager(QMainWindow):
             f"Updated suffix patterns in {self.seq_dict_file}",
         )
         self._refresh_suffix_dictionary()
+        # Applying the sequence dictionary immediately updates the scanned data
+        # table so users do not need to trigger "Save changes" separately.
         self.applySequenceDictionary()
+        self.applyMappingChanges()
 
     def restoreSequenceDefaults(self) -> None:
         dicom_inventory.restore_sequence_dictionary()
@@ -3921,6 +4108,8 @@ class BIDSManager(QMainWindow):
         self.spec_mod_rows_given = {}
         self.spec_seq_rows_given = {}
         for idx, info in enumerate(self.row_info):
+            if info.get("visual_only"):
+                continue
             # Populate lookup tables using BIDS subject names
             self.modb_rows.setdefault(info['modb'], []).append(idx)
             self.mod_rows.setdefault((info['modb'], info['mod']), []).append(idx)
@@ -4056,7 +4245,12 @@ class BIDSManager(QMainWindow):
                                 files = str(info['n_files'])
                                 time = info['acq_time']
                                 sq_item = QTreeWidgetItem([label, files, time])
-                                sq_item.setFlags(sq_item.flags() | Qt.ItemIsUserCheckable)
+                                if info.get("visual_only"):
+                                    sq_item.setFlags(
+                                        (sq_item.flags() & ~Qt.ItemIsUserCheckable) & ~Qt.ItemIsEnabled
+                                    )
+                                else:
+                                    sq_item.setFlags(sq_item.flags() | Qt.ItemIsUserCheckable)
                                 if self.use_bids_names:
                                     rows = self.spec_seq_rows.get((study, subj, ses, modb, mod, seq, rep), [])
                                 else:
@@ -4091,14 +4285,20 @@ class BIDSManager(QMainWindow):
         if role[0] == 'modb':
             modb = role[1]
             for r in self.modb_rows.get(modb, []):
+                if self.row_info[r].get("visual_only"):
+                    continue
                 self.mapping_table.item(r, 0).setCheckState(state)
         elif role[0] == 'mod':
             modb, mod = role[1], role[2]
             for r in self.mod_rows.get((modb, mod), []):
+                if self.row_info[r].get("visual_only"):
+                    continue
                 self.mapping_table.item(r, 0).setCheckState(state)
         elif role[0] == 'seq':
             modb, mod, seq, rep = role[1], role[2], role[3], role[4]
             for r in self.seq_rows.get((modb, mod, seq, rep), []):
+                if self.row_info[r].get("visual_only"):
+                    continue
                 self.mapping_table.item(r, 0).setCheckState(state)
         QTimer.singleShot(0, self.populateModalitiesTree)
 
@@ -4557,9 +4757,9 @@ class DpiSettingsDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # ``current`` is expressed as a percentage relative to a base scale of
-        # 100, regardless of the system's DPI setting.  A value of 100 thus
-        # keeps the GUI size unchanged, while values above or below enlarge or
-        # shrink it respectively.
+        # 100 (96 DPI).  The main window passes the detected system value by
+        # default so the initial UI matches the host environment.  Users can
+        # still nudge the scale above or below that baseline as needed.
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Scale (%):"))
