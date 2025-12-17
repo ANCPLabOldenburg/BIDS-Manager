@@ -110,6 +110,20 @@ def test_fieldmap_runs_and_task_hits(tmp_path):
     assert task_base == "sub-001_task-custom_bold"
 
 
+def test_explicit_task_token_prevents_acq():
+    """Sequences encoding ``task-`` should use that label and omit ``acq``."""
+
+    schema = load_bids_schema(DEFAULT_SCHEMA_DIR)
+
+    # Even though the sequence embeds an acquisition token, the explicit
+    # ``task-`` label should drive naming and suppress any acq entity.
+    series = SeriesInfo("001", None, "bold", "task-memory_acq-HighRes", None, {})
+
+    proposals = build_preview_names([series], schema)
+
+    assert proposals[0][2] == "sub-001_task-memory_bold"
+
+
 def test_dwi_direction_and_acq_detection():
     """DWI series should capture dir/acq hints from their sequence names."""
 

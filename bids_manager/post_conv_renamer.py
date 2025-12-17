@@ -45,6 +45,13 @@ RENAME_RULES = [
 ]
 # Match plain '_fmap' before .nii, .nii.gz or .json
 FMAP_SUFFIX_RE = re.compile(r"_fmap(?=(\.nii(?:\.gz)?|\.json)$)", re.I)
+BOLD_RENAME_RULES = [
+    # heudiconv sometimes emits ``_bold1`` and ``_bold2`` suffixes that are not
+    # BIDS compliant.  ``_bold1`` is the real run, ``_bold2`` is a residual
+    # aborted run that we want to keep but clearly mark as aborted.
+    (re.compile(r"_bold1(?=(\.nii(?:\.gz)?|\.json)$)", re.I), "_bold"),
+    (re.compile(r"_bold2(?=(\.nii(?:\.gz)?|\.json)$)", re.I), "_bold_aborted"),
+]
 
 
 def _move_rep_suffix(name: str) -> str:
@@ -82,6 +89,53 @@ def process_fmap_dir(fmap_dir: Path) -> None:
                 file.rename(fmap_dir / new_name)
                 print(f"Renamed: {name} → {new_name}")
 
+
+def _rename_bold_variants(func_dir: Path) -> None:
+    """Normalise heudiconv ``_bold1``/``_bold2`` outputs in a ``func`` folder."""
+
+    for file in sorted(func_dir.iterdir()):
+        if not file.is_file():
+            continue
+
+        name = file.name
+        if not name.lower().endswith((".nii", ".nii.gz", ".json")):
+            continue
+
+        for pattern, replacement in BOLD_RENAME_RULES:
+            if not pattern.search(name):
+                continue
+
+            new_name = pattern.sub(replacement, name)
+            new_path = func_dir / new_name
+
+            # Avoid overwriting an existing file; keep the original if there is
+            # a naming collision to preserve data rather than risk loss.
+            if new_path.exists():
+                print(
+                    f"Skipping rename of {name} because {new_path.name} already exists."
+                )
+                break
+
+            file.rename(new_path)
+            print(f"Renamed: {name} → {new_name}")
+            break
+
+
+def rename_bold_sequences(bids_root: Path) -> None:
+    """Apply BOLD renaming across all ``func`` directories in ``bids_root``."""
+
+    for sub in bids_root.glob("sub-*"):
+        if not sub.is_dir():
+            continue
+
+        session_dirs = [ses for ses in sub.glob("ses-*") if ses.is_dir()]
+        roots = session_dirs or [sub]
+
+        for root in roots:
+            func_dir = root / "func"
+            if func_dir.is_dir():
+                _rename_bold_variants(func_dir)
+
 # -----------------------------------------------------------------------------
 # Main processing function
 # -----------------------------------------------------------------------------
@@ -93,9 +147,13 @@ def post_fmap_rename(bids_root: Path) -> None:
     fmap_dirs = list(bids_root.rglob('fmap'))
     if not fmap_dirs:
         print(f"No 'fmap' directories found under {bids_root}")
-        return
-    for fmap_dir in fmap_dirs:
-        process_fmap_dir(fmap_dir)
+    else:
+        for fmap_dir in fmap_dirs:
+            process_fmap_dir(fmap_dir)
+
+    # Normalise BOLD outputs before computing ``IntendedFor`` so that aborted
+    # runs are clearly marked and excluded from associations.
+    rename_bold_sequences(bids_root)
 
     # After renaming, populate ``IntendedFor`` in the fieldmap sidecars so
     # downstream tools know which functional runs they apply to.
@@ -220,7 +278,11 @@ def _collect_func_runs(func_dir: Path) -> Tuple[List[Tuple[Path, float]], List[P
 
     for image in sorted(func_dir.glob("*.nii*")):
         name_lower = image.name.lower()
-        if "ref" in name_lower or not name_lower.endswith("bold.nii") and not name_lower.endswith("bold.nii.gz"):
+        if "ref" in name_lower or "_bold_aborted" in name_lower:
+            # Skip reference volumes and aborted runs.
+            continue
+
+        if not name_lower.endswith("bold.nii") and not name_lower.endswith("bold.nii.gz"):
             # Skip reference volumes and non-BOLD acquisitions.
             continue
 
@@ -365,9 +427,23 @@ def _rename_in_scans(tsv: Path, bids_root: Path) -> None:
     changed = False
     for idx, fname in enumerate(df["filename"]):
         path = Path(fname)
-        if "fmap" not in path.parts:
-            continue
         new_name = path.name
+
+        # Keep ``*_scans.tsv`` in sync with BOLD renaming so the references
+        # match the files on disk.
+        for pattern, replacement in BOLD_RENAME_RULES:
+            if pattern.search(new_name) and new_name.lower().endswith((".nii", ".nii.gz", ".json")):
+                new_name = pattern.sub(replacement, new_name)
+                break
+
+        if "fmap" not in path.parts:
+            if new_name != path.name:
+                candidate = tsv.parent / path.parent / new_name
+                if candidate.exists():
+                    df.at[idx, "filename"] = (path.parent / new_name).as_posix()
+                    changed = True
+            continue
+        
         for pattern, replacement in RENAME_RULES:
             if pattern.search(new_name) and new_name.lower().endswith((".nii", ".nii.gz", ".json")):
                 interim = pattern.sub(replacement, new_name)
