@@ -209,27 +209,36 @@ def _create_directional_light_shader():
     try:
         vertex = shader_mod.VertexShader(
             """
-            varying vec3 normal;
+            uniform mat4 u_mvp;
+            uniform mat3 u_normal;
+            attribute vec4 a_position;
+            attribute vec3 a_normal;
+            attribute vec4 a_color;
+            varying vec3 v_normal;
+            varying vec4 v_color;
             void main() {
-                normal = normalize(gl_NormalMatrix * gl_Normal);
-                gl_FrontColor = gl_Color;
-                gl_BackColor = gl_Color;
-                gl_Position = ftransform();
+                v_normal = normalize(u_normal * a_normal);
+                v_color = a_color;
+                gl_Position = u_mvp * a_position;
             }
             """
         )
         fragment = shader_mod.FragmentShader(
             """
+            #ifdef GL_ES
+            precision mediump float;
+            #endif
             uniform float lightDir[3];
             uniform float lightParams[2];
-            varying vec3 normal;
+            varying vec3 v_normal;
+            varying vec4 v_color;
             void main() {
-                vec3 norm = normalize(normal);
+                vec3 norm = normalize(v_normal);
                 vec3 lightVec = normalize(vec3(lightDir[0], lightDir[1], lightDir[2]));
                 float diffuse = max(dot(norm, lightVec), 0.0) * lightParams[0];
                 float ambient = lightParams[1];
                 float lighting = clamp(ambient + diffuse, 0.0, 1.0);
-                vec4 colour = gl_Color;
+                vec4 colour = v_color;
                 colour.rgb *= lighting;
                 gl_FragColor = colour;
             }
@@ -264,17 +273,24 @@ def _create_flat_color_shader():
     try:
         vertex = shader_mod.VertexShader(
             """
+            uniform mat4 u_mvp;
+            attribute vec4 a_position;
+            attribute vec4 a_color;
+            varying vec4 v_color;
             void main() {
-                gl_FrontColor = gl_Color;
-                gl_BackColor = gl_Color;
-                gl_Position = ftransform();
+                v_color = a_color;
+                gl_Position = u_mvp * a_position;
             }
             """
         )
         fragment = shader_mod.FragmentShader(
             """
+            #ifdef GL_ES
+            precision mediump float;
+            #endif
+            varying vec4 v_color;
             void main() {
-                gl_FragColor = gl_Color;
+                gl_FragColor = v_color;
             }
             """
         )
@@ -9182,4 +9198,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
