@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 760" role="img" aria-label="BIDS Manager workflow"
+     font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <title>BIDS Manager workflow</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7c8aa3"/>
+    </marker>
+  </defs>
+
+  <!-- Arrows (drawn first so the boxes sit on top) -->
+  <line x1="240" y1="84"  x2="240" y2="116" stroke="#7c8aa3" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="240" y1="176" x2="240" y2="208" stroke="#7c8aa3" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="240" y1="268" x2="240" y2="300" stroke="#7c8aa3" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="240" y1="360" x2="240" y2="392" stroke="#7c8aa3" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="240" y1="452" x2="240" y2="484" stroke="#7c8aa3" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="240" y1="544" x2="240" y2="576" stroke="#7c8aa3" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="240" y1="636" x2="240" y2="668" stroke="#7c8aa3" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Stage 0: input -->
+  <rect x="40" y="24"  width="400" height="60" rx="10" ry="10" fill="#263238" stroke="#90CAF9" stroke-width="2"/>
+  <text x="240" y="48" text-anchor="middle" fill="#FFFFFF"  font-size="17" font-weight="700">Raw data</text>
+  <text x="240" y="70" text-anchor="middle" fill="#B0BEC5"  font-size="13">DICOM, EEG, MEG</text>
+
+  <!-- Stage 1: Scan -->
+  <rect x="40" y="116" width="400" height="60" rx="10" ry="10" fill="#4FC3F7" stroke="#0277BD" stroke-width="2"/>
+  <text x="240" y="146" text-anchor="middle" dy="0.35em" fill="#0B1A2C" font-size="18" font-weight="700">Scan</text>
+
+  <!-- Stage 2: Review and edit inventory -->
+  <rect x="40" y="208" width="400" height="60" rx="10" ry="10" fill="#4FC3F7" stroke="#0277BD" stroke-width="2"/>
+  <text x="240" y="238" text-anchor="middle" dy="0.35em" fill="#0B1A2C" font-size="18" font-weight="700">Review and edit inventory</text>
+
+  <!-- Stage 3: Convert -->
+  <rect x="40" y="300" width="400" height="60" rx="10" ry="10" fill="#4FC3F7" stroke="#0277BD" stroke-width="2"/>
+  <text x="240" y="330" text-anchor="middle" dy="0.35em" fill="#0B1A2C" font-size="18" font-weight="700">Convert</text>
+
+  <!-- Stage 4: Fix metadata -->
+  <rect x="40" y="392" width="400" height="60" rx="10" ry="10" fill="#4FC3F7" stroke="#0277BD" stroke-width="2"/>
+  <text x="240" y="422" text-anchor="middle" dy="0.35em" fill="#0B1A2C" font-size="18" font-weight="700">Fix metadata</text>
+
+  <!-- Stage 5: Inspect volumes -->
+  <rect x="40" y="484" width="400" height="60" rx="10" ry="10" fill="#4FC3F7" stroke="#0277BD" stroke-width="2"/>
+  <text x="240" y="514" text-anchor="middle" dy="0.35em" fill="#0B1A2C" font-size="18" font-weight="700">Inspect volumes</text>
+
+  <!-- Stage 6: Validate -->
+  <rect x="40" y="576" width="400" height="60" rx="10" ry="10" fill="#4FC3F7" stroke="#0277BD" stroke-width="2"/>
+  <text x="240" y="606" text-anchor="middle" dy="0.35em" fill="#0B1A2C" font-size="18" font-weight="700">Validate</text>
+
+  <!-- Stage 7: done -->
+  <rect x="40" y="668" width="400" height="60" rx="10" ry="10" fill="#81C784" stroke="#2E7D32" stroke-width="2"/>
+  <text x="240" y="698" text-anchor="middle" dy="0.35em" fill="#0B1A2C" font-size="18" font-weight="700">BIDS dataset</text>
+</svg>

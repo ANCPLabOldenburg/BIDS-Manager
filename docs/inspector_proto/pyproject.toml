@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inspector-proto"
+version = "0.0.1"
+description = "PyQt6 visual fidelity prototype for the Inspector GUI proposal"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6==6.11.0",
+]
+
+[project.scripts]
+inspector-proto = "proto:main"
+
+[tool.setuptools]
+py-modules = ["proto", "data"]

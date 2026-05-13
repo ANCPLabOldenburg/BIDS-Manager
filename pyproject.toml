@@ -4,60 +4,115 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "0.2.5"
-description = "GUI application to manage BIDS datasets"
+version = "1.0.0"
+description = "Schema-driven BIDS converter, curator, and editor (re-imagination of BIDS-Manager v0.2.5)"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{name = "Karel López Vilaret", email = "karel.mauricio.lopez.vilaret@uni-oldenburg.de"}]
-keywords = ["BIDS", "DICOM", "GUI", "Neuroimaging"]
-requires-python = ">=3.8"
+keywords = ["BIDS", "DICOM", "EEG", "MEG", "GUI", "Neuroimaging"]
+requires-python = ">=3.10"
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
 dependencies = [
-    "pydicom==3.0.1",
-    "pandas==2.3.1",
-    "PyQt5==5.15.11",
-    "PyQtWebEngine==5.15.7",
+    # Schema engine — the keystone of the architecture
+    "bidsschematools>=1.0.0",
     "ancpbids>=0.3.1",
-    "heudiconv-ancp",
+
+    # GUI
+    "PyQt6==6.11.0",
+
+    # Strongly-typed core abstractions
+    "pydantic>=2.6",
+
+    # MRI conversion stack — dcm2niix invoked directly
     "dcm2niix==1.0.20250506",
+    "pydicom==3.0.1",
+    "nibabel>=5.3",
+
+    # EEG / MEG / iEEG conversion stack
+    "mne>=1.6",
+    "mne-bids>=0.15",
+    "edfio",
+
+    # Physio (Siemens PhysioLog DICOM → BIDS)
     "bidsphysio==21.6.24",
-    "nibabel==5.3.2",
-    "numpy==2.2.6",
-    "psutil==7.0.0",
-    "matplotlib==3.10.3",
-    "joblib==1.4.2",
-    "scikit-image==0.24.0",
-    "pyqtgraph==0.14.0",
-    "PyOpenGL==3.1.7",
+    "setuptools<81",  # bidsphysio still uses pkg_resources.declare_namespace
+
+    # Data handling
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "joblib>=1.4",
+
+    # Editor viewer
+    "pyqtgraph>=0.13",
+    "PyOpenGL>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+    "ruff>=0.4",
 ]
 
 [project.urls]
-Homepage = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
+Homepage      = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
+Repository    = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
 Documentation = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
-Source = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
-Tracker = "https://github.com/ANCPLabOldenburg/BIDS-Manager/issues"
+Tracker       = "https://github.com/ANCPLabOldenburg/BIDS-Manager/issues"
 
+# Console entry points — all routed through the ``bidsmgr`` package.
+# The PyPI distribution is ``bids-manager`` but the import name is
+# ``bidsmgr`` (same pattern as ``pip install scikit-learn`` /
+# ``import sklearn``).
 [project.scripts]
-bids-manager = "bids_manager.gui:main"
-dicom-inventory = "bids_manager.dicom_inventory:main"
-build-heuristic = "bids_manager.build_heuristic_from_tsv:main"
-run-heudiconv = "bids_manager.run_heudiconv_from_heuristic:main"
-post-conv-renamer = "bids_manager.post_conv_renamer:main"
-fill-bids-ignore = "bids_manager.fill_bids_ignore:main"
+bidsmgr           = "bidsmgr.main:main"
+bidsmgr-scan      = "bidsmgr.cli.scan:main"
+bidsmgr-convert   = "bidsmgr.cli.convert:main"
+bidsmgr-rebuild   = "bidsmgr.cli.rebuild:main"
+bidsmgr-metadata  = "bidsmgr.cli.metadata:main"
+bidsmgr-validate  = "bidsmgr.cli.validate:main"
 
 [tool.setuptools]
-packages = ["bids_manager"]
+packages = [
+    "bidsmgr",
+    "bidsmgr.schema",
+    "bidsmgr.inventory",
+    "bidsmgr.classifier",
+    "bidsmgr.planner",
+    "bidsmgr.converter",
+    "bidsmgr.converter.backends",
+    "bidsmgr.metadata",
+    "bidsmgr.fixups",
+    "bidsmgr.project",
+    "bidsmgr.editor",
+    "bidsmgr.gui",
+    "bidsmgr.gui.widgets",
+    "bidsmgr.gui.delegates",
+    "bidsmgr.gui.models",
+    "bidsmgr.workers",
+    "bidsmgr.cli",
+    "bidsmgr.util",
+]
 include-package-data = true
 
 [tool.setuptools.package-data]
-"bids_manager" = [
-    "miscellaneous/images/*",
-]
+"bidsmgr.gui" = ["*.qss", "assets/*.png", "assets/*.jpg", "assets/*.jpeg"]
+"bidsmgr.schema" = ["bundled/**/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "real_data: requires real datasets at /Users/karelo/Development/datasets/BIDS_Manager/raw_data — gated on env vars BIDS_MANAGER_REAL_{MRI,MEG,EEG}_DATA",
+    "gui: pytest-qt smoke tests, headless OK with QT_QPA_PLATFORM=offscreen",
+]
