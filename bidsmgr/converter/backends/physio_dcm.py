@@ -73,21 +73,26 @@ class PhysioDcmBackend:
     def _convert_inner(
         self, task: ConvertTask, staging_dir: Path, t0: float,
     ) -> ConvertResult:
-        # bidsphysio's pkg_resources warning is cosmetic — silence it
-        # for the duration of this call so user-facing output stays clean.
+        # bidsphysio is vendored at ``bidsmgr.vendor.bidsphysio`` so we
+        # no longer need the transitive ``setuptools<81`` cap. The
+        # warnings filter stays as a guard in case a future numpy /
+        # pydicom emits a deprecation we want to swallow during the
+        # short physio conversion.
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
                 message=".*pkg_resources.*",
             )
             try:
-                from bidsphysio.dcm2bids.dcm2bidsphysio import dcm2bids as _bp_dcm2bids
+                from bidsmgr.vendor.bidsphysio.dcm2bids.dcm2bidsphysio import (
+                    dcm2bids as _bp_dcm2bids,
+                )
             except ImportError as exc:
                 return ConvertResult(
                     task=task, success=False,
                     error=(
-                        "bidsphysio is not installed; cannot convert physio "
-                        f"row {task.basename!r}: {exc}"
+                        "vendored bidsphysio failed to import; cannot "
+                        f"convert physio row {task.basename!r}: {exc}"
                     ),
                     duration_s=time.monotonic() - t0,
                 )

@@ -1,60 +1,81 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "1.0.0"
+version = "1.0.2"
 description = "Schema-driven BIDS converter, curator, and editor (re-imagination of BIDS-Manager v0.2.5)"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{name = "Karel López Vilaret", email = "karel.mauricio.lopez.vilaret@uni-oldenburg.de"}]
+authors = [
+    {name = "Karel Lopez Vilaret", email = "karel.mauricio.lopez.vilaret@uni-oldenburg.de"},
+    {name = "Jochem Rieger"},
+]
+maintainers = [
+    {name = "ANCP Lab, University of Oldenburg", email = "karel.mauricio.lopez.vilaret@uni-oldenburg.de"},
+]
 keywords = ["BIDS", "DICOM", "EEG", "MEG", "GUI", "Neuroimaging"]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Operating System :: OS Independent",
-    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
+
+# Core dependencies.
+# Bounds strategy:
+#   lower bound  = oldest version that works with any supported Python (3.10+).
+#   upper bound  = latest version tested in the reference env (Python 3.10 venv
+#                  with pandas-3 strict-string-dtype simulated via
+#                  pd.options.future.infer_string; Python 3.14 venv tested
+#                  separately by the user).
+# On older Pythons pip picks the newest release that fits both the version
+# range AND that Python's compatibility.
 dependencies = [
-    # Schema engine — the keystone of the architecture
-    "bidsschematools>=1.0.0",
-    "ancpbids>=0.3.1",
+    # Schema engine. The keystone of the architecture.
+    "bidsschematools>=1.0,<=1.2.2",
+    "ancpbids>=0.3,<=0.3.1",
 
-    # GUI
-    "PyQt6==6.11.0",
+    # GUI.
+    "pyqt6>=6.5,<=6.11.0",
 
-    # Strongly-typed core abstractions
-    "pydantic>=2.6",
+    # Strongly-typed core abstractions.
+    "pydantic>=2.6,<=2.13.4",
 
-    # MRI conversion stack — dcm2niix invoked directly
-    "dcm2niix==1.0.20250506",
-    "pydicom==3.0.1",
-    "nibabel>=5.3",
+    # MRI conversion stack. dcm2niix invoked directly.
+    "dcm2niix>=1.0.20240202,<=1.0.20260416",
+    "pydicom>=2.4,<=3.0.2",
+    "nibabel>=5.0,<=5.4.2",
 
-    # EEG / MEG / iEEG conversion stack
-    "mne>=1.6",
-    "mne-bids>=0.15",
-    "edfio",
+    # EEG / MEG / iEEG conversion stack.
+    "mne>=1.6,<=1.12.1",
+    "mne-bids>=0.15,<=0.17.0",
+    "edfio>=0.3,<=0.4.13",
 
-    # Physio (Siemens PhysioLog DICOM → BIDS)
-    "bidsphysio==21.6.24",
-    "setuptools<81",  # bidsphysio still uses pkg_resources.declare_namespace
+    # Physio (Siemens PhysioLog DICOM to BIDS): vendored at
+    # ``bidsmgr.vendor.bidsphysio`` (MIT, see that subdir's LICENSE).
+    # No transitive setuptools cap required as a result.
 
-    # Data handling
-    "pandas>=2.0",
-    "numpy>=1.26",
-    "joblib>=1.4",
+    # Data handling.
+    "pandas>=2.0,<3.0",
+    "numpy>=1.26,<3.0",
+    "joblib>=1.3,<=1.5.3",
 
-    # Editor viewer
-    "pyqtgraph>=0.13",
-    "PyOpenGL>=3.1",
+    # Editor viewer.
+    "pyqtgraph>=0.13,<=0.14.0",
+    "PyOpenGL>=3.1,<=3.1.10",
 ]
 
 [project.optional-dependencies]
@@ -62,17 +83,19 @@ dev = [
     "pytest>=8.0",
     "pytest-qt>=4.4",
     "ruff>=0.4",
+    "build>=1.0",
+    "twine>=4.0",
 ]
 
 [project.urls]
 Homepage      = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
 Repository    = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
-Documentation = "https://github.com/ANCPLabOldenburg/BIDS-Manager"
+Documentation = "https://ancplaboldenburg.github.io/bids_manager_documentation/"
 Tracker       = "https://github.com/ANCPLabOldenburg/BIDS-Manager/issues"
 
-# Console entry points — all routed through the ``bidsmgr`` package.
+# Console entry points. All routed through the ``bidsmgr`` package.
 # The PyPI distribution is ``bids-manager`` but the import name is
-# ``bidsmgr`` (same pattern as ``pip install scikit-learn`` /
+# ``bidsmgr`` (same pattern as ``pip install scikit-learn`` then
 # ``import sklearn``).
 [project.scripts]
 bidsmgr           = "bidsmgr.main:main"
@@ -83,36 +106,29 @@ bidsmgr-metadata  = "bidsmgr.cli.metadata:main"
 bidsmgr-validate  = "bidsmgr.cli.validate:main"
 
 [tool.setuptools]
-packages = [
-    "bidsmgr",
-    "bidsmgr.schema",
-    "bidsmgr.inventory",
-    "bidsmgr.classifier",
-    "bidsmgr.planner",
-    "bidsmgr.converter",
-    "bidsmgr.converter.backends",
-    "bidsmgr.metadata",
-    "bidsmgr.fixups",
-    "bidsmgr.project",
-    "bidsmgr.editor",
-    "bidsmgr.gui",
-    "bidsmgr.gui.widgets",
-    "bidsmgr.gui.delegates",
-    "bidsmgr.gui.models",
-    "bidsmgr.workers",
-    "bidsmgr.cli",
-    "bidsmgr.util",
-]
 include-package-data = true
 
+[tool.setuptools.packages.find]
+include = ["bidsmgr*"]
+
 [tool.setuptools.package-data]
-"bidsmgr.gui" = ["*.qss", "assets/*.png", "assets/*.jpg", "assets/*.jpeg"]
-"bidsmgr.schema" = ["bundled/**/*"]
+"bidsmgr.gui"               = [
+    "*.qss",
+    "assets/*.png",
+    "assets/*.jpg",
+    "assets/*.jpeg",
+    "assets/macos/*.png",
+    "assets/macos/*.icns",
+    "assets/windows/*.ico",
+]
+"bidsmgr.schema"            = ["bundled/**/*"]
+"bidsmgr.vendor"            = ["README.md"]
+"bidsmgr.vendor.bidsphysio" = ["LICENSE"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
-    "real_data: requires real datasets at /Users/karelo/Development/datasets/BIDS_Manager/raw_data — gated on env vars BIDS_MANAGER_REAL_{MRI,MEG,EEG}_DATA",
+    "real_data: requires real datasets at /Users/karelo/Development/datasets/BIDS_Manager/raw_data, gated on env vars BIDS_MANAGER_REAL_{MRI,MEG,EEG}_DATA",
     "gui: pytest-qt smoke tests, headless OK with QT_QPA_PLATFORM=offscreen",
 ]

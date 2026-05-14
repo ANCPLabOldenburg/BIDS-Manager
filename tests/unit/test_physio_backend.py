@@ -78,32 +78,40 @@ class _FakePhysioData:
 
 
 def _patch_dcm2bids(monkeypatch, factory_or_exc) -> None:
-    """Patch the lazy import of bidsphysio's ``dcm2bids`` callable.
+    """Patch the lazy import of the vendored ``dcm2bids`` callable.
+
+    ``bidsmgr.converter.backends.physio_dcm`` imports
+    ``bidsmgr.vendor.bidsphysio.dcm2bids.dcm2bidsphysio.dcm2bids``
+    lazily inside ``_convert_inner``. To intercept the call we
+    install fake module objects under that exact dotted path in
+    ``sys.modules`` so the ``from ... import ...`` statement returns
+    our stub instead of the real (vendored) function.
 
     ``factory_or_exc`` can be:
     * a callable taking ``source_paths`` and returning ``_FakePhysioData``
     * an Exception instance to raise from the call
     """
-    import importlib
     import sys
 
-    fake_module = type(sys.modules["bidsmgr"])("bidsphysio.dcm2bids.dcm2bidsphysio")
+    pkg_path = "bidsmgr.vendor.bidsphysio"
 
     def _runner(source_paths):
         if isinstance(factory_or_exc, BaseException):
             raise factory_or_exc
         return factory_or_exc(source_paths)
 
+    fake_module = type(sys.modules["bidsmgr"])(f"{pkg_path}.dcm2bids.dcm2bidsphysio")
     fake_module.dcm2bids = _runner
 
-    parent_pkg = type(sys.modules["bidsmgr"])("bidsphysio.dcm2bids")
+    parent_pkg = type(sys.modules["bidsmgr"])(f"{pkg_path}.dcm2bids")
     parent_pkg.dcm2bidsphysio = fake_module
-    root_pkg = type(sys.modules["bidsmgr"])("bidsphysio")
-    root_pkg.dcm2bids = parent_pkg
 
-    monkeypatch.setitem(sys.modules, "bidsphysio.dcm2bids.dcm2bidsphysio", fake_module)
-    monkeypatch.setitem(sys.modules, "bidsphysio.dcm2bids", parent_pkg)
-    monkeypatch.setitem(sys.modules, "bidsphysio", root_pkg)
+    monkeypatch.setitem(
+        sys.modules, f"{pkg_path}.dcm2bids.dcm2bidsphysio", fake_module,
+    )
+    monkeypatch.setitem(
+        sys.modules, f"{pkg_path}.dcm2bids", parent_pkg,
+    )
 
 
 # ---------------------------------------------------------------------------

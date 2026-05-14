@@ -84,6 +84,19 @@ PROBE_COLUMNS: tuple[str, ...] = (
 )
 
 
+def _init_object_column(df: pd.DataFrame, col: str, default: str = "") -> None:
+    """Create ``df[col]`` with ``object`` dtype, defaulting to ``default``.
+
+    Newer pandas (>= 2.3, the default on Python 3.14) infers a strict
+    ``StringDtype`` from a bare ``df[col] = ""`` assignment, which then
+    rejects subsequent ``df.at[idx, col] = <float or bool>`` calls with
+    a ``TypeError``. Forcing ``object`` dtype on initialisation keeps
+    the column permissive across mixed types, matching the legacy
+    pandas 2.x behaviour the rest of this module assumes.
+    """
+    df[col] = pd.Series([default] * len(df), index=df.index, dtype=object)
+
+
 # Per (datatype, suffix) — how many NIfTI files dcm2niix should produce
 # from one input DICOM series. ``None`` means "don't flag, expectations
 # vary widely". Anything not listed defaults to 1. Used by the anomaly
@@ -758,12 +771,12 @@ def _augment_dataframe(
 
     for col in BIDS_GUESS_COLUMNS:
         if col not in df.columns:
-            df[col] = ""
+            _init_object_column(df, col)
 
     if probe_stats:
         for col in PROBE_COLUMNS:
             if col not in df.columns:
-                df[col] = ""
+                _init_object_column(df, col)
 
     for df_idx, group_rows in rows_by_df_idx.items():
         # Pick best classification for this DataFrame row.
@@ -1004,7 +1017,7 @@ def _finalize_unified_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     )
     for col in all_cols:
         if col not in df.columns:
-            df[col] = ""
+            _init_object_column(df, col)
     return df.fillna("")
 
 
@@ -1093,7 +1106,7 @@ def run_scan(
         # No MRI rows; just write the EEG/MEG rows in the unified shape.
         for col in BIDS_GUESS_COLUMNS:
             if col not in df_eeg.columns:
-                df_eeg[col] = ""
+                _init_object_column(df_eeg, col)
         merged = _finalize_unified_dataframe(df_eeg)
         merged.to_csv(output_tsv, sep="\t", index=False, columns=_unified_column_order(merged))
         print(f"Inventory written to: {output_tsv}")

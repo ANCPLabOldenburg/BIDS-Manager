@@ -117,6 +117,13 @@ Carl von Ossietzky Universität Oldenburg.
 
 [MIT](LICENSE).
 
+Physio conversion code under `bidsmgr/vendor/bidsphysio/` is derived
+from [`bidsphysio`](https://github.com/cbinyu/bidsphysio) by Pablo
+Velasco and Chrysa Papadaniil (NYU Center for Brain Imaging), used
+under the MIT License. See `bidsmgr/vendor/bidsphysio/LICENSE` and
+`bidsmgr/vendor/README.md` for the full attribution and what
+changed during vendoring.
+
 ## Citation
 
 ```

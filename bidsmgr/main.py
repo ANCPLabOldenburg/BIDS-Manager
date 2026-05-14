@@ -89,6 +89,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     font.setPointSize(13)
     app.setFont(font)
 
+    # Brand icon for the title bar / taskbar / alt-tab on Linux and
+    # Windows. macOS reads its Dock and Spotlight icons from the
+    # ``.app`` bundle the installer builds; the call here is still
+    # safe (Qt no-ops where a native bundle already supplies an icon).
+    from .gui.app_icon import set_app_icon
+    set_app_icon(app)
+
     # Honor the persisted theme if the user didn't pass --theme.
     from .gui.app_settings import AppSettings
     initial_theme = args.theme or AppSettings.load().theme
