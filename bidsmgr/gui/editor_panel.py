@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
 
 from ..editor.types import FileVerdict, Severity, ValidationReport
 from ..workers import FileReportWorker, FolderReportWorker, ReportWorker
+from . import icons
 from .widgets import (
     BidsTreePane,
     BusySpinner,
@@ -214,8 +215,9 @@ class EditorPanel(QWidget):
         lay.setContentsMargins(14, 6, 14, 6)
         lay.setSpacing(8)
 
-        self._open_btn = QPushButton("📁  Open BIDS root…")
+        self._open_btn = QPushButton("  Open BIDS root…")
         self._open_btn.setObjectName("tb-btn")
+        icons.apply_button(self._open_btn, "open_folder")
         self._open_btn.clicked.connect(self._on_change_root)
         lay.addWidget(self._open_btn)
 
@@ -224,8 +226,9 @@ class EditorPanel(QWidget):
         # Validate file / folder reuse the dataset report — but run
         # only layer 1 (per-file checks). Layer 2 is dataset-wide and
         # is reserved for the dataset-level button.
-        self._validate_file_btn = QPushButton("✓  Validate file")
+        self._validate_file_btn = QPushButton("  Validate file")
         self._validate_file_btn.setObjectName("tb-btn")
+        icons.apply_button(self._validate_file_btn, "file_check")
         self._validate_file_btn.setEnabled(False)
         self._validate_file_btn.setToolTip(
             "Re-validate the file currently selected in the BIDS "
@@ -235,8 +238,9 @@ class EditorPanel(QWidget):
         self._validate_file_btn.clicked.connect(self.start_file_validation)
         lay.addWidget(self._validate_file_btn)
 
-        self._validate_folder_btn = QPushButton("📂  Validate folder")
+        self._validate_folder_btn = QPushButton("  Validate folder")
         self._validate_folder_btn.setObjectName("tb-btn")
+        icons.apply_button(self._validate_folder_btn, "folder_check")
         self._validate_folder_btn.setEnabled(False)
         self._validate_folder_btn.setToolTip(
             "Re-validate every file under the folder currently "
@@ -246,8 +250,9 @@ class EditorPanel(QWidget):
         self._validate_folder_btn.clicked.connect(self.start_folder_validation)
         lay.addWidget(self._validate_folder_btn)
 
-        self._validate_dataset_btn = QPushButton("🗂  Validate dataset")
+        self._validate_dataset_btn = QPushButton("  Validate dataset")
         self._validate_dataset_btn.setObjectName("tb-btn")
+        icons.apply_button(self._validate_dataset_btn, "dataset")
         self._validate_dataset_btn.setEnabled(False)
         self._validate_dataset_btn.clicked.connect(self.start_dataset_validation)
         lay.addWidget(self._validate_dataset_btn)
@@ -257,8 +262,9 @@ class EditorPanel(QWidget):
         # Python BIDS validator) on top of bidsmgr's schema-driven
         # layer 1 checks. State persists via AppSettings.
         from .app_settings import AppSettings
-        self._strict_btn = QPushButton("⚡  Strict BIDS")
+        self._strict_btn = QPushButton("  Strict BIDS")
         self._strict_btn.setObjectName("tb-btn-toggle")
+        icons.apply_button(self._strict_btn, "strict")
         self._strict_btn.setCheckable(True)
         self._strict_btn.setChecked(AppSettings.load().editor_strict_validate)
         self._strict_btn.setToolTip(
@@ -283,9 +289,9 @@ class EditorPanel(QWidget):
         # Status chips — kept hidden until a report lands. Each chip
         # opens the file-issues dialog filtered by the matching
         # severity (same "jump to" pattern as the Converter's toolbar).
-        self._chip_ok = Chip("✓ 0 valid", "success")
-        self._chip_warn = Chip("⚠ 0 warnings", "warn")
-        self._chip_err = Chip("✕ 0 errors", "err")
+        self._chip_ok = Chip("0 valid", "success")
+        self._chip_warn = Chip("0 warnings", "warn")
+        self._chip_err = Chip("0 errors", "err")
         for chip, sev in (
             (self._chip_ok, "ok"),
             (self._chip_warn, "warn"),
@@ -462,12 +468,31 @@ class EditorPanel(QWidget):
         running = self._partial_worker is not None and getattr(
             self._partial_worker, "isRunning", lambda: False,
         )()
+        from .theme_manager import CUR
+        pal = CUR()
         if path is None or not has_root or running:
             self._validate_file_btn.setEnabled(False)
             self._validate_folder_btn.setEnabled(False)
+            # No selection: both icons stay accent (default).
+            icons.apply_button(self._validate_file_btn, "file_check",
+                               color=pal.get("accent"))
+            icons.apply_button(self._validate_folder_btn, "folder_check",
+                               color=pal.get("accent"))
             return
-        self._validate_file_btn.setEnabled(path.is_file())
-        self._validate_folder_btn.setEnabled(path.is_dir())
+        file_selected = path.is_file()
+        folder_selected = path.is_dir()
+        self._validate_file_btn.setEnabled(file_selected)
+        self._validate_folder_btn.setEnabled(folder_selected)
+        # Recolor icons: the button matching the selected kind goes
+        # green (success); the other stays accent blue.
+        icons.apply_button(
+            self._validate_file_btn, "file_check",
+            color=pal.get("success" if file_selected else "accent"),
+        )
+        icons.apply_button(
+            self._validate_folder_btn, "folder_check",
+            color=pal.get("success" if folder_selected else "accent"),
+        )
 
     @staticmethod
     def _recompute_report_summary(report: ValidationReport) -> None:
@@ -515,9 +540,9 @@ class EditorPanel(QWidget):
 
     def _update_chips(self, report: ValidationReport) -> None:
         counts = report.counts
-        self._chip_ok.setText(f"✓ {counts.get('ok', 0)} valid")
-        self._chip_warn.setText(f"⚠ {counts.get('warn', 0)} warnings")
-        self._chip_err.setText(f"✕ {counts.get('err', 0)} errors")
+        self._chip_ok.setText(f"{counts.get('ok', 0)} valid")
+        self._chip_warn.setText(f"{counts.get('warn', 0)} warnings")
+        self._chip_err.setText(f"{counts.get('err', 0)} errors")
         for chip in (self._chip_ok, self._chip_warn, self._chip_err):
             chip.setVisible(True)
 
@@ -653,6 +678,16 @@ class EditorPanel(QWidget):
         self._tsv_viewer.repaint_for_palette(pal)
         self._nifti_viewer.repaint_for_palette(pal)
         self._validation_pane.repaint_for_palette(pal)
+        # Re-tint toolbar icons after the icon cache is cleared in
+        # ``MainWindow._on_palette_changed``.
+        icons.apply_button(self._open_btn, "open_folder")
+        icons.apply_button(self._validate_dataset_btn, "dataset")
+        icons.apply_button(self._strict_btn, "strict")
+        # The two partial-validate buttons get their tint from the
+        # current tree selection (green when their kind is selected,
+        # accent blue otherwise) — defer to the sync helper so the
+        # selection state survives a dark↔light swap.
+        self._sync_validate_buttons_from_selection(self._tree_pane_current_path())
 
 
 __all__ = ["EditorPanel"]

@@ -31,11 +31,45 @@ QWidget {
     selection-color: $text;
 }
 
+/* Generic font-size baseline. Any widget that does not carry an
+ * object-name-specific rule below picks up 11 px here, so nothing can
+ * leak to the QApplication default font (which varies across platforms
+ * even with ``setPixelSize`` because the underlying font family differs
+ * on macOS / Windows / Linux). Object-name selectors win on specificity
+ * so this is purely a safety net. */
+QPushButton,
+QLabel,
+QLineEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox,
+QPlainTextEdit,
+QTextEdit,
+QTableView,
+QTableView::item,
+QTreeView,
+QTreeView::item,
+QTreeWidget,
+QTreeWidget::item,
+QListView,
+QListWidget,
+QCheckBox,
+QRadioButton,
+QGroupBox,
+QToolButton,
+QMenu,
+QMenuBar,
+QMenuBar::item,
+QStatusBar {
+    font-size: 11px;
+}
+
 QToolTip {
     background: $surface2;
     color: $text;
     border: 1px solid $border;
     padding: 4px 8px;
+    font-size: 11px;
 }
 
 /* ---------- Top header (above toolbar) ---------- */
@@ -46,7 +80,7 @@ QFrame#top-header {
 }
 QLabel#brand-name {
     color: $text;
-    font-size: 13px;
+    font-size: 16px;
     font-weight: 600;
     letter-spacing: -0.01em;
 }
@@ -62,10 +96,11 @@ QPushButton#view-pill {
     background: transparent;
     color: $dim;
     border: none;
-    padding: 5px 14px;
+    padding: 5px 16px;
     border-radius: 5px;
     font-size: 12px;
     font-weight: 500;
+    min-width: 76px;
 }
 QPushButton#view-pill:hover { color: $text; background: $surface3; }
 QPushButton#view-pill:checked {
@@ -97,6 +132,7 @@ QPushButton#tb-btn {
     color: $text;
     padding: 4px 11px;
     border-radius: 4px;
+    font-size: 11px;
     font-weight: 500;
 }
 QPushButton#tb-btn:hover  { background: $border; }
@@ -108,6 +144,7 @@ QPushButton#tb-btn-ghost {
     color: $dim;
     padding: 4px 9px;
     border-radius: 4px;
+    font-size: 11px;
 }
 QPushButton#tb-btn-ghost:hover { color: $text; background: $surface3; }
 
@@ -117,6 +154,7 @@ QPushButton#tb-btn-primary {
     color: $primary_btn_text;
     padding: 4px 12px;
     border-radius: 4px;
+    font-size: 11px;
     font-weight: 600;
 }
 QPushButton#tb-btn-primary:hover { background: $accent; }
@@ -130,6 +168,7 @@ QPushButton#tb-btn-toggle {
     color: $dim;
     padding: 4px 10px;
     border-radius: 4px;
+    font-size: 11px;
 }
 QPushButton#tb-btn-toggle:hover { color: $text; background: $surface3; }
 QPushButton#tb-btn-toggle:checked {
@@ -151,6 +190,7 @@ QLineEdit#tb-input {
     border: 1px solid $border;
     border-radius: 4px;
     padding: 2px 6px;
+    font-size: 11px;
     selection-background-color: $accent;
     selection-color: $primary_btn_text;
 }
@@ -241,6 +281,7 @@ QLabel#pane-h5 {
 QLabel#pane-hint {
     color: $dim;
     padding: 24px;
+    font-size: 11px;
 }
 
 /* Bottom-dock log view. Uses a slightly tinted background so the
@@ -339,7 +380,7 @@ QTreeWidget::item:selected {
 
 QTreeWidget#filter-tree {
     font-family: ".AppleSystemUIFont", "Helvetica Neue", "Segoe UI", sans-serif;
-    font-size: 12px;
+    font-size: 11px;
 }
 QTreeWidget#filter-tree::indicator {
     width: 13px; height: 13px;
@@ -367,7 +408,7 @@ QTableView#inv-table {
     gridline-color: $subtle;
     selection-background-color: $accent_bg;
     selection-color: $text;
-    font-size: 12px;
+    font-size: 11px;
 }
 QTableView#inv-table::item {
     padding: 5px 8px;
@@ -544,6 +585,27 @@ QLabel#status-pill {
     border-radius: 9px;
     font-size: 11px;
     font-weight: 500;
+}
+QLabel#update-version-label {
+    color: $dim;
+    font-size: 11px;
+    padding: 0 6px;
+}
+QPushButton#update-check-btn {
+    background: transparent;
+    color: $accent;
+    border: none;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+}
+QPushButton#update-check-btn:hover {
+    background: $surface3;
+    color: $text;
+}
+QPushButton#update-check-btn:disabled {
+    color: $muted;
 }
 
 /* ---------- Editor: file tab strip ---------- */

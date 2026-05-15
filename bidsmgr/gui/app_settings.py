@@ -50,6 +50,8 @@ KEYS = {
     "post_metadata_fill_todos": "post_convert/metadata_fill_todos",
     "post_validate_strict": "post_convert/validate_strict",
     "post_validate_html": "post_convert/validate_html",
+    # Self-update
+    "skipped_update_version": "update/skipped_version",
 }
 
 
@@ -108,6 +110,11 @@ class AppSettings:
     post_metadata_fill_todos: bool = True
     post_validate_strict: bool = False
     post_validate_html: bool = False
+
+    # PyPI version string the user picked "Skip this version" on, so the
+    # startup update check doesn't nag them about the same release on
+    # every launch. Cleared implicitly when a newer version appears.
+    skipped_update_version: str = ""
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -205,6 +212,10 @@ class AppSettings:
                                             out.post_validate_strict)
         out.post_validate_html = _as_bool(s.value(KEYS["post_validate_html"]),
                                           out.post_validate_html)
+        out.skipped_update_version = _as_str(
+            s.value(KEYS["skipped_update_version"]),
+            out.skipped_update_version,
+        )
         return out
 
     def save(self) -> None:
@@ -236,6 +247,7 @@ class AppSettings:
             ("editor_strict_validate",   self.editor_strict_validate),
         ):
             s.setValue(KEYS[key], "1" if val else "0")
+        s.setValue(KEYS["skipped_update_version"], self.skipped_update_version)
         s.sync()
 
     # ------------------------------------------------------------------

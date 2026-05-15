@@ -64,6 +64,8 @@ from PyQt6.QtWidgets import (
 
 from ..project import Project, ScanImported, StageCompleted
 from ..workers import ConvertWorker, MetadataWorker, ScanWorker, ValidateWorker
+from . import icons
+from .theme_manager import CUR
 from .app_settings import AppSettings
 from .delegates import (
     CellTextDelegate,
@@ -324,9 +326,10 @@ class ConverterPanel(QWidget):
         lay.setContentsMargins(14, 6, 14, 6)
         lay.setSpacing(8)
 
-        self._scan_btn = QPushButton("⌖  Scan…")
+        self._scan_btn = QPushButton("  Scan…")
         self._scan_btn.setObjectName("tb-btn")
         self._scan_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.apply_button(self._scan_btn, "scan")
         self._scan_btn.clicked.connect(self._on_scan_clicked)
         lay.addWidget(self._scan_btn)
 
@@ -371,8 +374,9 @@ class ConverterPanel(QWidget):
         # they're available before _build_inspection_pane runs, but
         # they're added to the inspection pane's footer (closer to the
         # table they act on), not to this toolbar.
-        self._aborts_btn = QPushButton("⌬  Highlight aborts")
+        self._aborts_btn = QPushButton("  Highlight aborts")
         self._aborts_btn.setObjectName("tb-btn-toggle")
+        icons.apply_button(self._aborts_btn, "highlight")
         self._aborts_btn.setCheckable(True)
         self._aborts_btn.setChecked(self._app_settings.highlight_aborts)
         self._aborts_btn.setToolTip(
@@ -383,8 +387,9 @@ class ConverterPanel(QWidget):
         )
         self._aborts_btn.toggled.connect(self._on_aborts_toggled)
 
-        self._bulk_btn = QPushButton("✎  Bulk edit…")
+        self._bulk_btn = QPushButton("  Bulk edit…")
         self._bulk_btn.setObjectName("tb-btn")
+        icons.apply_button(self._bulk_btn, "bulk_edit")
         self._bulk_btn.setEnabled(False)
         self._bulk_btn.setToolTip(
             "Select 2+ rows (cmd-/shift-click), then click to apply one "
@@ -401,13 +406,15 @@ class ConverterPanel(QWidget):
 
         lay.addStretch(1)
 
-        self._settings_btn = QPushButton("⚙  Settings…")
+        self._settings_btn = QPushButton("  Settings…")
         self._settings_btn.setObjectName("tb-btn")
+        icons.apply_button(self._settings_btn, "settings")
         self._settings_btn.clicked.connect(self._on_settings_clicked)
         lay.addWidget(self._settings_btn)
 
-        self._run_btn = QPushButton("▶  Run conversion")
+        self._run_btn = QPushButton("  Run conversion")
         self._run_btn.setObjectName("tb-btn-primary")
+        icons.apply_button(self._run_btn, "run", color=CUR().get("primary_btn_text"))
         # Enabled once a scan has populated the model.
         self._run_btn.setEnabled(False)
         self._run_btn.setToolTip("Scan first to populate the inventory")
@@ -614,12 +621,14 @@ class ConverterPanel(QWidget):
         self._log_view.setReadOnly(True)
         self._log_view.setObjectName("dock-log")
         self._log_view.setMaximumBlockCount(2000)  # rolling buffer
-        left_tabs.addTab(self._log_view, "📋  Log")
+        left_tabs.addTab(self._log_view, "Log")
+        icons.apply_tab(left_tabs, 0, "log")
 
         conflicts = QLabel("(no conflicts detected yet)")
         conflicts.setObjectName("pane-hint")
         conflicts.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        left_tabs.addTab(conflicts, "⚠  Conflicts")
+        left_tabs.addTab(conflicts, "Conflicts")
+        icons.apply_tab(left_tabs, 1, "warning")
 
         split.addWidget(left_tabs)
 
@@ -633,13 +642,19 @@ class ConverterPanel(QWidget):
         self._bids_preview.setRootIsDecorated(False)
         self._bids_preview.setIndentation(14)
         self._bids_preview.setObjectName("dock-bids-preview")
-        right_tabs.addTab(self._bids_preview, "📤  BIDS preview")
+        right_tabs.addTab(self._bids_preview, "BIDS preview")
+        icons.apply_tab(right_tabs, 0, "preview")
 
         stats = QLabel("(statistics fill in after a scan)")
         stats.setObjectName("pane-hint")
         stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._stats_label = stats
-        right_tabs.addTab(stats, "📊  Statistics")
+        right_tabs.addTab(stats, "Statistics")
+        icons.apply_tab(right_tabs, 1, "statistics")
+
+        # Keep references for ``repaint_for_palette`` re-tinting.
+        self._left_tabs = left_tabs
+        self._right_tabs = right_tabs
 
         split.addWidget(right_tabs)
 
@@ -1035,6 +1050,20 @@ class ConverterPanel(QWidget):
             self._output_pane.repaint_for_palette(pal)
         if hasattr(self, "_filter_pane"):
             self._filter_pane.repaint_for_palette(pal)
+        # Re-tint toolbar icons + bottom-tab icons. The cache lives in
+        # ``icons``; ``MainWindow`` clears it once per swap, so every
+        # call below produces an icon in the newly applied palette.
+        icons.apply_button(self._scan_btn, "scan")
+        icons.apply_button(self._aborts_btn, "highlight")
+        icons.apply_button(self._bulk_btn, "bulk_edit")
+        icons.apply_button(self._settings_btn, "settings")
+        icons.apply_button(self._run_btn, "run", color=pal.get("primary_btn_text"))
+        if hasattr(self, "_left_tabs"):
+            icons.apply_tab(self._left_tabs, 0, "log")
+            icons.apply_tab(self._left_tabs, 1, "warning")
+        if hasattr(self, "_right_tabs"):
+            icons.apply_tab(self._right_tabs, 0, "preview")
+            icons.apply_tab(self._right_tabs, 1, "statistics")
 
     def _on_aborts_toggled(self, checked: bool) -> None:
         """Apply the toggle to the active model + persist for next launch."""

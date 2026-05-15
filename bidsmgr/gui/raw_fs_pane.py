@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QBrush, QColor, QFont
 from PyQt6.QtWidgets import (
     QFrame,
@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from . import icons
 from .models import InventoryTableModel
 from .theme_manager import CUR
 from .widgets import PaneHeader
@@ -84,6 +85,9 @@ class RawFsPane(QWidget):
         self._tree.setRootIsDecorated(True)
         self._tree.setIndentation(14)
         self._tree.setUniformRowHeights(True)
+        self._tree.setIconSize(QSize(
+            icons.DEFAULT_TREE_ICON_SIZE, icons.DEFAULT_TREE_ICON_SIZE,
+        ))
         v.addWidget(self._tree, 1)
 
         self._empty = QLabel("(pick a raw-data folder to populate this tree)")
@@ -152,6 +156,7 @@ class RawFsPane(QWidget):
 
         root_item = QTreeWidgetItem([self._root.name])
         root_item.setForeground(0, QColor(pal["text"]))
+        root_item.setIcon(0, icons.icon_for_path(self._root.name, is_dir=True))
         self._tree.addTopLevelItem(root_item)
         self._populate(self._root, root_item, depth=0,
                        kept=kept_paths, skipped=skipped_paths)
@@ -188,6 +193,7 @@ class RawFsPane(QWidget):
                 continue
             child = QTreeWidgetItem([entry.name])
             parent.addChild(child)
+            child.setIcon(0, icons.icon_for_path(entry.name, is_dir=entry.is_dir()))
             if entry.is_dir():
                 child.setForeground(0, QColor(pal["accent"]))
                 self._populate(

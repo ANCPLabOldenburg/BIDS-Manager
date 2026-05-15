@@ -77,7 +77,7 @@ class _TopHeader(QFrame):
     def __init__(self, theme: ThemeManager, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("top-header")
-        self.setFixedHeight(40)
+        self.setFixedHeight(48)
         h = QHBoxLayout(self)
         h.setContentsMargins(14, 6, 14, 6)
         h.setSpacing(10)
@@ -88,7 +88,7 @@ class _TopHeader(QFrame):
         # (e.g. running from a partial source tree). Both the logo and
         # the wordmark are clickable — they pop the About dialog.
         self._logo = _ClickableLabel()
-        self._logo.setFixedSize(28, 24)
+        self._logo.setFixedSize(40, 36)
         self._logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._logo.setToolTip("About BIDS-Manager")
         self._logo.clicked.connect(self.about_requested.emit)
@@ -122,10 +122,18 @@ class _TopHeader(QFrame):
         h.addStretch(1)
 
         self._theme = theme
-        self._theme_btn = QPushButton("☀" if theme.name == "dark" else "☾")
+        # Icon-only toggle. ``sun`` glyph in dark mode (click to lighten),
+        # ``moon`` glyph in light mode (click to darken). Re-tinted in
+        # ``repaint_for_palette`` on every theme swap.
+        from . import icons
+        self._theme_btn = QPushButton()
         self._theme_btn.setObjectName("theme-toggle")
         self._theme_btn.setToolTip("Toggle light / dark theme")
         self._theme_btn.setFixedSize(32, 28)
+        icons.apply_button(
+            self._theme_btn,
+            "sun" if theme.name == "dark" else "moon",
+        )
         self._theme_btn.clicked.connect(self._on_toggle)
         h.addWidget(self._theme_btn)
 
@@ -139,8 +147,9 @@ class _TopHeader(QFrame):
 
     def _on_toggle(self) -> None:
         from .app_settings import AppSettings
+        from . import icons
         new = self._theme.toggle()
-        self._theme_btn.setText("☀" if new == "dark" else "☾")
+        icons.apply_button(self._theme_btn, "sun" if new == "dark" else "moon")
         AppSettings.remember_theme(new)
 
     def _apply_logo_pixmap(self, pal: dict) -> None:
@@ -162,7 +171,7 @@ class _TopHeader(QFrame):
                     img.invertPixels(QImage.InvertMode.InvertRgb)
                 pix = QPixmap.fromImage(img)
                 self._logo.setPixmap(pix.scaledToHeight(
-                    24,
+                    36,
                     Qt.TransformationMode.SmoothTransformation,
                 ))
                 # Drop any leftover stylesheet from a previous gradient
@@ -192,6 +201,11 @@ class _TopHeader(QFrame):
     def repaint_for_palette(self, pal: dict) -> None:
         """Reload the logo under the new palette (inverts when dark)."""
         self._apply_logo_pixmap(pal)
+        from . import icons
+        icons.apply_button(
+            self._theme_btn,
+            "sun" if self._theme.name == "dark" else "moon",
+        )
 
 
 class MainWindow(QMainWindow):
@@ -245,7 +259,9 @@ class MainWindow(QMainWindow):
         self._apply_active_view(settings.active_view, persist=False)
 
         # Status bar — forwards the Converter's log messages so the
-        # user sees scan / convert progress.
+        # user sees scan / convert progress. The bottom-right corner
+        # carries the installed version label + "Check updates" button
+        # via :func:`update_widgets.attach_update_widgets`.
         sb = QStatusBar()
         sb.setSizeGripEnabled(False)
         self._status_text = QLabel("Ready")
@@ -255,6 +271,16 @@ class MainWindow(QMainWindow):
         self.converter.log_message.connect(self._set_status)
         self.editor.log_message.connect(self._set_status)
 
+        # Bottom-right: "vX.Y.Z" + "Check updates". Wrapped in try/except
+        # because a broken update path must never prevent the GUI from
+        # opening (offline machines, missing certifi, etc.).
+        try:
+            from .update_widgets import attach_update_widgets, run_startup_check
+            attach_update_widgets(sb, self)
+            run_startup_check(self)
+        except Exception as exc:
+            log.warning("update check disabled: %s", exc)
+
         # Subscribe to palette changes so widgets whose colors are read
         # at construction time (delegate paints, inline ``setStyleSheet``)
         # repaint with the new palette without requiring an app restart.
@@ -263,9 +289,8 @@ class MainWindow(QMainWindow):
     def apply_theme(self, theme: str) -> None:
         """Switch the live theme. Called by the Settings dialog on save."""
         self._theme.apply(theme)
-        # ``apply`` already fires the listener which syncs everything;
-        # we just make sure the header icon matches.
-        self._header._theme_btn.setText("☀" if theme == "dark" else "☾")
+        # ``apply`` already fires the listener which sets the theme-toggle
+        # icon via ``_TopHeader.repaint_for_palette``. Nothing else to do.
 
     def _on_view_changed(self, view: str) -> None:
         self._apply_active_view(view, persist=True)
@@ -295,6 +320,11 @@ class MainWindow(QMainWindow):
         delegate paints need their viewports invalidated to pick up
         the new palette tokens.
         """
+        # Drop the qtawesome icon cache first so every ``apply_button``
+        # call in the cascading repaint hooks below re-tints from the
+        # new palette instead of returning a cached previous-theme icon.
+        from . import icons
+        icons.refresh_for_palette(pal)
         # Brand logo gradient — rebuilt from the new palette.
         self._header.repaint_for_palette(pal)
         # Cascade into the Converter and Editor panels.

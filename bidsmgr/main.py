@@ -86,7 +86,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     app.setApplicationName("bidsmgr")
     app.setStyle("Fusion")
     font = app.font()
-    font.setPointSize(13)
+    # Pixel size (not point size) so the app-font baseline matches the
+    # QSS rules in ``theme.qss`` exactly. Point sizes are DPI-relative
+    # (e.g. 13 pt is ~13 px on macOS at 72 dpi but ~17 px on Windows /
+    # Linux at 96 dpi), which left every widget *without* an explicit
+    # QSS ``font-size`` rule rendering larger than the QSS-styled ones.
+    #
+    # 12 px is the dominant body size used throughout ``theme.qss`` (view
+    # pills, file tabs, about dialog body, etc.). Setting the app default
+    # to the same value keeps the inspection table, toolbar buttons,
+    # sidecar form inputs and NIfTI viewer controls visually consistent
+    # with the widgets that *do* carry an explicit QSS font-size.
+    font.setPixelSize(12)
     app.setFont(font)
 
     # Brand icon for the title bar / taskbar / alt-tab on Linux and

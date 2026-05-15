@@ -28,7 +28,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QLabel,
@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .. import icons
 from ..delegates.bids_tree import BADGE_ROLE, BidsTreeDelegate
 from ..theme_manager import CUR
 from .primitives import PaneHeader
@@ -122,6 +123,7 @@ def _walk(folder: Path, parent_item: QTreeWidgetItem, *, depth: int) -> None:
         item.setData(0, PATH_ROLE, entry.path)
         item.setData(0, COLOR_TOKEN_ROLE, token)
         item.setForeground(0, QColor(pal[token]))
+        item.setIcon(0, icons.icon_for_path(entry.name, is_dir=is_dir))
         parent_item.addChild(item)
         # Recurse only into real directories that are not folder-recordings.
         if is_dir and not _is_folder_recording(entry.name):
@@ -159,6 +161,9 @@ class BidsTreePane(QWidget):
         self._tree.setHeaderHidden(True)
         self._tree.setRootIsDecorated(False)
         self._tree.setIndentation(14)
+        self._tree.setIconSize(QSize(
+            icons.DEFAULT_TREE_ICON_SIZE, icons.DEFAULT_TREE_ICON_SIZE,
+        ))
         self._tree.setItemDelegate(BidsTreeDelegate(self._tree))
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
 
@@ -204,6 +209,7 @@ class BidsTreePane(QWidget):
         top.setData(0, PATH_ROLE, str(path))
         top.setData(0, COLOR_TOKEN_ROLE, "text")
         top.setForeground(0, QColor(pal["text"]))
+        top.setIcon(0, icons.icon_for_path(path.name or str(path), is_dir=True))
         self._tree.addTopLevelItem(top)
         _walk(path, top, depth=0)
         self._tree.expandToDepth(2)
@@ -291,6 +297,13 @@ class BidsTreePane(QWidget):
             token = item.data(0, COLOR_TOKEN_ROLE)
             if token and token in pal:
                 item.setForeground(0, QColor(pal[token]))
+            # Re-tint the type icon from the cleared cache.
+            path_str = item.data(0, PATH_ROLE) or item.text(0)
+            try:
+                is_dir = Path(path_str).is_dir() if path_str else False
+            except OSError:
+                is_dir = False
+            item.setIcon(0, icons.icon_for_path(item.text(0), is_dir=is_dir))
             for i in range(item.childCount()):
                 visit(item.child(i))
 

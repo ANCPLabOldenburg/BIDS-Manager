@@ -30,5 +30,12 @@ Layout:
 Nothing imports ``gui``; ``gui`` imports everything else.
 """
 
-__version__ = "1.0.1"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("bids-manager")
+except PackageNotFoundError:
+    # Raw source checkout that has never been ``pip install``ed.
+    __version__ = "0.0.0+source"
+
 __all__ = ["__version__"]

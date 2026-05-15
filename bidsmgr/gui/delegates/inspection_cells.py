@@ -87,7 +87,10 @@ class CheckboxDelegate(QStyledItemDelegate):
             painter.setPen(QColor(pal["primary_btn_text"]))
             f = QFont(painter.font())
             f.setBold(True)
-            f.setPointSize(8)
+            # Pixel size so the checkmark stays the same logical size on
+            # macOS (72 dpi) and Linux / Windows (96 dpi). Point sizes
+            # made the glyph render ~35% larger on the latter platforms.
+            f.setPixelSize(9)
             painter.setFont(f)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "✓")
         else:
@@ -152,7 +155,12 @@ class CellTextDelegate(QStyledItemDelegate):
         f = QFont(painter.font())
         if self._role in ("mono", "basename", "conf"):
             f.setFamilies(self._MONO_FAMILIES)
-        f.setPointSize(11)
+        # Pixel size, not point size: ``setPointSize`` is DPI-relative
+        # (11 pt is ~11 px on macOS at 72 dpi but ~15 px on Linux /
+        # Windows at 96 dpi). Pixel size matches the QSS rules in
+        # ``theme.qss`` so the painted cell text lines up with the
+        # widgets around the table on every platform.
+        f.setPixelSize(11)
         painter.setFont(f)
 
         color = QColor(pal["text"])

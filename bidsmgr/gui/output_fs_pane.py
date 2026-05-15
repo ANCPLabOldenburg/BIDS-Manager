@@ -32,6 +32,7 @@ from PyQt6.QtCore import (
     QFileSystemWatcher,
     QObject,
     QRunnable,
+    QSize,
     Qt,
     QThreadPool,
     QTimer,
@@ -46,6 +47,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from . import icons
 from .theme_manager import CUR
 from .widgets import PaneHeader
 
@@ -67,6 +69,7 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 # Item data role used to remember the palette token a leaf was rendered
 # with, so theme toggles can re-color in place without re-walking disk.
 _COLOR_TOKEN_ROLE = Qt.ItemDataRole.UserRole + 1
+_IS_DIR_ROLE = Qt.ItemDataRole.UserRole + 2
 
 
 def _color_token_for(path_name: str) -> str:
@@ -248,6 +251,9 @@ class OutputFsPane(QWidget):
         self._tree.setRootIsDecorated(True)
         self._tree.setIndentation(14)
         self._tree.setUniformRowHeights(True)
+        self._tree.setIconSize(QSize(
+            icons.DEFAULT_TREE_ICON_SIZE, icons.DEFAULT_TREE_ICON_SIZE,
+        ))
         v.addWidget(self._tree, 1)
 
         self._empty = QLabel(
@@ -473,7 +479,9 @@ def _render_node(node: _TreeNode, pal: dict) -> QTreeWidgetItem:
     """
     item = QTreeWidgetItem([node.name])
     item.setData(0, _COLOR_TOKEN_ROLE, node.color_token)
+    item.setData(0, _IS_DIR_ROLE, bool(node.is_dir))
     item.setForeground(0, QColor(pal[node.color_token]))
+    item.setIcon(0, icons.icon_for_path(node.name, is_dir=node.is_dir))
     for child in node.children:
         item.addChild(_render_node(child, pal))
     return item
@@ -482,6 +490,11 @@ def _render_node(node: _TreeNode, pal: dict) -> QTreeWidgetItem:
 def _recolor(item: QTreeWidgetItem, pal: dict) -> None:
     token = item.data(0, _COLOR_TOKEN_ROLE) or "text"
     item.setForeground(0, QColor(pal[token]))
+    # Re-tint the type icon as well. ``icons.icon_for_path`` reads from
+    # the current palette via ``CUR()``; the cache was already cleared
+    # by ``MainWindow._on_palette_changed`` before this listener fired.
+    is_dir = bool(item.data(0, _IS_DIR_ROLE))
+    item.setIcon(0, icons.icon_for_path(item.text(0), is_dir=is_dir))
     for i in range(item.childCount()):
         _recolor(item.child(i), pal)
 

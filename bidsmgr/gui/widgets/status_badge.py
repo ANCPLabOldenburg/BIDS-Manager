@@ -70,7 +70,9 @@ def badge_paint(painter: QPainter, rect: QRect, kind: str, size: int = 16) -> No
     painter.setPen(QColor(pal[fg_tok]))
     f = QFont(painter.font())
     f.setBold(True)
-    f.setPointSize(8)
+    # Pixel size so the badge glyph renders at the same logical size on
+    # macOS (72 dpi) and Linux / Windows (96 dpi).
+    f.setPixelSize(9)
     painter.setFont(f)
     painter.drawText(r, Qt.AlignmentFlag.AlignCenter, KIND_CHAR.get(kind, "?"))
 
