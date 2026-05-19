@@ -65,6 +65,16 @@ class SettingsDialog(QDialog):
     # Tabs
     # ------------------------------------------------------------------
 
+    # Font scale presets shown in the Display tab. The combo stores the
+    # human-readable label; the float multiplier is the second element.
+    _FONT_SCALE_PRESETS: list[tuple[str, float]] = [
+        ("Compact (0.85x)",        0.85),
+        ("Normal (1.00x)",         1.00),
+        ("Comfortable (1.15x)",    1.15),
+        ("Large (1.30x)",          1.30),
+        ("Extra large (1.50x)",    1.50),
+    ]
+
     def _build_display_tab(self) -> QWidget:
         w = QWidget()
         form = QFormLayout(w)
@@ -74,14 +84,66 @@ class SettingsDialog(QDialog):
         self._theme_combo.setCurrentText(self._settings.theme)
         form.addRow("Theme:", self._theme_combo)
 
+        # Font scale: multiplies every font-size (QSS + delegate paints +
+        # inline stylesheets + icon sizes) so the user can comfortably
+        # nudge the whole UI up or down without touching individual
+        # widgets. The user's choice is persisted in QSettings under
+        # ``ui/font_scale``.
+        self._font_scale_combo = QComboBox()
+        for label, _value in self._FONT_SCALE_PRESETS:
+            self._font_scale_combo.addItem(label)
+        current_idx = self._closest_font_scale_index(self._settings.font_scale)
+        self._font_scale_combo.setCurrentIndex(current_idx)
+        form.addRow("Font scale:", self._font_scale_combo)
+
+        # Header brand artwork. "Default" = minimalist mark inverted on
+        # dark; "App icon" = full-color BIDS-Manager application icon.
+        self._header_logo_combo = QComboBox()
+        for label, _value in self._HEADER_LOGO_PRESETS:
+            self._header_logo_combo.addItem(label)
+        self._header_logo_combo.setCurrentIndex(
+            self._header_logo_index(self._settings.header_logo)
+        )
+        form.addRow("Header logo:", self._header_logo_combo)
+
         hint = QLabel(
-            "Theme can also be toggled live via the ☀/☾ button in the top header."
+            "Theme can also be toggled live via the sun / moon button "
+            "in the top header. Font scale and header logo apply on Save."
         )
         hint.setStyleSheet("color: #8b949e;")
         hint.setWordWrap(True)
         form.addRow("", hint)
 
         return w
+
+    # Combo presets for the header brand mark.
+    _HEADER_LOGO_PRESETS: list[tuple[str, str]] = [
+        ("Default (monochrome mark)", "default"),
+        ("App icon (full color)",     "app_icon"),
+    ]
+
+    @classmethod
+    def _header_logo_index(cls, value: str) -> int:
+        for i, (_label, key) in enumerate(cls._HEADER_LOGO_PRESETS):
+            if key == value:
+                return i
+        return 0
+
+    @classmethod
+    def _closest_font_scale_index(cls, value: float) -> int:
+        """Return the preset index whose multiplier is nearest *value*.
+
+        Lets us round-trip an arbitrary persisted float (e.g. a hand-
+        edited QSettings value) back to the nearest combo entry without
+        rejecting it.
+        """
+        try:
+            return min(
+                range(len(cls._FONT_SCALE_PRESETS)),
+                key=lambda i: abs(cls._FONT_SCALE_PRESETS[i][1] - value),
+            )
+        except Exception:
+            return 1  # "Normal"
 
     def _build_scan_tab(self) -> QWidget:
         w = QWidget()
@@ -194,6 +256,12 @@ class SettingsDialog(QDialog):
     def _on_save(self) -> None:
         s = self._settings
         s.theme = self._theme_combo.currentText()
+        s.font_scale = self._FONT_SCALE_PRESETS[
+            self._font_scale_combo.currentIndex()
+        ][1]
+        s.header_logo = self._HEADER_LOGO_PRESETS[
+            self._header_logo_combo.currentIndex()
+        ][1]
 
         s.scan_n_jobs = self._scan_jobs.value()
         s.dataset_slug = self._scan_dataset.text().strip()

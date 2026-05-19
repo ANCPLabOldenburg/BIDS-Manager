@@ -27,10 +27,20 @@ and fix every conversion decision in a spreadsheet, runs the conversion, and the
 opens the result for metadata editing, volume inspection, and validation. All in
 one place, without writing scripts or editing JSON files by hand.
 
-```bash
-pip install bids-manager
-bidsmgr
-```
+## Get started
+
+The fastest way to set things up is the one-click bootstrap installer for
+macOS, Linux, and Windows. It bundles a portable Python with every dependency
+and registers a native desktop launcher; no prior Python install required.
+See the [install guide][install] for a step-by-step walkthrough.
+
+Once installed, launch the GUI with `bidsmgr`. Prefer the command line? Five
+verbs cover the whole pipeline: `bidsmgr-scan`, `bidsmgr-rebuild`,
+`bidsmgr-convert`, `bidsmgr-metadata`, and `bidsmgr-validate`. The
+[documentation][docs] covers the full GUI walkthrough and CLI reference.
+
+[docs]:    https://ancplaboldenburg.github.io/bids_manager_documentation/
+[install]: https://ancplaboldenburg.github.io/bids_manager_documentation/installation.html
 
 ## The workflow
 
@@ -95,18 +105,6 @@ Every action you take is recorded in your project file. Undo a mistake from
 yesterday. See why a subject was renamed. Your dataset arrives with its history
 attached in `dataset_description.json`, so anyone who picks it up can trace what
 happened and when.
-
-## Get started
-
-```bash
-pip install bids-manager   # needs Python 3.10 or newer
-bidsmgr                    # launch the GUI
-```
-
-Prefer the command line? Five verbs cover the whole pipeline:
-`bidsmgr-scan`, `bidsmgr-rebuild`, `bidsmgr-convert`, `bidsmgr-metadata`,
-and `bidsmgr-validate`. See the [docs](https://ancplaboldenburg.github.io/bids_manager_documentation/)
-for examples *(docs are being updated)*.
 
 ## Authors
 

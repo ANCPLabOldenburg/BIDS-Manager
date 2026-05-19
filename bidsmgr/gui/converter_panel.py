@@ -1105,6 +1105,13 @@ class ConverterPanel(QWidget):
         dlg = SettingsDialog(s, self)
         if dlg.exec() == dlg.DialogCode.Accepted:
             self._app_settings = s
+            # Push the new font scale into the live ThemeManager before
+            # re-applying the theme; the manager re-substitutes the QSS
+            # template with the scaled font-size values and resizes the
+            # QApplication default font in one step.
+            apply_scale = getattr(self.window(), "apply_font_scale", None)
+            if callable(apply_scale):
+                apply_scale(s.font_scale)
             # Forward the theme change to the listener registered by
             # MainWindow (which owns the ThemeManager). Done via the
             # parent's ``apply_theme`` if present so the panel stays

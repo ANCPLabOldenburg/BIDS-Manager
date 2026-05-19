@@ -23,7 +23,7 @@ from PyQt6.QtCore import QEvent, QRect, Qt
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
 
-from ..theme_manager import CUR
+from ..theme_manager import CUR, scaled_px
 from ..widgets.status_badge import badge_paint
 from .row_state import (
     HIGHLIGHT_ROLE,
@@ -90,7 +90,8 @@ class CheckboxDelegate(QStyledItemDelegate):
             # Pixel size so the checkmark stays the same logical size on
             # macOS (72 dpi) and Linux / Windows (96 dpi). Point sizes
             # made the glyph render ~35% larger on the latter platforms.
-            f.setPixelSize(9)
+            # ``scaled_px`` honours the user's "Font scale" preference.
+            f.setPixelSize(scaled_px(9))
             painter.setFont(f)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "✓")
         else:
@@ -158,9 +159,10 @@ class CellTextDelegate(QStyledItemDelegate):
         # Pixel size, not point size: ``setPointSize`` is DPI-relative
         # (11 pt is ~11 px on macOS at 72 dpi but ~15 px on Linux /
         # Windows at 96 dpi). Pixel size matches the QSS rules in
-        # ``theme.qss`` so the painted cell text lines up with the
-        # widgets around the table on every platform.
-        f.setPixelSize(11)
+        # ``theme.qss``; ``scaled_px`` honours the user's "Font scale"
+        # preference so the painted text grows / shrinks with the rest
+        # of the GUI.
+        f.setPixelSize(scaled_px(11))
         painter.setFont(f)
 
         color = QColor(pal["text"])

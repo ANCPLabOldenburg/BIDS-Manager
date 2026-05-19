@@ -48,7 +48,7 @@ from PyQt6.QtWidgets import (
 from .. import schema as schema_mod
 from ..project import Project
 from .models import InventoryTableModel
-from .theme_manager import CUR
+from .theme_manager import CUR, scaled_px
 from .widgets import PaneHeader, ValMessage
 
 log = logging.getLogger(__name__)
@@ -255,7 +255,7 @@ class PropertiesPanel(QWidget):
         ent_title = QLabel("Entities")
         ent_title.setStyleSheet(f"color: {CUR()['text']}; font-weight: 600;")
         sub = QLabel("  (schema-driven)")
-        sub.setStyleSheet(f"color: {CUR()['dim']}; font-size: 10px;")
+        sub.setStyleSheet(f"color: {CUR()['dim']}; font-size: {scaled_px(10)}px;")
         head = QHBoxLayout()
         head.setSpacing(0)
         head.addWidget(ent_title)
@@ -291,7 +291,7 @@ class PropertiesPanel(QWidget):
 
         # 3. Predicted path preview
         sec = QLabel("PREDICTED PATH")
-        sec.setStyleSheet(f"color: {CUR()['dim']}; font-size: 10px; font-weight: 600;")
+        sec.setStyleSheet(f"color: {CUR()['dim']}; font-size: {scaled_px(10)}px; font-weight: 600;")
         self._body_layout.addWidget(sec)
         self._body_layout.addWidget(self._build_path_preview(row, datatype, suffix, entities))
 
@@ -399,7 +399,8 @@ class PropertiesPanel(QWidget):
         lbl.setWordWrap(True)
         lbl.setStyleSheet(
             'font-family: "SF Mono","Menlo","Monaco",monospace; '
-            f'font-size: 11px; color: {pal["text"]}; background: transparent;'
+            f'font-size: {scaled_px(11)}px; color: {pal["text"]}; '
+            'background: transparent;'
         )
         l.addWidget(lbl)
         return f

@@ -17,7 +17,7 @@ from PyQt6.QtCore import QRect, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import QLabel
 
-from ..theme_manager import CUR, rgba
+from ..theme_manager import CUR, rgba, scaled_px
 
 
 # Single-character glyph for each severity. Matches the prototype exactly.
@@ -71,8 +71,9 @@ def badge_paint(painter: QPainter, rect: QRect, kind: str, size: int = 16) -> No
     f = QFont(painter.font())
     f.setBold(True)
     # Pixel size so the badge glyph renders at the same logical size on
-    # macOS (72 dpi) and Linux / Windows (96 dpi).
-    f.setPixelSize(9)
+    # macOS (72 dpi) and Linux / Windows (96 dpi). ``scaled_px`` honours
+    # the user's "Font scale" preference set via Settings.
+    f.setPixelSize(scaled_px(9))
     painter.setFont(f)
     painter.drawText(r, Qt.AlignmentFlag.AlignCenter, KIND_CHAR.get(kind, "?"))
 

@@ -85,20 +85,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     app.setOrganizationName("bidsmgr")
     app.setApplicationName("bidsmgr")
     app.setStyle("Fusion")
-    font = app.font()
-    # Pixel size (not point size) so the app-font baseline matches the
-    # QSS rules in ``theme.qss`` exactly. Point sizes are DPI-relative
-    # (e.g. 13 pt is ~13 px on macOS at 72 dpi but ~17 px on Windows /
-    # Linux at 96 dpi), which left every widget *without* an explicit
-    # QSS ``font-size`` rule rendering larger than the QSS-styled ones.
-    #
-    # 12 px is the dominant body size used throughout ``theme.qss`` (view
-    # pills, file tabs, about dialog body, etc.). Setting the app default
-    # to the same value keeps the inspection table, toolbar buttons,
-    # sidecar form inputs and NIfTI viewer controls visually consistent
-    # with the widgets that *do* carry an explicit QSS font-size.
-    font.setPixelSize(12)
-    app.setFont(font)
+    # The app font's pixel size is set by ``ThemeManager.apply`` below
+    # so it picks up the user's persisted "Font scale" preference.
 
     # Brand icon for the title bar / taskbar / alt-tab on Linux and
     # Windows. macOS reads its Dock and Spotlight icons from the
@@ -107,11 +95,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     from .gui.app_icon import set_app_icon
     set_app_icon(app)
 
-    # Honor the persisted theme if the user didn't pass --theme.
+    # Honor the persisted theme + font-scale if the user didn't pass
+    # ``--theme``.
     from .gui.app_settings import AppSettings
-    initial_theme = args.theme or AppSettings.load().theme
+    persisted = AppSettings.load()
+    initial_theme = args.theme or persisted.theme
 
-    theme = ThemeManager(app)
+    theme = ThemeManager(app, font_scale=persisted.font_scale)
     theme.apply(initial_theme)
 
     win = MainWindow(theme, project=project)

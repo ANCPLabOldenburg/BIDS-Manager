@@ -28,12 +28,41 @@ the listener flow (e.g. ``QStyledItemDelegate.paint``).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from string import Template
 from typing import Callable
 
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtGui import QColor, QFont, QPalette
 from PyQt6.QtWidgets import QApplication
+
+
+# Baseline app-default font size in logical pixels. Multiplied by the
+# current ``FONT_SCALE()`` before being applied to ``QApplication.font``
+# in ``ThemeManager.apply`` so the user's chosen scale propagates to
+# every widget that doesn't have an explicit QSS ``font-size`` rule.
+BASE_FONT_PIXEL_SIZE = 12
+
+# Matches every ``font-size: Npx`` declaration in the QSS template. Used
+# by ``_scale_qss_font_sizes`` to multiply each by the active scale.
+_FONT_SIZE_RE = re.compile(r"font-size:\s*(\d+)px")
+
+
+def _scale_qss_font_sizes(qss: str, scale: float) -> str:
+    """Multiply every ``font-size: Npx`` in *qss* by *scale*.
+
+    Sizes round to the nearest int and clamp at 1 px so a very small
+    scale can't produce ``font-size: 0px`` (which Qt silently rejects).
+    """
+    if scale == 1.0:
+        return qss
+
+    def _replace(m: re.Match[str]) -> str:
+        base = int(m.group(1))
+        scaled = max(1, round(base * scale))
+        return f"font-size: {scaled}px"
+
+    return _FONT_SIZE_RE.sub(_replace, qss)
 
 
 # =====================================================================
@@ -115,9 +144,10 @@ PALETTES: dict[str, dict[str, str]] = {'dark': DARK, 'light': LIGHT}
 
 
 # =====================================================================
-#  Module-level "current palette" accessor for paint code.
+#  Module-level "current palette" + "current font scale" accessors.
 # =====================================================================
 _CURRENT: dict[str, str] = DARK
+_FONT_SCALE: float = 1.0
 
 
 def CUR() -> dict[str, str]:
@@ -128,6 +158,27 @@ def CUR() -> dict[str, str]:
     ``ThemeManager.apply`` is called.
     """
     return _CURRENT
+
+
+def FONT_SCALE() -> float:
+    """Return the active UI font-size multiplier (1.0 = baseline).
+
+    Paint code and inline ``setStyleSheet`` snippets use this so their
+    hard-coded pixel sizes scale with the user's preference set via
+    ``Settings → Display → Font scale``. Updated whenever
+    ``ThemeManager.apply`` is called.
+    """
+    return _FONT_SCALE
+
+
+def scaled_px(base: int) -> int:
+    """Return *base* (px) multiplied by the active font scale, rounded
+    to the nearest int and clamped at 1.
+
+    Convenience for call sites that paint or build inline stylesheets:
+    ``f.setPixelSize(scaled_px(11))``.
+    """
+    return max(1, round(base * _FONT_SCALE))
 
 
 def rgba(hex6: str, alpha: float) -> QColor:
@@ -147,13 +198,22 @@ class ThemeManager:
     dict, so they can repaint anything that doesn't pick up automatically.
     """
 
-    def __init__(self, app: QApplication, qss_path: Path | None = None):
+    def __init__(
+        self,
+        app: QApplication,
+        qss_path: Path | None = None,
+        font_scale: float = 1.0,
+    ):
         self._app = app
-        self._template = Template(
-            (qss_path or Path(__file__).parent / 'theme.qss').read_text(encoding='utf-8')
-        )
+        self._raw_template_text = (
+            qss_path or Path(__file__).parent / 'theme.qss'
+        ).read_text(encoding='utf-8')
         self._theme = 'dark'
         self._listeners: list[Callable[[dict], None]] = []
+        # The font scale is applied to the QSS template + QApplication
+        # default font at every ``apply`` call. Stored on the manager so
+        # callers can swap it without re-creating the manager.
+        self._font_scale = max(0.5, min(float(font_scale), 2.0))
 
     # ------------------------------------------------------------- listeners
     def add_listener(self, fn: Callable[[dict], None]) -> None:
@@ -169,17 +229,53 @@ class ThemeManager:
     def name(self) -> str:
         return self._theme
 
+    @property
+    def font_scale(self) -> float:
+        return self._font_scale
+
+    def set_font_scale(self, scale: float) -> None:
+        """Update the UI font scale and re-apply the active theme.
+
+        Clamps to ``[0.5, 2.0]`` so a bad value (corrupted setting,
+        out-of-range from a future Settings UI) can't render the GUI
+        unusable. No-op when the value would not change anything.
+        """
+        scale = max(0.5, min(float(scale), 2.0))
+        if scale == self._font_scale:
+            return
+        self._font_scale = scale
+        # Re-apply the current theme so the QSS gets re-scaled and every
+        # listener (panels' ``repaint_for_palette``) refreshes any
+        # inline-stylesheet font sizes that were baked at construction.
+        self.apply(self._theme)
+
     # --------------------------------------------------------------- actions
     def apply(self, theme: str) -> None:
         if theme not in PALETTES:
             return
-        global _CURRENT
+        global _CURRENT, _FONT_SCALE
         self._theme = theme
         pal = PALETTES[theme]
         _CURRENT = pal
+        _FONT_SCALE = self._font_scale
 
-        self._app.setStyleSheet(self._template.safe_substitute(**pal))
+        # Apply the active scale to (a) the QSS template every ``font-size:
+        # Npx`` declaration, then (b) the QApplication default font's
+        # pixel size so widgets without an explicit QSS font-size rule
+        # scale too. Custom paint code reads the scale via ``FONT_SCALE()``.
+        scaled_template = Template(
+            _scale_qss_font_sizes(self._raw_template_text, self._font_scale)
+        )
+        self._app.setStyleSheet(scaled_template.safe_substitute(**pal))
         self._update_qpalette(pal)
+        try:
+            app_font = QFont(self._app.font())
+            app_font.setPixelSize(
+                max(1, round(BASE_FONT_PIXEL_SIZE * self._font_scale))
+            )
+            self._app.setFont(app_font)
+        except Exception:
+            pass
 
         for fn in self._listeners:
             try:

@@ -85,9 +85,9 @@ class RawFsPane(QWidget):
         self._tree.setRootIsDecorated(True)
         self._tree.setIndentation(14)
         self._tree.setUniformRowHeights(True)
-        self._tree.setIconSize(QSize(
-            icons.DEFAULT_TREE_ICON_SIZE, icons.DEFAULT_TREE_ICON_SIZE,
-        ))
+        from .theme_manager import scaled_px
+        _tree_ico = scaled_px(icons.DEFAULT_TREE_ICON_SIZE)
+        self._tree.setIconSize(QSize(_tree_ico, _tree_ico))
         v.addWidget(self._tree, 1)
 
         self._empty = QLabel("(pick a raw-data folder to populate this tree)")

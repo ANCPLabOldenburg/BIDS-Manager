@@ -161,9 +161,9 @@ class BidsTreePane(QWidget):
         self._tree.setHeaderHidden(True)
         self._tree.setRootIsDecorated(False)
         self._tree.setIndentation(14)
-        self._tree.setIconSize(QSize(
-            icons.DEFAULT_TREE_ICON_SIZE, icons.DEFAULT_TREE_ICON_SIZE,
-        ))
+        from ..theme_manager import scaled_px
+        _tree_ico = scaled_px(icons.DEFAULT_TREE_ICON_SIZE)
+        self._tree.setIconSize(QSize(_tree_ico, _tree_ico))
         self._tree.setItemDelegate(BidsTreeDelegate(self._tree))
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
 

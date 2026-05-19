@@ -52,6 +52,13 @@ KEYS = {
     "post_validate_html": "post_convert/validate_html",
     # Self-update
     "skipped_update_version": "update/skipped_version",
+    # UI font scale (1.0 = default size baseline; values <1 shrink,
+    # >1 enlarge every font-size + icon size proportionally).
+    "font_scale": "ui/font_scale",
+    # Which artwork the top-header brand mark renders.
+    # "default" → ``assets/logo.png`` (monochrome, palette-inverted on dark).
+    # "app_icon" → ``assets/macos/AppIcon128.png`` (full-color BIDS-Manager logo).
+    "header_logo": "ui/header_logo",
 }
 
 
@@ -115,6 +122,16 @@ class AppSettings:
     # startup update check doesn't nag them about the same release on
     # every launch. Cleared implicitly when a newer version appears.
     skipped_update_version: str = ""
+
+    # Global UI font-size multiplier. 1.0 = baseline sizing in
+    # ``theme.qss``. The Settings dialog exposes four presets
+    # (0.85 / 1.00 / 1.15 / 1.30) but any positive float is persisted.
+    font_scale: float = 1.0
+
+    # Header brand artwork.
+    # "default"  → minimalist mark in ``assets/logo.png``, inverted on dark.
+    # "app_icon" → full-color BIDS-Manager app icon (``assets/macos/AppIcon128.png``).
+    header_logo: str = "default"
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -216,6 +233,17 @@ class AppSettings:
             s.value(KEYS["skipped_update_version"]),
             out.skipped_update_version,
         )
+        out.font_scale = _as_float(s.value(KEYS["font_scale"]), out.font_scale)
+        # Clamp to a sensible range so a corrupted setting can't render
+        # the GUI unusable.
+        if out.font_scale <= 0:
+            out.font_scale = 1.0
+        out.font_scale = max(0.5, min(out.font_scale, 2.0))
+        out.header_logo = _as_str(
+            s.value(KEYS["header_logo"]), out.header_logo,
+        )
+        if out.header_logo not in ("default", "app_icon"):
+            out.header_logo = "default"
         return out
 
     def save(self) -> None:
@@ -248,6 +276,8 @@ class AppSettings:
         ):
             s.setValue(KEYS[key], "1" if val else "0")
         s.setValue(KEYS["skipped_update_version"], self.skipped_update_version)
+        s.setValue(KEYS["font_scale"], float(self.font_scale))
+        s.setValue(KEYS["header_logo"], self.header_logo)
         s.sync()
 
     # ------------------------------------------------------------------

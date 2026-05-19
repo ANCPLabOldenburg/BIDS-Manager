@@ -47,12 +47,14 @@ from PyQt6.QtCore import QSize
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QPushButton, QTabWidget
 
-from .theme_manager import CUR
+from .theme_manager import CUR, scaled_px
 
 
-# Default render sizes in logical pixels. Qt's high-DPI scaling kicks
-# in on top of these, so 20 logical px → 40 physical px on a 2x display.
-# 20 px sits well next to a 13 px text run; 18 px keeps tab strips tidy.
+# Baseline render sizes in logical pixels. The actual size at runtime is
+# this constant multiplied by the active ``FONT_SCALE()`` (see
+# ``apply_button`` / ``apply_tab`` which call ``_scaled``). Qt's high-DPI
+# scaling kicks in on top, so 20 logical px → 40 physical px on a 2x
+# display.
 DEFAULT_BUTTON_ICON_SIZE = 20
 DEFAULT_TAB_ICON_SIZE = 18
 DEFAULT_TREE_ICON_SIZE = 16
@@ -189,12 +191,13 @@ def apply_button(
 ) -> None:
     """Set / re-set a button's icon from a logical name.
 
-    Also calls ``setIconSize`` so the rendered glyph is consistently
-    sized across the GUI (Qt's default of 16x16 looks small next to
-    the QSS-styled toolbar text). High-DPI scaling applies on top.
+    The icon size is multiplied by the active ``FONT_SCALE()`` so the
+    icons grow / shrink with the rest of the GUI when the user picks
+    a different "Font scale" preset in Settings.
     """
     btn.setIcon(icon(name, color=color))
-    btn.setIconSize(QSize(size, size))
+    scaled = scaled_px(size)
+    btn.setIconSize(QSize(scaled, scaled))
 
 
 def apply_tab(
@@ -208,11 +211,12 @@ def apply_tab(
     """Set / re-set a tab's icon from a logical name.
 
     Calling ``setIconSize`` on a ``QTabWidget`` sizes every tab's icon
-    in its bar; it is safe to invoke per ``apply_tab`` because it is
-    idempotent for the same size value.
+    in its bar; safe to call per ``apply_tab`` because the value is
+    idempotent for the same scale.
     """
     tabs.setTabIcon(index, icon(name, color=color))
-    tabs.setIconSize(QSize(size, size))
+    scaled = scaled_px(size)
+    tabs.setIconSize(QSize(scaled, scaled))
 
 
 __all__ = [

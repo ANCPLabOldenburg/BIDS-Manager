@@ -14,8 +14,45 @@ from typing import Optional
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QRect, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QPixmap
+
+
+def _trim_transparent_bbox(img: QImage) -> QImage:
+    """Return *img* cropped to its non-transparent bounding box.
+
+    macOS-style app icons (``AppIcon128.png``) ship with ~10 px of
+    transparent padding on every side so the artwork sits cleanly
+    inside the rounded ``.app`` mask. That padding makes the rendered
+    glyph look smaller than a tightly-cropped artwork at the same
+    scaled height. Trimming the alpha-channel bbox before scaling
+    gives both artworks the same visible footprint.
+
+    Falls back to the original image if it has no alpha channel or
+    is entirely transparent.
+    """
+    if img.isNull():
+        return img
+    if not img.hasAlphaChannel():
+        return img
+    if img.format() != QImage.Format.Format_ARGB32:
+        img = img.convertToFormat(QImage.Format.Format_ARGB32)
+    w, h = img.width(), img.height()
+    xmin, ymin, xmax, ymax = w, h, -1, -1
+    for y in range(h):
+        for x in range(w):
+            if (img.pixel(x, y) >> 24) & 0xFF:
+                if x < xmin:
+                    xmin = x
+                if y < ymin:
+                    ymin = y
+                if x > xmax:
+                    xmax = x
+                if y > ymax:
+                    ymax = y
+    if xmax < 0 or ymax < 0:
+        return img
+    return img.copy(QRect(xmin, ymin, xmax - xmin + 1, ymax - ymin + 1))
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -153,25 +190,56 @@ class _TopHeader(QFrame):
         AppSettings.remember_theme(new)
 
     def _apply_logo_pixmap(self, pal: dict) -> None:
-        """Load the bundled PNG into the logo label.
+        """Load the brand artwork chosen by ``AppSettings.header_logo``.
 
-        The PNG is drawn dark-on-transparent for a light background.
-        On a dark theme we invert the RGB channels (keeping alpha) so
-        the same artwork reads as light-on-transparent against the
-        dark surface. Falls back to a gradient-B if the asset can't
-        be loaded.
+        Two artworks ship with the wheel:
+
+        * ``"default"``: ``assets/logo.png`` — a monochrome mark drawn
+          dark-on-transparent for a light background. On a dark theme
+          we invert the RGB channels (alpha preserved) so the same
+          artwork reads as light-on-transparent against the dark
+          surface.
+        * ``"app_icon"``: ``assets/macos/AppIcon128.png`` — the
+          full-color BIDS-Manager application icon. Rendered as-is on
+          both themes (no inversion).
+
+        Falls back to a gradient ``B`` if neither file is readable so
+        the GUI stays usable in a partial source tree.
         """
-        png = Path(__file__).parent / "assets" / "logo.png"
+        from .app_settings import AppSettings
+        choice = AppSettings.load().header_logo
+        assets = Path(__file__).parent / "assets"
+        if choice == "app_icon":
+            png = assets / "macos" / "AppIcon128.png"
+            invert_on_dark = False
+        else:
+            png = assets / "logo.png"
+            invert_on_dark = True
+
         if png.exists():
             img = QImage(str(png))
             if not img.isNull():
-                if self._is_dark_theme(pal):
+                if invert_on_dark and self._is_dark_theme(pal):
                     # ``InvertRgb`` flips R/G/B; alpha is preserved so
                     # the transparent background stays transparent.
                     img.invertPixels(QImage.InvertMode.InvertRgb)
+                if choice == "app_icon":
+                    # Trim transparent padding (macOS-bundle icons ship
+                    # with ~10 px of inset). Also scale to a slightly
+                    # taller pixmap and widen the host label / header so
+                    # the full-color icon reads with more presence than
+                    # the tightly-cropped monochrome mark.
+                    img = _trim_transparent_bbox(img)
+                    target_h = 44
+                    self._logo.setFixedSize(48, 44)
+                    self.setFixedHeight(56)
+                else:
+                    target_h = 36
+                    self._logo.setFixedSize(40, 36)
+                    self.setFixedHeight(48)
                 pix = QPixmap.fromImage(img)
                 self._logo.setPixmap(pix.scaledToHeight(
-                    36,
+                    target_h,
                     Qt.TransformationMode.SmoothTransformation,
                 ))
                 # Drop any leftover stylesheet from a previous gradient
@@ -291,6 +359,19 @@ class MainWindow(QMainWindow):
         self._theme.apply(theme)
         # ``apply`` already fires the listener which sets the theme-toggle
         # icon via ``_TopHeader.repaint_for_palette``. Nothing else to do.
+
+    def apply_font_scale(self, scale: float) -> None:
+        """Switch the live UI font scale. Called by the Settings dialog
+        before ``apply_theme`` so a single Save can change both at once.
+
+        ``ThemeManager.set_font_scale`` re-applies the active theme,
+        which re-substitutes the QSS template with the scaled font-size
+        values, resizes the QApplication default font, and cascades
+        through every panel's ``repaint_for_palette`` so inline-
+        stylesheet font sizes (delegate paints, properties panel
+        sub-headers) refresh too.
+        """
+        self._theme.set_font_scale(scale)
 
     def _on_view_changed(self, view: str) -> None:
         self._apply_active_view(view, persist=True)
