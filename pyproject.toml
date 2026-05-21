@@ -143,4 +143,8 @@ markers = [
 skip = '.git,.gitignore,.gitattributes,*.svg,vendor'
 check-hidden = true
 # ignore-regex = ''
-# ignore-words-list = ''
+# ND: DICOM ImageType code (M/P/ND for magnitude/phase/normalized)
+# puls: Philips physio file extension (.puls), mentioned in docstrings
+# dmaging: intentional mock task name in docs/gui_mockups.html
+# re-use, re-uses, pre-selected: hyphenated forms preferred by authors
+ignore-words-list = 'ND,puls,dmaging,re-use,re-uses,pre-selected'
