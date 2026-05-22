@@ -320,7 +320,7 @@ class MainWindow(QMainWindow):
         self._header.view_changed.connect(self._on_view_changed)
         self._header.about_requested.connect(self._show_about_dialog)
 
-        # Restore the user's last view. Pills are syncronised silently
+        # Restore the user's last view. Pills are synchronized silently
         # so we don't fire a redundant ``view_changed`` on startup.
         from .app_settings import AppSettings
         settings = AppSettings.load()
