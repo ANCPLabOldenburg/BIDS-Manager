@@ -244,6 +244,7 @@ class WelcomePanel(QWidget):
         left.setSpacing(16)
         left.addWidget(self._build_create_card())
         left.addWidget(self._build_resources_card())
+        left.addWidget(self._build_updates_card())
         left.addStretch(1)
         right = QVBoxLayout()
         right.setSpacing(16)
@@ -359,6 +360,18 @@ class WelcomePanel(QWidget):
         lay.addWidget(sample)
         for text, url in _SAMPLE_DATASETS:
             lay.addWidget(self._link_label(text, url))
+        return card
+
+    def _build_updates_card(self) -> QFrame:
+        card, lay = _section_card(
+            "Update notes",
+            "See what changed in each release: new features, fixes, and "
+            "anything worth knowing before you upgrade.",
+        )
+        lay.addWidget(self._link_label(
+            "Read the update notes",
+            "https://ancplaboldenburg.github.io/bids_manager_documentation/updates.html",
+        ))
         return card
 
     @staticmethod

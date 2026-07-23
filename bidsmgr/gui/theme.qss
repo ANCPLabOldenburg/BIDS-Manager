@@ -68,6 +68,7 @@ QToolTip {
     background: $surface2;
     color: $text;
     border: 1px solid $border;
+    border-radius: 6px;
     padding: 4px 8px;
     font-size: 11px;
 }

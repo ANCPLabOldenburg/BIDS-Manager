@@ -1,4 +1,4 @@
-"""Round ``QComboBox`` popups application-wide.
+"""Round ``QComboBox`` popups and hover tooltips application-wide.
 
 Two things are needed for a combo dropdown to look like the header project
 menu (rounded corners, no square frame):
@@ -16,9 +16,14 @@ menu (rounded corners, no square frame):
    shows. Geometry is captured and restored around the flag change so the
    popup stays anchored under its combo.
 
-Defensive: any failure is swallowed so a dropdown can never be broken by
-this cosmetic pass. Call :func:`install` once, after the QApplication and
-theme are set up.
+The same filter also rounds hover tooltips: the ``QToolTip`` QSS carries a
+``border-radius`` but its ``QTipLabel`` window otherwise shows square OS
+corners, so it gets the identical frameless + translucent + shadowless
+treatment to stay consistent with the rounded GUI.
+
+Defensive: any failure is swallowed so a dropdown or tooltip can never be
+broken by this cosmetic pass. Call :func:`install` once, after the
+QApplication and theme are set up.
 """
 
 from __future__ import annotations
@@ -32,40 +37,52 @@ log = logging.getLogger(__name__)
 _FLAG = "_bidsmgr_round_popup"
 
 
-class _ComboPopupRounder(QObject):
-    """App event filter that rounds combo-popup container windows."""
+class _PopupRounder(QObject):
+    """App event filter that rounds combo-popup and tooltip windows."""
 
     def eventFilter(self, obj, event):  # noqa: N802 - Qt signature
         try:
-            if (
-                event.type() == QEvent.Type.Show
-                and obj.metaObject().className() == "QComboBoxPrivateContainer"
-                and not obj.property(_FLAG)
-            ):
-                obj.setProperty(_FLAG, True)
-                geo = obj.geometry()
+            if event.type() != QEvent.Type.Show or obj.property(_FLAG):
+                return False
+            cls = obj.metaObject().className()
+            if cls == "QComboBoxPrivateContainer":
                 obj.setObjectName("combo-popup")
-                obj.setWindowFlags(
-                    obj.windowFlags()
-                    | Qt.WindowType.FramelessWindowHint
-                    | Qt.WindowType.NoDropShadowWindowHint
-                )
-                obj.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-                obj.setGeometry(geo)
-                obj.show()  # re-show so the new window flags take effect
-        except Exception as exc:  # noqa: BLE001 - never break a dropdown
-            log.debug("combo popup round failed: %s", exc)
+                self._round(obj)
+            elif cls == "QTipLabel":
+                # Hover tooltips: same recipe so the QToolTip border-radius
+                # renders without square OS corners, matching the rounded GUI.
+                self._round(obj)
+        except Exception as exc:  # noqa: BLE001 - never break a popup/tooltip
+            log.debug("popup round failed: %s", exc)
         return False
 
+    @staticmethod
+    def _round(obj) -> None:
+        """Make *obj* a frameless, translucent, shadowless top-level window.
 
-_instance: _ComboPopupRounder | None = None
+        Geometry is captured and restored around the flag change so the popup
+        stays exactly where Qt placed it, then re-shown so the flags apply.
+        """
+        obj.setProperty(_FLAG, True)
+        geo = obj.geometry()
+        obj.setWindowFlags(
+            obj.windowFlags()
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        obj.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        obj.setGeometry(geo)
+        obj.show()  # re-show so the new window flags take effect
 
 
-def install(app) -> _ComboPopupRounder:
-    """Install the combo-popup rounder on *app* (idempotent)."""
+_instance: _PopupRounder | None = None
+
+
+def install(app) -> _PopupRounder:
+    """Install the combo-popup / tooltip rounder on *app* (idempotent)."""
     global _instance
     if _instance is None:
-        _instance = _ComboPopupRounder(app)
+        _instance = _PopupRounder(app)
         app.installEventFilter(_instance)
     return _instance
 
