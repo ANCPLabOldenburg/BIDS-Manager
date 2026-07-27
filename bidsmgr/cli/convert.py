@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import pandas as pd
-from joblib import Parallel, delayed
+from joblib import delayed  # pools are built by bidsmgr.util.parallel
 
 import bidsmgr
 
@@ -495,14 +495,38 @@ def _phase1_parallel_dcm2niix(
                     raise OperationCancelled("conversion cancelled by user")
                 out.append(_phase1_one(backends, t, staging))
         else:
-            parallel_backend = "threading" if len(parallel_tasks) < 4 else "loky"
-            gen = Parallel(
-                n_jobs=n_jobs, backend=parallel_backend, return_as="generator",
-            )(delayed(_phase1_one)(backends, t, staging) for t in parallel_tasks)
-            for res in gen:
-                out.append(res)
-                if is_cancelled(cancel_check):
-                    raise OperationCancelled("conversion cancelled by user")
+            from ..util.parallel import preferred_backend, run_parallel
+
+            # Few tasks aren't worth a process pool; otherwise take the fast
+            # one unless bidsmgr.util.parallel has already seen a pool die in
+            # this session (run_parallel falls back and remembers).
+            if len(parallel_tasks) < 4:
+                parallel_backend = "threading"
+            else:
+                parallel_backend = preferred_backend() or "loky"
+
+            # Collect into a fresh list rather than straight into ``out``: a
+            # retry on the threading backend re-runs every task, and appending
+            # to ``out`` would leave the first attempt's partial results behind
+            # as duplicates.
+            def _collect(gen):
+                collected: list[ConvertResult] = []
+                for res in gen:
+                    collected.append(res)
+                    if is_cancelled(cancel_check):
+                        raise OperationCancelled("conversion cancelled by user")
+                return collected
+
+            out.extend(run_parallel(
+                lambda: (
+                    delayed(_phase1_one)(backends, t, staging)
+                    for t in parallel_tasks
+                ),
+                n_jobs=n_jobs,
+                consume=_collect,
+                backend=parallel_backend,
+                return_as="generator",
+            ))
 
     return out
 

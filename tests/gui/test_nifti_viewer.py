@@ -35,18 +35,28 @@ def _load_and_wait(pane, path, root, qtbot=None, timeout_ms: int = 5000):
     for the ``loaded`` signal before inspecting ``_data`` /
     ``_grid_cells`` / etc. Falls back to blocking on the worker
     directly when no qtbot is supplied.
+
+    The first scan of a session opens in a GPU-dependent default view
+    (Multi-Planar 3D with a GPU, Multi-Planar without). This module tests
+    single-pane 2-D behaviour, so the view is normalised back to ``single``
+    afterwards — otherwise every test here would depend on whether the
+    machine running it happens to have a GPU.
     """
     from PyQt6.QtWidgets import QApplication
 
     if qtbot is not None:
         with qtbot.waitSignal(pane.loaded, timeout=timeout_ms):
             pane.set_file(path, root)
+        pane._set_view_mode("single")
+        QApplication.processEvents()
         return
     pane.set_file(path, root)
     worker = pane._loader
     if worker is not None:
         worker.wait(timeout_ms)
     QApplication.processEvents()
+    QApplication.processEvents()
+    pane._set_view_mode("single")
     QApplication.processEvents()
 
 
@@ -97,6 +107,35 @@ def test_load_nifti_returns_array_and_meta(tmp_path: Path) -> None:
     assert data.shape == (2, 3, 4)
     assert not meta.get("is_rgb")
     assert img is not None
+
+
+def test_load_nifti_reads_structured_rgb(tmp_path: Path) -> None:
+    """Regression: colour-FA volumes (record dtype R/G/B) failed to open.
+
+    ``get_fdata()`` can't cast a record dtype to float64; the RGB path used to
+    be reached by matching the resulting exception's class/message, which
+    numpy 2.x changed to a plain TypeError, so these files errored out. The
+    dtype is now inspected up front instead.
+    """
+    import nibabel as nib
+
+    p = tmp_path / "colfa.nii.gz"
+    rgb = np.zeros((4, 5, 6), dtype=[("R", "u1"), ("G", "u1"), ("B", "u1")])
+    rgb["R"][:] = 200
+    rgb["G"][:] = 100
+    # LAS on disk, so the canonical reorientation also has to survive the
+    # structured dtype (colour-FA is commonly stored non-RAS).
+    nib.save(nib.Nifti1Image(rgb, np.diag([-2.0, 2.0, 2.0, 1.0])), str(p))
+
+    img, data, meta = _load_nifti(p)
+    assert meta["is_rgb"] is True
+    assert meta["vector_length"] == 3
+    assert data.shape == (4, 5, 6, 3)
+    assert data.dtype == np.float32
+    assert data[..., 0].max() == 200 and data[..., 1].max() == 100
+    # The structured path must report the storage flip too (LAS -> L/R
+    # reversed), else the RAS toggle would be a no-op for these files.
+    assert meta["native_flip"] == (-1.0, 1.0, 1.0)
 
 
 # ---------------------------------------------------------------------------

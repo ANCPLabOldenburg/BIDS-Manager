@@ -34,7 +34,7 @@ from typing import Optional
 
 import pandas as pd
 import pydicom
-from joblib import Parallel, delayed
+from joblib import delayed  # pools are built by bidsmgr.util.parallel
 from pydicom.multival import MultiValue
 
 from ..classifier.sequence_dict import (
@@ -290,15 +290,26 @@ def scan_dicoms_long(
     # submission order, so the collected list is identical to the eager
     # ``Parallel(...)(...)`` form when not cancelled.
     from ..util.cancel import OperationCancelled, is_cancelled
-    _gen = Parallel(n_jobs=n_jobs, return_as="generator")(
-        delayed(_read_one)(fp, root_dir) for fp in file_list
+    from ..util.parallel import run_parallel
+
+    def _collect(gen):
+        collected = []
+        for _i, _res in enumerate(gen):
+            # Poll periodically (every 64 reads) to keep the check cheap.
+            if (_i & 63) == 0 and is_cancelled(cancel_check):
+                raise OperationCancelled("scan cancelled by user")
+            collected.append(_res)
+        return collected
+
+    # run_parallel picks a working backend (worker processes everywhere except
+    # Windows + Python 3.14, where loky kills its own workers) and retries on
+    # threads if a pool dies anyway.
+    results = run_parallel(
+        lambda: (delayed(_read_one)(fp, root_dir) for fp in file_list),
+        n_jobs=n_jobs,
+        consume=_collect,
+        return_as="generator",
     )
-    results = []
-    for _i, _res in enumerate(_gen):
-        # Poll periodically (every 64 reads) to keep the check cheap.
-        if (_i & 63) == 0 and is_cancelled(cancel_check):
-            raise OperationCancelled("scan cancelled by user")
-        results.append(_res)
     for res in results:
         if not res:
             continue

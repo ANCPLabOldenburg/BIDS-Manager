@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
-from joblib import Parallel, delayed
+from joblib import delayed  # pools are built by bidsmgr.util.parallel
 
 from bidsmgr.util.paths import long_path
 
@@ -363,9 +363,15 @@ def probe_rows(
     # arguments must be picklable. Path / str / list[str] all are. nibabel
     # is imported lazily inside collect_probe_stats so cold workers don't
     # pay the import cost when no NIfTI 4D check is needed.
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(_probe_one_series)(uid, files, series_workdir, bin_path)
-        for uid, files, series_workdir in tasks
+    from ..util.parallel import run_parallel
+
+    results = run_parallel(
+        lambda: (
+            delayed(_probe_one_series)(uid, files, series_workdir, bin_path)
+            for uid, files, series_workdir in tasks
+        ),
+        n_jobs=n_jobs,
+        consume=list,
     )
 
     out: dict[str, ProbeFileStats] = {}

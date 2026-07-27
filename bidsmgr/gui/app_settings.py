@@ -1,4 +1,4 @@
-"""Typed wrapper over ``QSettings`` for cross-platform persistence.
+r"""Typed wrapper over ``QSettings`` for cross-platform persistence.
 
 ``QSettings`` stores values per-platform in the right native location:
 

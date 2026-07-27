@@ -73,6 +73,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QSpinBox,
@@ -115,6 +116,37 @@ _ORIENT_LABELS = {
     _AXIS_AXIAL:    {"left": "L", "right": "R", "top": "A", "bottom": "P"},
 }
 
+# For each plane, which canonical axis (0=L/R, 1=A/P, 2=S/I) maps to the
+# on-screen horizontal and vertical of the displayed slice. Used to turn a
+# per-axis display flip into a slice mirror + label swap. Matches the display
+# transform in ``_voxel_to_arr`` / ``_ORIENT_LABELS`` above.
+_PLANE_HV = {
+    _AXIS_SAGITTAL: (1, 2),   # horizontal = A/P, vertical = S/I
+    _AXIS_CORONAL:  (0, 2),   # horizontal = L/R, vertical = S/I
+    _AXIS_AXIAL:    (0, 1),   # horizontal = L/R, vertical = A/P
+}
+
+
+def _native_flip_from_affine(affine: "np.ndarray") -> tuple[float, float, float]:
+    """Per canonical RAS axis, whether the file stores it reversed (-1) or not.
+
+    Derived from the raw (pre-canonical) affine: if the on-disk data increases
+    toward L/P/I instead of R/A/S on some axis, that axis is flagged -1. This
+    is what the "native storage orientation" view flips back. Axis permutations
+    (e.g. sagittally-stored volumes) are collapsed to their RAS axis, so the
+    anatomical L/R·A/P·S/I labels stay correct even for those.
+    """
+    try:
+        import nibabel as nib
+        ornt = nib.orientations.io_orientation(affine)  # per raw axis: [ras, flip]
+        flip = [1.0, 1.0, 1.0]
+        for ras_axis, sign in ornt:
+            if not np.isnan(ras_axis):
+                flip[int(ras_axis)] = float(sign)
+        return (flip[0], flip[1], flip[2])
+    except Exception:  # pragma: no cover - defensive
+        return (1.0, 1.0, 1.0)
+
 # Default crosshair colour — overridden per-user via AppSettings
 # (``nifti_crosshair_color``). Material light-blue 300 reads well on
 # both dark and bright slices.
@@ -145,27 +177,24 @@ def _load_nifti(path: Path) -> tuple[Any, np.ndarray, dict]:
     """
     import nibabel as nib  # local import: nibabel is heavy
 
-    img = nib.load(str(path))
-    try:
-        img = nib.as_closest_canonical(img)
-        data = img.get_fdata()
-        return img, data, {}
-    except Exception as exc:
-        is_dtype_error = (
-            exc.__class__.__name__ == "DTypePromotionError"
-            or "VoidDType" in str(exc)
-        )
-        if not is_dtype_error:
-            raise
+    raw = nib.load(str(path))
+    native_flip = _native_flip_from_affine(np.asarray(raw.affine))
+    img = nib.as_closest_canonical(raw)
+
+    # Structured voxels (colour-FA and friends: dtype [('R','u1'),('G','u1'),
+    # ('B','u1')]) cannot go through get_fdata() — it tries to cast the record
+    # dtype to float64. Detect them from the DTYPE up front rather than by
+    # catching and sniffing the failure: the exception's class and message vary
+    # across numpy/nibabel versions (numpy 2.x raises a plain TypeError,
+    # "Cannot cast array data from dtype([('R','u1'),...])"), so the old
+    # message-matching guard let colour-FA files fail to open.
+    if getattr(img.dataobj.dtype, "fields", None) is None:
+        return img, img.get_fdata(), {"native_flip": native_flip}
 
     # Structured / RGB voxels: flatten components into the last axis.
     from numpy.lib import recfunctions as rfn
 
     dataobj = np.asanyarray(img.dataobj)
-    if not getattr(dataobj.dtype, "fields", None):
-        raise RuntimeError(
-            f"NIfTI {path} has an unsupported dtype: {dataobj.dtype}"
-        )
     unstructured = rfn.structured_to_unstructured(dataobj)
     vector_length = (
         int(unstructured.shape[-1])
@@ -173,6 +202,7 @@ def _load_nifti(path: Path) -> tuple[Any, np.ndarray, dict]:
         else 1
     )
     meta = {
+        "native_flip": native_flip,
         "vector_axis": len(img.shape),
         "vector_length": vector_length,
         "is_rgb": (
@@ -227,6 +257,50 @@ class NiftiViewerPane(QWidget):
         # Layout mode flags.
         self._tri_view: bool = False
         self._graph_visible: bool = False
+        # 3-D GPU raycast view. Built lazily on first toggle so users who
+        # never open it pay no OpenGL-context cost (and headless test runs
+        # stay clear of GL entirely). ``_gl_page_index`` is its slot in
+        # ``_image_stack`` once created.
+        self._three_d: bool = False
+        self._combo_view: bool = False
+        self._is_3d_capable: bool = False
+        # Whether this host can drive the GPU raycaster (OpenGL 3.3 core on
+        # real hardware). When False the 3D / Multi-Planar 3D toggles are hidden
+        # entirely — the viewer stays a pure 2-D tool.
+        try:
+            from .nifti_gl_view import gpu_available
+            self._gpu_ok: bool = gpu_available()
+        except Exception:  # noqa: BLE001 - never block the 2-D viewer
+            self._gpu_ok = False
+        # The two 3-D modes ("3D" = full render, "Multi-Planar 3D" = the three
+        # planes + render in a grid) share ONE render + ONE control panel, so
+        # they are always the SAME view (effect / lighting / clip / camera) —
+        # not independent. The single ``_gl`` canvas + ``_gl_controls`` are
+        # reparented into whichever page is active (both pages live in the same
+        # window, so the GL context is preserved across the move).
+        self._gl = None
+        self._gl_controls = None
+        self._gl_controls_scroll = None
+        self._page_3d = None
+        self._page_combo = None
+        self._gl_slot_3d = None
+        self._ctrl_slot_3d = None
+        self._gl_slot_combo = None
+        self._ctrl_slot_combo = None
+        self._gl_page_index: Optional[int] = None
+        self._combo_page_index: Optional[int] = None
+        # The FIRST volume of the session lands in a default view — Multi-Planar
+        # 3-D when a GPU is available, plain Multi-Planar otherwise. Applied
+        # once; after that whichever view the user is in persists as they move
+        # between scans.
+        self._initial_view_applied: bool = False
+        self._combo_labels: dict[int, ImageLabel] = {}
+        self._combo_edge: dict = {}
+        # Global display window (intensity low/high) for 2-D slices, computed
+        # once per load so every slice shares one window (crisper + consistent,
+        # like MRIcroGL) instead of per-slice min/max stretching.
+        self._disp_lo: float = 0.0
+        self._disp_hi: float = 1.0
         # Wheel-scroll state. ``_h_key_down`` mirrors the H key: while held,
         # the wheel drives the 4-D volume (time) axis instead of the slice.
         # It's tracked via an app-level event filter (installed at the end of
@@ -238,6 +312,14 @@ class NiftiViewerPane(QWidget):
         # Anatomical edge labels (L/R·A/P·S/I) drawn around each panel.
         # On by default; toggled by the toolbar button and the "O" shortcut.
         self._show_orient_labels: bool = True
+        # Orientation display. ``_ras_on`` (default) shows canonical RAS; when
+        # off, the file's raw on-disk orientation is shown (2-D + 3-D + labels).
+        # ``_radio_on`` mirrors left/right (radiological convention). Both fold
+        # into one per-axis flip (:meth:`_display_flip`). ``_native_flip`` is
+        # the raw storage flip discovered at load (identity for RAS files).
+        self._ras_on: bool = True
+        self._radio_on: bool = False
+        self._native_flip: tuple[float, float, float] = (1.0, 1.0, 1.0)
         # Edge-label widgets: ``_single_edge`` for the single pane and one
         # dict per axis in ``_tri_edge`` for Multi view.
         self._single_edge: dict = {}
@@ -332,6 +414,18 @@ class NiftiViewerPane(QWidget):
         # which the canvas grabs on click / scroll.
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._install_shortcuts()
+
+        # Eagerly realise the 3-D GL page at construction (when a GPU is
+        # present). The pane is built before the main window is shown, so the
+        # host window is created render-to-texture-capable from the start.
+        # Adding the first QOpenGLWidget to an already-visible window otherwise
+        # forces Qt to recreate the native window — the "GUI closes and
+        # reopens" the first time 3-D is opened on Windows / Linux.
+        if self._gpu_ok:
+            try:
+                self._ensure_gl()
+            except Exception as exc:  # noqa: BLE001 - never block the 2-D viewer
+                log.warning("Could not pre-create the 3-D view: %s", exc)
 
     def _teardown_event_filter(self) -> None:
         app = QApplication.instance()
@@ -430,6 +524,7 @@ class NiftiViewerPane(QWidget):
         self._data = data
         self._meta = meta or {}
         self._is_rgb = bool(self._meta.get("is_rgb"))
+        self._native_flip = self._meta.get("native_flip", (1.0, 1.0, 1.0))
         # Default crosshair: centre voxel.
         if data.ndim >= 3:
             self._cross_voxel = [
@@ -454,12 +549,26 @@ class NiftiViewerPane(QWidget):
             # New file lost its 4th dimension — close the graph.
             self._graph_btn.setChecked(False)
 
+        # 3D modes — the raycaster takes a scalar 3-D (or 4-D non-RGB) volume,
+        # or a colour volume: for RGB the shader uses the vector length as the
+        # density (the FA of a colour-FA map) and the hue to tint the surface,
+        # like MRIcroGL. 3 or 4 components only; a 5-component "colour" is not
+        # something the shader can map.
+        self._is_3d_capable = bool(
+            data.ndim >= 3
+            and (not self._is_rgb or (data.ndim == 4 and data.shape[3] in (3, 4)))
+        )
+
         # Reset brightness / contrast to defaults when a new file is
         # bound so the previous file's settings don't leak.
         self._bright_slider.setValue(0)
         self._contrast_slider.setValue(100)
 
         self._set_orientation(self._orientation, refresh=False)
+        # Re-apply edge labels for this file's flip (native mode differs per
+        # file's storage orientation; the fixed-plane panels bake theirs once).
+        self._refresh_all_orient_labels()
+        self._compute_display_window()
         self._toolbar.setVisible(True)
         self._footer.setVisible(True)
         self._stack.setCurrentWidget(self._canvas)
@@ -467,6 +576,21 @@ class NiftiViewerPane(QWidget):
         self._refresh()
         if self._graph_visible:
             self._update_graph()
+        # First real volume of the session opens in the default view; every
+        # later scan keeps whatever view the user is currently in.
+        if not self._initial_view_applied and data.ndim >= 3:
+            self._initial_view_applied = True
+            self._set_view_mode(
+                "combo" if (self._is_3d_capable and self._gpu_ok) else "multi"
+            )
+
+        # If a 3-D mode is open, feed it the new volume; if the new file
+        # can't be rendered in 3-D (e.g. RGB), drop back to plain 2-D.
+        if (self._three_d or self._combo_view) and not self._is_3d_capable:
+            self._set_view_mode("single")
+        else:
+            self._apply_mode_controls()
+            self._push_volume_to_3d()
         self.loaded.emit(path)
 
     def _on_load_failed(self, path: Path, error: str) -> None:
@@ -542,8 +666,8 @@ class NiftiViewerPane(QWidget):
 
         row1.addSpacing(8)
 
-        # Multi view toggle — sagittal+coronal+axial side by side.
-        self._tri_btn = QPushButton("Multi view")
+        # Multi-Planar toggle — sagittal+coronal+axial side by side.
+        self._tri_btn = QPushButton("Multi-Planar")
         self._tri_btn.setObjectName("tb-btn-toggle")
         self._tri_btn.setCheckable(True)
         self._tri_btn.setToolTip(
@@ -566,6 +690,41 @@ class NiftiViewerPane(QWidget):
         )
         self._graph_btn.toggled.connect(self._on_graph_toggled)
         row1.addWidget(self._graph_btn)
+
+        # 3D toggle — GPU volume raycasting. Enabled only for 3-D (or 4-D
+        # non-RGB) data; disabled state is set on load.
+        self._td_btn = QPushButton("3D")
+        self._td_btn.setObjectName("tb-btn-toggle")
+        self._td_btn.setCheckable(True)
+        self._td_btn.setEnabled(False)
+        self._td_btn.setToolTip(
+            "GPU volume rendering (ray-cast 3-D view).\n"
+            "Drag to rotate, scroll to zoom. For 4-D data the Volume "
+            "slider still selects which volume is rendered.\n"
+            "Shortcut: D"
+        )
+        self._td_btn.toggled.connect(self._on_3d_toggled)
+        row1.addWidget(self._td_btn)
+
+        # Multi-Planar 3D — the three 2-D planes plus the GPU render in one grid.
+        self._quad_btn = QPushButton("Multi-Planar 3D")
+        self._quad_btn.setObjectName("tb-btn-toggle")
+        self._quad_btn.setCheckable(True)
+        self._quad_btn.setEnabled(False)
+        self._quad_btn.setToolTip(
+            "Show the three orthogonal slices and the GPU volume render "
+            "together in a 2×2 grid.\n"
+            "Click / scroll a slice to move the crosshair; drag the render "
+            "to rotate it.  Shortcut: P"
+        )
+        self._quad_btn.toggled.connect(self._on_combo_toggled)
+        row1.addWidget(self._quad_btn)
+
+        # No GPU (or no OpenGL 3.3) -> the viewer is 2-D only: hide both
+        # 3-D toggles so the options never appear.
+        if not self._gpu_ok:
+            self._td_btn.setVisible(False)
+            self._quad_btn.setVisible(False)
 
         row1.addSpacing(12)
 
@@ -616,6 +775,34 @@ class NiftiViewerPane(QWidget):
         )
         self._labels_btn.toggled.connect(self._on_labels_toggled)
         row2.addWidget(self._labels_btn)
+
+        # RAS toggle — show canonical RAS orientation (on) or the file's raw
+        # on-disk orientation (off). Affects the 2-D slices, the 3-D render and
+        # the anatomical labels together. No visible change for RAS-stored files.
+        self._ras_btn = QPushButton("RAS")
+        self._ras_btn.setObjectName("tb-btn-toggle")
+        self._ras_btn.setCheckable(True)
+        self._ras_btn.setChecked(self._ras_on)
+        self._ras_btn.setToolTip(
+            "On: show canonical RAS orientation.  Off: show the file's raw "
+            "on-disk orientation (2-D slices, 3-D render and labels).  No "
+            "visible change for files already stored in RAS."
+        )
+        self._ras_btn.toggled.connect(self._on_ras_toggled)
+        row2.addWidget(self._ras_btn)
+
+        # Radiological — mirror left/right (radiological vs. neurological).
+        self._radio_btn = QPushButton("Radiological")
+        self._radio_btn.setObjectName("tb-btn-toggle")
+        self._radio_btn.setCheckable(True)
+        self._radio_btn.setChecked(self._radio_on)
+        self._radio_btn.setToolTip(
+            "Mirror left/right (radiological convention: patient-left on the "
+            "image right).  Off = neurological.  Applies to the 2-D slices, "
+            "3-D render and L/R labels."
+        )
+        self._radio_btn.toggled.connect(self._on_radio_toggled)
+        row2.addWidget(self._radio_btn)
 
         row2.addSpacing(8)
 
@@ -714,6 +901,10 @@ class NiftiViewerPane(QWidget):
 
         # Top: image area (single-pane OR tri-pane).
         self._image_stack = QStackedWidget()
+        # Pure-black visualization area (see #nifti-canvas in theme.qss). The
+        # pages inside are plain QWidgets that paint no background of their
+        # own, so this shows through behind every view mode.
+        self._image_stack.setObjectName("nifti-canvas")
         self._image_stack.addWidget(self._build_single_image())  # idx 0
         self._image_stack.addWidget(self._build_tri_image())     # idx 1
         self._image_stack.setCurrentIndex(0)
@@ -849,7 +1040,7 @@ class NiftiViewerPane(QWidget):
             overlay, edges = self._make_orientation_overlay(label)
             # Each Multi-view panel shows a fixed plane, so its markers
             # never change — set them once here.
-            for side, text in _ORIENT_LABELS[axis].items():
+            for side, text in self._display_labels(axis).items():
                 edges[side].setText(text)
             self._tri_edge[axis] = edges
             cv.addWidget(overlay, 1)
@@ -857,6 +1048,72 @@ class NiftiViewerPane(QWidget):
             self._tri_labels[axis] = label
         self._apply_orient_label_visibility()
         return w
+
+    def _build_combo_page(self):
+        """The "Multi-Planar 3D" page: 2×2 grid (3 slices + a render slot) +
+        a controls slot on the right. The render + controls slots are filled
+        with the SHARED GL widget / controls by :meth:`_mount_gl`, so this view
+        and the pure "3D" view are always identical. Returns
+        ``(page, gl_slot, ctrl_slot)``.
+        """
+        page = QWidget()
+        outer = QHBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+
+        grid_host = QWidget()
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(2)
+        placements = {
+            _AXIS_AXIAL: (0, 0),
+            _AXIS_CORONAL: (0, 1),
+            _AXIS_SAGITTAL: (1, 0),
+        }
+        for axis, (r, c) in placements.items():
+            cell = QWidget()
+            cv = QVBoxLayout(cell)
+            cv.setContentsMargins(0, 0, 0, 0)
+            cv.setSpacing(0)
+            caption = QLabel(_AXIS_LABELS[axis])
+            caption.setObjectName("sidecar-footer-summary")
+            caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cv.addWidget(caption)
+
+            label = ImageLabel(
+                update_fn=lambda a=axis: self._render_axis_into_combo(a),
+                click_fn=lambda ev, a=axis: self._on_image_clicked(
+                    ev, a, self._combo_labels[a],
+                ),
+                wheel_fn=lambda ev, a=axis: self._handle_wheel(ev, a),
+            )
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored,
+            )
+            label.setMinimumSize(1, 1)
+            overlay, edges = self._make_orientation_overlay(label)
+            for side, text in self._display_labels(axis).items():
+                edges[side].setText(text)
+            self._combo_edge[axis] = edges
+            cv.addWidget(overlay, 1)
+            grid.addWidget(cell, r, c)
+            self._combo_labels[axis] = label
+
+        gl_slot = self._slot()          # the shared render is mounted here
+        grid.addWidget(gl_slot, 1, 1)
+        for i in range(2):
+            grid.setRowStretch(i, 1)
+            grid.setColumnStretch(i, 1)
+        outer.addWidget(grid_host, 1)
+
+        # Opaque (see #nifti-ctrl-slot): the canvas behind is black.
+        ctrl_slot = self._slot("nifti-ctrl-slot")   # shared controls mount here
+        ctrl_slot.setFixedWidth(226)
+        outer.addWidget(ctrl_slot)
+
+        self._apply_orient_label_visibility()
+        return page, gl_slot, ctrl_slot
 
     def _build_graph_panel(self) -> QWidget:
         """Build the 4-D time-series plot panel (pyqtgraph).
@@ -984,16 +1241,7 @@ class NiftiViewerPane(QWidget):
     # ------------------------------------------------------------------
 
     def _on_tri_toggled(self, checked: bool) -> None:
-        self._tri_view = checked
-        # The orientation pills + slice slider only steer the
-        # single-pane view. Greying them out (rather than hiding) keeps
-        # the toolbar layout stable across toggles.
-        for btn in (self._sa_btn, self._co_btn, self._ax_btn):
-            btn.setEnabled(not checked)
-        self._slice_slider.setEnabled(not checked and self._data is not None)
-        self._image_stack.setCurrentIndex(1 if checked else 0)
-        if self._data is not None:
-            self._refresh()
+        self._set_view_mode("multi" if checked else "single")
 
     def _on_graph_toggled(self, checked: bool) -> None:
         self._graph_visible = checked
@@ -1008,38 +1256,360 @@ class NiftiViewerPane(QWidget):
                 self._update_graph()
 
     # ------------------------------------------------------------------
+    # 3-D GPU raycast view + view-mode switching
+    # ------------------------------------------------------------------
+    #
+    # There are four mutually-exclusive "big view" modes, all routed through
+    # :meth:`_set_view_mode`:
+    #   single  — one 2-D slice (the default)
+    #   multi   — three 2-D slices side by side (the "Multi view" toggle)
+    #   3d      — the GPU volume render only (the "3D" toggle)
+    #   combo   — three slices + the render in a 2×2 grid ("Ortho 3D")
+    # Centralising the switch keeps the three checkable buttons in sync
+    # without the pairwise-exclusion tangle (each toggle slot just names the
+    # target mode; button states are re-synced here with signals blocked).
+
+    def _on_3d_toggled(self, checked: bool) -> None:
+        self._set_view_mode("3d" if checked else "single")
+
+    def _on_combo_toggled(self, checked: bool) -> None:
+        self._set_view_mode("combo" if checked else "single")
+
+    def _set_view_mode(self, mode: str) -> None:
+        # Build the shared GL render/controls on demand; if that fails (no GL
+        # driver / headless), fall back to plain single-pane 2-D. Then mount
+        # the shared render into the active 3-D page so both 3-D modes show the
+        # very same view.
+        if mode in ("3d", "combo"):
+            try:
+                self._ensure_gl()
+                self._mount_gl(mode)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Could not open the 3-D view: %s", exc)
+                mode = "single"
+
+        self._tri_view = mode == "multi"
+        self._three_d = mode == "3d"
+        self._combo_view = mode == "combo"
+
+        # Re-sync the three toggle buttons without re-entering their slots.
+        for btn, on in (
+            (self._tri_btn, self._tri_view),
+            (self._td_btn, self._three_d),
+            (self._quad_btn, self._combo_view),
+        ):
+            if btn.isChecked() != on:
+                was = btn.blockSignals(True)
+                btn.setChecked(on)
+                btn.blockSignals(was)
+
+        self._apply_mode_controls()
+
+        if self._three_d and self._gl_page_index is not None:
+            self._image_stack.setCurrentIndex(self._gl_page_index)
+        elif self._combo_view and self._combo_page_index is not None:
+            self._image_stack.setCurrentIndex(self._combo_page_index)
+        elif self._tri_view:
+            self._image_stack.setCurrentIndex(1)
+        else:
+            self._image_stack.setCurrentIndex(0)
+
+        if self._data is not None:
+            self._refresh()
+            self._push_volume_to_3d()
+
+    def _apply_mode_controls(self) -> None:
+        """Enable/disable toolbar controls for the current view mode.
+
+        * orientation pills + slice slider — single-pane 2-D only.
+        * brightness / contrast / crosshair / labels — any mode that shows
+          slices (single / multi / combo), i.e. not the pure 3-D render.
+        * graph — 4-D and a slice is shown.
+        * the three view-mode toggles stay live whenever their data
+          precondition holds, so the user can switch straight between them.
+        """
+        has_data = self._data is not None
+        multi_like = self._tri_view or self._combo_view
+        slices_shown = has_data and not self._three_d
+        is_4d = has_data and self._data.ndim == 4 and not self._is_rgb
+
+        single_2d = has_data and not self._three_d and not multi_like
+        for btn in (self._sa_btn, self._co_btn, self._ax_btn):
+            btn.setEnabled(single_2d)
+        if single_2d:
+            self._slice_slider.setEnabled(self._slice_slider.maximum() > 0)
+        else:
+            self._slice_slider.setEnabled(False)
+
+        for w in (self._bright_slider, self._contrast_slider,
+                  self._crosshair_swatch, self._crosshair_thickness_spin):
+            w.setEnabled(slices_shown)
+        # The orientation-labels toggle also drives the 3-D orientation cube,
+        # so it stays live in every mode once a volume is loaded.
+        self._labels_btn.setEnabled(has_data)
+        self._graph_btn.setEnabled(slices_shown and is_4d)
+
+        self._tri_btn.setEnabled(has_data)
+        self._td_btn.setEnabled(has_data and self._is_3d_capable and self._gpu_ok)
+        self._quad_btn.setEnabled(has_data and self._is_3d_capable and self._gpu_ok)
+        # RAS / Radiological reorient the 2-D slices and labels too, so they are
+        # live whenever a volume is loaded (independent of the GPU 3-D views).
+        self._ras_btn.setEnabled(has_data)
+        self._radio_btn.setEnabled(has_data)
+
+    def _toggle_3d(self) -> None:
+        """'D' shortcut — flip the 3D button when it applies."""
+        if self._td_btn.isEnabled():
+            self._td_btn.toggle()
+
+    def _toggle_combo(self) -> None:
+        """'P' shortcut — flip the Multi-Planar 3D button when it applies."""
+        if self._quad_btn.isEnabled():
+            self._quad_btn.toggle()
+
+    # -- 3-D slicer keyboard shortcuts (Shift + …) -------------------------
+
+    def _slicer_active(self) -> bool:
+        """Slicer shortcuts apply only while a 3-D render is on screen."""
+        return (self._three_d or self._combo_view) and self._gl_controls is not None
+
+    def _kbd_toggle_slicer(self) -> None:
+        """Shift+Z — activate / deactivate the clip-plane slicer.
+
+        While the slicer is on, Shift+drag orients the cut (azimuth/elevation)
+        and Shift+scroll moves it through the volume.
+        """
+        if self._slicer_active():
+            self._gl_controls.kbd_toggle_clip()
+
+    def _kbd_clip_axial(self) -> None:
+        """Shift+A — axial cut (plane normal along S–I)."""
+        if self._slicer_active():
+            self._gl_controls.kbd_set_axis(0, 90)
+
+    def _kbd_clip_sagittal(self) -> None:
+        """Shift+S — sagittal cut (plane normal along L–R)."""
+        if self._slicer_active():
+            self._gl_controls.kbd_set_axis(90, 0)
+
+    def _kbd_clip_coronal(self) -> None:
+        """Shift+C — coronal cut (plane normal along A–P)."""
+        if self._slicer_active():
+            self._gl_controls.kbd_set_axis(0, 0)
+
+    def _kbd_clip_invert(self) -> None:
+        """Shift+X — invert the cut direction."""
+        if self._slicer_active():
+            self._gl_controls.kbd_invert()
+
+    def _ensure_gl(self):
+        """Build the shared GL render + controls and both 3-D pages once.
+
+        A single :class:`RaycastGLWidget` + :class:`Nifti3DControls` back BOTH
+        the "3D" page and the "Multi-Planar 3D" page; they are reparented into
+        whichever page is active (:meth:`_mount_gl`). That keeps the two views
+        identical — same effect, lighting, clip and camera — rather than two
+        independent renders.
+        """
+        if self._gl is not None:
+            return
+        from .nifti_gl_view import Nifti3DControls, RaycastGLWidget
+        self._gl = RaycastGLWidget()
+        self._gl.set_show_cube(self._show_orient_labels)
+        self._gl.set_flip(*self._gl_flip())
+        self._gl_controls = Nifti3DControls(self._gl, vertical=True)
+        self._gl_controls_scroll = QScrollArea()
+        # Name the scroll area AND its viewport so both paint the panel colour.
+        # Without this the black image canvas behind shows through the
+        # scrollbar gutter as a stripe down the controls column (very visible
+        # in the light theme).
+        self._gl_controls_scroll.setObjectName("nifti-ctrl-scroll")
+        self._gl_controls_scroll.viewport().setObjectName("nifti-ctrl-viewport")
+        self._gl_controls_scroll.setWidgetResizable(True)
+        self._gl_controls_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._gl_controls_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._gl_controls_scroll.setWidget(self._gl_controls)
+        self._gl_controls_scroll.setFixedWidth(224)
+
+        (self._page_3d, self._gl_slot_3d,
+         self._ctrl_slot_3d) = self._build_3d_page()
+        (self._page_combo, self._gl_slot_combo,
+         self._ctrl_slot_combo) = self._build_combo_page()
+        self._gl_page_index = self._image_stack.addWidget(self._page_3d)
+        self._combo_page_index = self._image_stack.addWidget(self._page_combo)
+        self._mount_gl("3d")   # park it in the pure-3-D page by default
+
+    @staticmethod
+    def _slot(name: str = "") -> QWidget:
+        w = QWidget()
+        if name:
+            w.setObjectName(name)
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        return w
+
+    def _mount_gl(self, mode: str) -> None:
+        """Reparent the shared render + controls into the active page's slots."""
+        if self._gl is None:
+            return
+        if mode == "combo":
+            gl_slot, ctrl_slot = self._gl_slot_combo, self._ctrl_slot_combo
+        else:
+            gl_slot, ctrl_slot = self._gl_slot_3d, self._ctrl_slot_3d
+        # addWidget reparents (auto-removing from the previous slot). Same
+        # top-level window on both sides, so the GL context is preserved.
+        gl_slot.layout().addWidget(self._gl)
+        ctrl_slot.layout().addWidget(self._gl_controls_scroll)
+
+    def _build_3d_page(self):
+        """The pure "3D" page: full-width render + right-hand controls slot."""
+        page = QWidget()
+        page.setObjectName("nifti-canvas")
+        h = QHBoxLayout(page)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(2)
+        gl_slot = self._slot()
+        ctrl_slot = self._slot("nifti-ctrl-slot")
+        ctrl_slot.setFixedWidth(226)
+        h.addWidget(gl_slot, 1)
+        h.addWidget(ctrl_slot)
+        return page, gl_slot, ctrl_slot
+
+    def _volume_spacing(self) -> tuple[float, float, float]:
+        """Voxel spacing (mm) of the loaded image, defaulting to isotropic."""
+        try:
+            zooms = self._img.header.get_zooms()[:3]
+            return tuple(
+                float(z) if z and z > 0 else 1.0 for z in zooms
+            )  # type: ignore[return-value]
+        except Exception:  # pragma: no cover - header always present in practice
+            return (1.0, 1.0, 1.0)
+
+    def _push_volume_to_3d(self) -> None:
+        """Send the current (4-D-aware) 3-D volume to the shared GL render."""
+        if self._data is None or self._gl is None:
+            return
+        vol = self._current_volume()
+        ndim = getattr(vol, "ndim", 0)
+        # Scalar volume, or a colour one (RGB/RGBA) the shader renders tinted.
+        ok = ndim == 3 or (
+            ndim == 4 and self._is_rgb and vol.shape[3] in (3, 4)
+        )
+        if not ok:
+            return
+        self._gl.set_flip(*self._gl_flip())
+        self._gl.set_volume_float(vol, self._volume_spacing())
+
+    # ------------------------------------------------------------------
     # Orientation labels
     # ------------------------------------------------------------------
+
+    def _display_flip(self) -> tuple[float, float, float]:
+        """Per canonical axis (L/R, A/P, S/I) display flip, folding the RAS
+        (native-orientation) and Radiological toggles together."""
+        nf = (1.0, 1.0, 1.0) if self._ras_on else self._native_flip
+        rx = -1.0 if self._radio_on else 1.0   # radiological mirrors L/R only
+        return (nf[0] * rx, nf[1], nf[2])
+
+    def _gl_flip(self) -> tuple[float, float, float]:
+        """Flip vector for the 3-D render.
+
+        It carries a constant extra L/R mirror versus the 2-D flip: a 3-D
+        look-at view of the volume is the mirror image of a 2-D slice shown in
+        the neurological convention, so this keeps the 3-D render's left/right
+        aligned with the 2-D slices under both RAS/native and radiological.
+        """
+        fx, fy, fz = self._display_flip()
+        return (-fx, fy, fz)
+
+    def _display_labels(self, axis: int) -> dict:
+        """Anatomical edge labels for ``axis`` with the display flip applied."""
+        lab = dict(_ORIENT_LABELS[axis])
+        h, v = _PLANE_HV[axis]
+        f = self._display_flip()
+        if f[h] < 0:
+            lab["left"], lab["right"] = lab["right"], lab["left"]
+        if f[v] < 0:
+            lab["top"], lab["bottom"] = lab["bottom"], lab["top"]
+        return lab
+
+    def _refresh_all_orient_labels(self) -> None:
+        """Re-apply edge labels everywhere (the fixed-plane Multi-Planar and
+        combo panels bake theirs once, so a flip toggle must reset them)."""
+        self._update_single_orient_labels()
+        for axis, edges in self._tri_edge.items():
+            for side, text in self._display_labels(axis).items():
+                edges[side].setText(text)
+        for axis, edges in self._combo_edge.items():
+            for side, text in self._display_labels(axis).items():
+                edges[side].setText(text)
 
     def _update_single_orient_labels(self) -> None:
         """Set the single pane's edge glyphs for the current orientation."""
         if not self._single_edge:
             return
-        for side, text in _ORIENT_LABELS[self._orientation].items():
+        for side, text in self._display_labels(self._orientation).items():
             self._single_edge[side].setText(text)
 
     def _apply_orient_label_visibility(self) -> None:
         """Show/hide every edge label per :attr:`_show_orient_labels`."""
-        groups = [self._single_edge] + list(self._tri_edge.values())
+        groups = (
+            [self._single_edge]
+            + list(self._tri_edge.values())
+            + list(self._combo_edge.values())
+        )
         for group in groups:
             for lbl in group.values():
                 lbl.setVisible(self._show_orient_labels)
+        # The same toggle drives the 3-D orientation cube on the shared render.
+        if self._gl is not None:
+            self._gl.set_show_cube(self._show_orient_labels)
 
     def _on_labels_toggled(self, checked: bool) -> None:
         self._show_orient_labels = checked
         self._apply_orient_label_visibility()
 
+    def _on_ras_toggled(self, checked: bool) -> None:
+        """RAS on = canonical orientation; off = the file's raw storage order."""
+        self._ras_on = checked
+        self._apply_display_flip()
+
+    def _on_radio_toggled(self, checked: bool) -> None:
+        """Radiological (mirror L/R) vs. neurological convention."""
+        self._radio_on = checked
+        self._apply_display_flip()
+
+    def _apply_display_flip(self) -> None:
+        """Re-render 2-D + labels and re-orient the 3-D render after a toggle."""
+        self._refresh_all_orient_labels()
+        if self._gl is not None:
+            self._gl.set_flip(*self._gl_flip())
+        if self._data is not None:
+            self._refresh()
+
     def _toggle_orient_labels(self) -> None:
-        """'O' shortcut — flip the Labels button (its slot does the work)."""
-        self._labels_btn.toggle()
+        """'O' shortcut — flip the Labels button (its slot does the work).
+
+        No-op in 3-D, where anatomical edge labels don't apply.
+        """
+        if self._labels_btn.isEnabled():
+            self._labels_btn.toggle()
 
     # ------------------------------------------------------------------
     # Keyboard shortcuts
     # ------------------------------------------------------------------
 
     def _toggle_multi_view(self) -> None:
-        """'M' shortcut — flip the Multi view button."""
-        self._tri_btn.toggle()
+        """'M' shortcut — flip the Multi view button when it applies.
+
+        Disabled while the 3-D view owns the canvas; toggling it there
+        would yank the view out from under the user.
+        """
+        if self._tri_btn.isEnabled():
+            self._tri_btn.toggle()
 
     def _toggle_graph(self) -> None:
         """'G' shortcut — flip the Graph button (only when it applies).
@@ -1053,10 +1623,11 @@ class NiftiViewerPane(QWidget):
     def _shortcut_orientation(self, axis: int) -> None:
         """'A' / 'S' / 'C' shortcuts — jump to a single-pane orientation.
 
-        Leaves Multi view if it's on so the requested plane fills the pane.
+        Leaves any multi-plane / 3-D mode so the requested plane fills the
+        pane.
         """
-        if self._tri_view:
-            self._tri_btn.setChecked(False)
+        if self._tri_view or self._three_d or self._combo_view:
+            self._set_view_mode("single")
         self._set_orientation(axis)
 
     def _install_shortcuts(self) -> None:
@@ -1073,6 +1644,15 @@ class NiftiViewerPane(QWidget):
             ("M", self._toggle_multi_view),
             ("G", self._toggle_graph),
             ("O", self._toggle_orient_labels),
+            ("D", self._toggle_3d),
+            ("P", self._toggle_combo),
+            # 3-D slicer (clip plane). Shift + drag/scroll while active orients
+            # and navigates the cut.
+            ("Shift+Z", self._kbd_toggle_slicer),
+            ("Shift+A", self._kbd_clip_axial),
+            ("Shift+S", self._kbd_clip_sagittal),
+            ("Shift+C", self._kbd_clip_coronal),
+            ("Shift+X", self._kbd_clip_invert),
         )
         for key, handler in specs:
             sc = QShortcut(QKeySequence(key), self)
@@ -1097,9 +1677,25 @@ class NiftiViewerPane(QWidget):
                 ("Axial view", "A"),
                 ("Sagittal view", "S"),
                 ("Coronal view", "C"),
-                ("Multi view (toggle)", "M"),
+                ("Multi-Planar (toggle)", "M"),
+                ("3D volume render (toggle)", "D"),
+                ("Multi-Planar 3D — planes + render (toggle)", "P"),
                 ("Graph / time-series (toggle)", "G"),
                 ("Orientation labels (toggle)", "O"),
+            ]),
+            ("3D view", [
+                ("Rotate the volume", "Drag"),
+                ("Pan", "Right-drag"),
+                ("Zoom in / out", "Scroll"),
+            ]),
+            ("3D slicer (clip plane)", [
+                ("Activate / deactivate slicer", "Shift+Z"),
+                ("Orient the cut freely", "Shift+drag"),
+                ("Navigate the slice", "Shift+scroll"),
+                ("Axial cut", "Shift+A"),
+                ("Sagittal cut", "Shift+S"),
+                ("Coronal cut", "Shift+C"),
+                ("Invert the cut", "Shift+X"),
             ]),
         ]
 
@@ -1220,11 +1816,16 @@ class NiftiViewerPane(QWidget):
 
     def _on_vol_slider_changed(self, value: int) -> None:
         self._vol_val.setText(str(value))
+        # Different 4-D volumes can differ in intensity range — re-window.
+        self._compute_display_window()
         self._refresh()
         # In graph mode the y-data doesn't change with volume — only
         # the marker moves. Avoid the full curve redraw.
         if self._graph_visible:
             self._update_graph_marker()
+        # In a 3-D mode the selected volume is what gets raycast — re-upload.
+        if self._three_d or self._combo_view:
+            self._push_volume_to_3d()
 
     # ------------------------------------------------------------------
     # Slice rendering
@@ -1265,11 +1866,36 @@ class NiftiViewerPane(QWidget):
             return self._data[..., vol_idx]
         return self._data
 
+    def _compute_display_window(self) -> None:
+        """Set ``_disp_lo/_disp_hi`` from a robust percentile of the volume.
+
+        One window shared by every 2-D slice. Computed from a subsample so a
+        several-hundred-MB BOLD run stays instant; RGB data keeps the trivial
+        0..1 window (its slices are handled component-wise elsewhere).
+        """
+        self._disp_lo, self._disp_hi = 0.0, 1.0
+        if self._data is None or self._is_rgb:
+            return
+        vol = self._current_volume()
+        flat = np.asarray(vol, dtype=np.float32).ravel()
+        if flat.size > 500_000:
+            flat = flat[:: flat.size // 500_000]
+        finite = flat[np.isfinite(flat)]
+        if finite.size == 0:
+            return
+        lo, hi = np.percentile(finite, (1.0, 99.0))
+        if hi <= lo:
+            hi = lo + 1.0
+        self._disp_lo, self._disp_hi = float(lo), float(hi)
+
     def _refresh(self) -> None:
         """Repaint whichever canvas is currently visible."""
         if self._data is None or self._cross_voxel is None:
             return
-        if self._tri_view:
+        if self._combo_view:
+            for axis in _AXES:
+                self._render_axis_into_combo(axis)
+        elif self._tri_view:
             for axis in _AXES:
                 self._render_axis_into_tri(axis)
         else:
@@ -1285,6 +1911,14 @@ class NiftiViewerPane(QWidget):
         if self._data is None or self._cross_voxel is None:
             return
         label = self._tri_labels.get(axis)
+        if label is None:
+            return
+        self._render_axis_to_label(axis, label)
+
+    def _render_axis_into_combo(self, axis: int) -> None:
+        if self._data is None or self._cross_voxel is None:
+            return
+        label = self._combo_labels.get(axis)
         if label is None:
             return
         self._render_axis_to_label(axis, label)
@@ -1306,10 +1940,19 @@ class NiftiViewerPane(QWidget):
             slice_img = vol[:, :, slice_idx]
 
         arr = slice_img.astype(np.float32)
-        arr = arr - arr.min()
-        peak = arr.max()
-        if peak > 0:
-            arr = arr / peak
+        if arr.ndim == 2:
+            # Global intensity window (computed once per load) so every slice
+            # shares one mapping — crisp and consistent, like MRIcroGL —
+            # rather than each slice stretching its own min/max (flat, noisy).
+            lo, hi = self._disp_lo, self._disp_hi
+            arr = (arr - lo) / (hi - lo) if hi > lo else arr - lo
+            # Gentle gamma to lift the mid-tones for MRIcroGL-like vibrancy /
+            # contrast (brighter grey/white matter without clipping highlights).
+            arr = np.clip(arr, 0.0, 1.0) ** 0.8
+        else:
+            # RGB / colour voxels: components are already display values.
+            arr = arr / 255.0 if arr.max() > 1.0 else arr
+        arr = np.clip(arr, 0, 1)
 
         b = self._bright_slider.value() / 100.0
         c = self._contrast_slider.value() / 100.0
@@ -1318,6 +1961,16 @@ class NiftiViewerPane(QWidget):
 
         arr = (arr * 255).astype(np.uint8)
         arr = np.rot90(arr)
+
+        # Mirror the displayed slice to match the orientation flip (RAS/native +
+        # radiological). Rows are screen-vertical, columns screen-horizontal.
+        f = self._display_flip()
+        h_ax, v_ax = _PLANE_HV[axis]
+        if f[h_ax] < 0:
+            arr = arr[:, ::-1]
+        if f[v_ax] < 0:
+            arr = arr[::-1, :]
+        arr = np.ascontiguousarray(arr)
 
         if arr.ndim == 2:
             h, w = arr.shape
@@ -1451,6 +2104,7 @@ class NiftiViewerPane(QWidget):
         # Slice index along the clicked axis stays fixed (you can't
         # change depth by clicking inside a 2-D slice). The crosshair
         # moves in the plane.
+        x, y = self._unflip_arr_coords(x, y, axis, vol)
         i, j, k = self._cross_voxel
         if axis == _AXIS_SAGITTAL:
             j = x
@@ -1462,6 +2116,19 @@ class NiftiViewerPane(QWidget):
             i = x
             j = vol.shape[1] - 1 - y
         return i, j, k
+
+    def _flip_arr_coords(self, x: int, y: int, axis: int, vol) -> tuple[int, int]:
+        """Apply the display flip to in-plane (x, y) slice coordinates."""
+        f = self._display_flip()
+        h_ax, v_ax = _PLANE_HV[axis]
+        if f[h_ax] < 0:
+            x = (vol.shape[h_ax] - 1) - x
+        if f[v_ax] < 0:
+            y = (vol.shape[v_ax] - 1) - y
+        return x, y
+
+    # The flip is its own inverse, so mapping a click back is the same op.
+    _unflip_arr_coords = _flip_arr_coords
 
     def _voxel_to_arr(self, voxel, axis: int) -> tuple[int, int]:
         i, j, k = voxel
@@ -1475,7 +2142,7 @@ class NiftiViewerPane(QWidget):
         else:
             x = i
             y = vol.shape[1] - 1 - j
-        return x, y
+        return self._flip_arr_coords(x, y, axis, vol)
 
     # ------------------------------------------------------------------
     # Scroll on image -> step through the slice / volume stack
@@ -1806,6 +2473,18 @@ class NiftiViewerPane(QWidget):
         if self._plot_layout is not None:
             self._plot_layout.clear()
         self._grid_cells = []
+        # Reset the 3-D modes: drop back to single-pane, disable the toggles,
+        # and free the GPU textures of both GL views.
+        self._is_3d_capable = False
+        self._tri_view = self._three_d = self._combo_view = False
+        for btn in (self._tri_btn, self._td_btn, self._quad_btn):
+            was = btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.setEnabled(False)
+            btn.blockSignals(was)
+        self._image_stack.setCurrentIndex(0)
+        if self._gl is not None:
+            self._gl.clear()
         self._toolbar.setVisible(False)
         self._footer.setVisible(False)
         self._footer_path.setText("")

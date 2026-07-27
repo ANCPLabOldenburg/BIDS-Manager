@@ -1200,3 +1200,25 @@ QListWidget#welcome-recent::item:selected {
     background: $accent_bg;
     color: $accent;
 }
+
+/* ---------- NIfTI viewer image canvas ----------
+ * The visualization area only (2-D slice panels + the 3-D render pages).
+ * Pure black so scans read like a lightbox and match the GL clear colour;
+ * deliberately NOT #pane-dark, which other panels share. Child pages are
+ * plain QWidgets that paint no background, so this shows through. */
+QStackedWidget#nifti-canvas,
+QWidget#nifti-canvas {
+    background: #000000;
+    border: none;
+}
+
+/* 3-D controls column — opaque so the black image canvas behind it never
+ * shows through (the scrollbar gutter used to read as a black stripe). The
+ * viewport is named from Python because a stylesheet can't select it. */
+QWidget#nifti-ctrl-slot,
+QScrollArea#nifti-ctrl-scroll,
+QWidget#nifti-ctrl-viewport,
+QWidget#nifti-3d-controls {
+    background: $surface2;
+    border: none;
+}

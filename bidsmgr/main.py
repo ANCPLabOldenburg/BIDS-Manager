@@ -61,6 +61,19 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     from PyQt6.QtWidgets import QApplication
 
+    # Register an OpenGL 3.3 core default surface format *before* the
+    # QApplication is constructed so the NIfTI viewer's GPU raycaster
+    # (bidsmgr.gui.widgets.nifti_gl_view) gets a context its #version 330
+    # shaders can compile against — on macOS the compatibility profile is
+    # stuck at GL 2.1. Harmless for the rest of the (raster) GUI.
+    from PyQt6.QtCore import Qt
+    # Share GL contexts across the app's QOpenGLWidgets. Required before the
+    # QApplication is built; it lets the raycaster survive the detachable
+    # Viewer being re-docked without losing its context.
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    from .gui.widgets.nifti_gl_view import request_gl_format
+    request_gl_format()
+
     from .gui.main_window import MainWindow
     from .gui.theme_manager import ThemeManager
 
