@@ -78,10 +78,45 @@ QToolTip {
  * with rounded item selection (mirroring the project dropdown look).
  * Object-name'd combos (#ent-input, #project-switcher) keep their own
  * more-specific rules on top of this. */
+/* ---------------------------------------------------------------------------
+ * Text inputs
+ *
+ * There was no generic QLineEdit rule at all: only per-object-name ones, so a
+ * plain line edit fell back to the platform default and, on the near-black dark
+ * surface, showed no outline worth the name. A form of twenty such boxes then
+ * read as one undifferentiated block. $input_border is brighter than $border on
+ * purpose: the panel border separates regions quietly, an input has to be
+ * findable.
+ * ------------------------------------------------------------------------ */
+QLineEdit {
+    background: $surface2;
+    color: $text;
+    border: 1px solid $input_border;
+    border-radius: 6px;
+    padding: 3px 8px;
+    min-height: 20px;
+    selection-background-color: $accent_bg;
+}
+QLineEdit:hover { border-color: $accent_border; }
+QLineEdit:focus { border-color: $accent; }
+QLineEdit:disabled, QLineEdit:read-only {
+    background: $surface;
+    color: $dim;
+    border-color: $border;
+}
+QPlainTextEdit, QTextEdit {
+    background: $surface2;
+    color: $text;
+    border: 1px solid $input_border;
+    border-radius: 6px;
+    selection-background-color: $accent_bg;
+}
+QPlainTextEdit:focus, QTextEdit:focus { border-color: $accent; }
+
 QComboBox {
     background: $surface2;
     color: $text;
-    border: 1px solid $border;
+    border: 1px solid $input_border;
     border-radius: 6px;
     padding: 3px 8px;
     min-height: 20px;
@@ -1042,6 +1077,16 @@ QLabel#val-rule {
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
+/* Provenance: the schema path a finding came from, shown under the body so a
+   user can check the standard. Quieter than the rule code above it, and not
+   uppercased, because it is a path to be read literally. */
+QLabel#val-provenance {
+    font-family: "SF Mono","Menlo","Monaco",monospace;
+    font-size: 9px;
+    color: $muted;
+    background: transparent;
+}
+
 /* Optional small chip on the header row, naming the JSON field a
    finding refers to (e.g. "License" for a TODO-placeholder issue). */
 QLabel#val-field {

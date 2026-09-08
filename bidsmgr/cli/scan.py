@@ -62,11 +62,14 @@ from ..inventory.mri_dicom import (
     TSV_COLUMNS,
     scan_dicoms_long,
 )
+from ..inventory.pet import PET_COLUMNS, derive_suggestions as derive_pet_suggestions
+from ..inventory.pet_ecat import scan_ecat
 from ..inventory.probe_convert import ProbeFileStats
 from ..inventory.types import InventoryRow
 from ..recording_meta import (
     RecordingMetaSpec,
     dump_spec,
+    load_spec,
     scaffold_sidecar_path,
 )
 
@@ -806,6 +809,68 @@ def _placeholder_for_entity(entity: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_real_answer(value) -> bool:
+    """Is this a value, or a placeholder standing in for one?
+
+    A converter writes some keys whatever the answer, so "n/a" means it did not
+    know. Counting that as answered is what once hid the fields a user most has
+    to supply.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str) and value.strip().lower() in ("n/a", "na", ""):
+        return False
+    if isinstance(value, (list, dict)) and not value:
+        return False
+    return True
+
+
+def _finish_unified_frame(merged, exclusions) -> None:
+    """The last passes over the finished inventory, whatever it holds.
+
+    Extracted because there are two write paths, one for a tree with MRI in it
+    and one for a tree without, and they had drifted. A check added to the MRI
+    path silently did nothing for an EEG-only dataset: a workshop tree where
+    every subject exports a rest and a video recording produced two rows with
+    one name per subject, and nothing said so.
+
+    Order matters. Exclusions first, because an excluded row is never written
+    and so cannot collide. Names next. The mixed-study heads-up last, so it only
+    ever appends to ``proposed_issues`` and never downgrades a more severe row
+    state.
+    """
+    _apply_user_exclusions(merged, exclusions)
+
+    # Two recordings resolving to one name means one silently overwrites the
+    # other. Where BIDS has an answer (a run) it is applied; where it does not,
+    # or where a run is already stated, the rows are left alone and reported.
+    #
+    # Nothing is written into the issue column: a note stored there would still
+    # be showing after the user had fixed the thing it describes. The GUI
+    # derives the red live from the current names, and conversion checks again.
+    from ..inventory.name_collisions import assign_runs, count_collisions
+
+    numbered = assign_runs(merged)
+    if numbered:
+        # Printed, not logged: this CHANGED the filenames the user will get.
+        print(
+            f"Named {numbered} recordings as runs so their BIDS names stay "
+            "unique (they had resolved to the same name)."
+        )
+
+    flagged = count_collisions(merged)
+    if flagged:
+        print(
+            f"WARNING: {flagged} recordings share a BIDS name with another "
+            "and would overwrite each other. A run could not be assigned "
+            "automatically, so give them different entities (a task or "
+            "session label), or exclude one. They are shown in red in the "
+            "table, and conversion will refuse until they are unique."
+        )
+
+    _flag_mixed_study_descriptions(merged)
+
+
 def _augment_dataframe(
     df: pd.DataFrame,
     rows: list[InventoryRow],
@@ -838,6 +903,10 @@ def _augment_dataframe(
         for col in PROBE_COLUMNS:
             if col not in df.columns:
                 _init_object_column(df, col)
+        # Internal (leading underscore -> dropped from the TSV): what the probe
+        # conversion actually produced for each series.
+        if "_derived_fields" not in df.columns:
+            _init_object_column(df, "_derived_fields")
 
     for df_idx, group_rows in rows_by_df_idx.items():
         # Pick best classification for this DataFrame row.
@@ -955,17 +1024,29 @@ def _augment_dataframe(
             n_nifti_total = 0
             n_volumes_max = 0
             ext_set: set[str] = set()
+            derived: dict = {}
             seen = False
             for u in uids:
                 ps = probe_stats.get(u)
                 if ps is None:
                     continue
                 seen = True
+                # What dcm2niix actually wrote for this series. Only the EEG/MEG
+                # scanner used to record this, so an MRI row could say nothing
+                # about what the conversion answers, and its per-file form asked
+                # for the repetition time the converter reads from the header.
+                for key, value in (getattr(ps, "sidecar_fields", None) or {}).items():
+                    if _is_real_answer(value):
+                        derived.setdefault(key, value)
                 n_files_total += ps.n_files
                 n_nifti_total += ps.n_nifti
                 if ps.n_volumes_max > n_volumes_max:
                     n_volumes_max = ps.n_volumes_max
                 ext_set.update(ps.extensions)
+            if seen and derived:
+                df.at[df_idx, "_derived_fields"] = json.dumps(
+                    derived, sort_keys=True, default=str,
+                )
             if seen:
                 df.at[df_idx, "probe_n_files"] = n_files_total
                 df.at[df_idx, "probe_n_nifti"] = n_nifti_total
@@ -980,6 +1061,13 @@ def _augment_dataframe(
                 if anomaly:
                     annotated_issues.append(anomaly)
                     df.at[df_idx, "proposed_issues"] = " | ".join(annotated_issues)
+
+    # PET, from the DICOM Modality tag: classify anything the probe missed,
+    # derive the suggestion columns, then exclude the CT companion of a
+    # PET/CT study (which raw BIDS cannot hold).
+    _classify_pet_rows(df)
+    _fill_pet_suggestions(df)
+    _flag_ct_companion_rows(df)
 
     _flag_nonimage_rows(df)
     return df
@@ -1053,6 +1141,149 @@ def _flag_nonimage_rows(df: pd.DataFrame) -> None:
         df.at[df_idx, "proposed_issues"] = (
             f"{NONIMAGE_ISSUE} | {existing}" if existing else NONIMAGE_ISSUE
         )
+
+
+# A PET/CT or PET/MR study ships its attenuation-correction companion in the
+# same export. The MR half is ordinary anat/func and converts normally, but
+# BIDS 1.11 has no ``ct`` datatype, so a CT series has nowhere to go in a raw
+# dataset. Flag it the way non-image series are flagged: excluded but visible
+# and reversible, with the reason on the row.
+CT_COMPANION_ISSUE_TOKEN = "ct series"
+CT_COMPANION_ISSUE = (
+    "ct series: this is the CT half of a PET/CT study. BIDS 1.11 has no "
+    "'ct' datatype, so it cannot be placed in a raw BIDS dataset and is "
+    "excluded from conversion. Re-tick include only if you intend to route "
+    "it somewhere yourself."
+)
+
+
+def _flag_ct_companion_rows(df: pd.DataFrame) -> None:
+    """Exclude CT series, which raw BIDS has nowhere to put.
+
+    Keyed on the DICOM ``Modality`` tag rather than the series description,
+    because vendors name the CT half anything from ``AC_CT_Brain`` to
+    ``Topogram``. Reversible: the row stays in the inventory with ``include=0``
+    so the user can override.
+    """
+    if "_dicom_modality" not in df.columns:
+        return
+    for idx in df.index:
+        if str(df.at[idx, "_dicom_modality"] or "").strip().upper() != "CT":
+            continue
+        df.at[idx, "bids_guess_skip"] = True
+        df.at[idx, "include"] = 0
+        existing = str(df.at[idx, "proposed_issues"] or "").strip()
+        df.at[idx, "proposed_issues"] = (
+            f"{CT_COMPANION_ISSUE} | {existing}" if existing else CT_COMPANION_ISSUE
+        )
+
+
+_SUB_LABEL_RE = _re.compile(r"^sub-(\d+)$")
+
+
+def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
+    """Shift ``df``'s ``sub-NNN`` labels past those already used in ``others``.
+
+    Every modality scanner numbers its own subjects from ``sub-001``. Merging
+    two such blocks without reconciling them makes two different people share
+    one label, and at convert time the second write lands on top of the first.
+    Rather than reconcile identity across modalities (a much harder problem,
+    and a separate feature), simply give the incoming block a disjoint range;
+    the user renames rows in the inventory to merge them deliberately.
+
+    Rewrites ``BIDS_name`` plus the ``entities`` / basename columns derived
+    from it, so the row stays internally consistent.
+    """
+    if df.empty or "BIDS_name" not in df.columns:
+        return
+
+    used: set[int] = set()
+    for other in others:
+        if other is None or other.empty or "BIDS_name" not in other.columns:
+            continue
+        for label in other["BIDS_name"].astype(str):
+            m = _SUB_LABEL_RE.match(label.strip())
+            if m:
+                used.add(int(m.group(1)))
+    if not used:
+        return
+
+    offset = max(used)
+    remap: dict[str, str] = {}
+    for label in df["BIDS_name"].astype(str):
+        m = _SUB_LABEL_RE.match(label.strip())
+        if m and label not in remap:
+            remap[label] = f"sub-{int(m.group(1)) + offset:03d}"
+    if not remap:
+        return
+
+    for idx in df.index:
+        old = str(df.at[idx, "BIDS_name"]).strip()
+        new = remap.get(old)
+        if not new:
+            continue
+        df.at[idx, "BIDS_name"] = new
+        token = new[len("sub-"):]
+        if "entities" in df.columns:
+            try:
+                ents = json.loads(df.at[idx, "entities"] or "{}")
+            except (TypeError, ValueError):
+                ents = {}
+            if ents.get("subject"):
+                ents["subject"] = token
+                df.at[idx, "entities"] = json.dumps(ents, sort_keys=True)
+        for col in ("proposed_basename", "Proposed BIDS name"):
+            if col in df.columns:
+                df.at[idx, col] = str(df.at[idx, col]).replace(old, new, 1)
+
+
+def _classify_pet_rows(df: pd.DataFrame) -> None:
+    """Classify PET series the dcm2niix probe did not reach.
+
+    dcm2niix's BidsGuess already returns ``pet`` for PET series, but only when
+    the probe actually ran (it is opt-in, and it needs a successful trial
+    conversion). The DICOM ``Modality`` tag says ``PT`` unambiguously and costs
+    nothing, so it fills in for the probe here: any PET series still lacking a
+    guess gets ``pet``/``pet`` at a confidence just under BidsGuess's 0.85, so
+    a real probe result always wins.
+    """
+    if "_dicom_modality" not in df.columns:
+        return
+    for idx in df.index:
+        if str(df.at[idx, "_dicom_modality"] or "").strip().upper() != "PT":
+            continue
+        if str(df.at[idx, "bids_guess_datatype"] or "").strip():
+            continue  # the probe already classified it
+        df.at[idx, "bids_guess_datatype"] = "pet"
+        df.at[idx, "bids_guess_suffix"] = "pet"
+        df.at[idx, "bids_guess_classifier"] = "dicom_modality"
+        df.at[idx, "bids_guess_confidence"] = 0.80
+        if "modality" in df.columns:
+            df.at[idx, "modality"] = "pet"
+
+
+def _fill_pet_suggestions(df: pd.DataFrame) -> None:
+    """Populate the read-only PET suggestion columns from the scanned tags.
+
+    Suggestions only: nothing here is written into a sidecar. The user adopts
+    or overrides them in the dataset-metadata dialog, exactly as with the
+    EEG/MEG montage and manufacturer suggestions.
+    """
+    if "_pet_tags" not in df.columns:
+        return
+    # The unified backfill runs later, so create the columns here. Object
+    # dtype on purpose: a bare ``df[col] = ""`` gives newer pandas a strict
+    # StringDtype that then rejects assignment (see _init_object_column).
+    for col in PET_COLUMNS:
+        if col not in df.columns:
+            _init_object_column(df, col)
+    for idx in df.index:
+        tags = df.at[idx, "_pet_tags"]
+        if not isinstance(tags, dict) or not tags:
+            continue
+        for col, value in derive_pet_suggestions(tags).items():
+            if col in df.columns:
+                df.at[idx, col] = value
 
 
 # Marker prepended to ``proposed_issues`` for a user-excluded series. Mirrors
@@ -1156,7 +1387,10 @@ def _default_dataset_slug(dicom_root: Path) -> str:
 
 
 def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
-    """Seed a recording-metadata scaffold from detected EEG/MEG event codes.
+    """Seed a recording-metadata scaffold from what the scan detected.
+
+    Two sources feed it: EEG/MEG event codes, and the PET tracer facts every
+    PET row agrees on. Both are starting points for the user, never final.
 
     Reads the internal ``_event_codes`` column (populated by the EEG/MEG
     scanner, dropped from the TSV itself), unions the codes across recordings,
@@ -1173,23 +1407,21 @@ def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
     CLI re-scan does not clobber labels the user has filled in (the GUI resets a
     stale scaffold when it starts a fresh scan).
     """
-    if "source_file" not in merged.columns:
-        return None
-    eeg_rows = merged[merged["source_file"].astype(str).str.len() > 0]
-    if eeg_rows.empty:
-        return None
-
-    # Union of detected trigger/annotation codes across all recordings.
     codes: list[str] = []
-    for raw in eeg_rows.get("_event_codes", pd.Series([], dtype=object)):
-        try:
-            for c in json.loads(raw) if isinstance(raw, str) and raw else []:
-                if c and c not in codes:
-                    codes.append(c)
-        except (ValueError, TypeError):
-            continue
+    if "source_file" in merged.columns:
+        eeg_rows = merged[merged["source_file"].astype(str).str.len() > 0]
+        # Union of detected trigger/annotation codes across all recordings.
+        for raw in eeg_rows.get("_event_codes", pd.Series([], dtype=object)):
+            try:
+                for c in json.loads(raw) if isinstance(raw, str) and raw else []:
+                    if c and c not in codes:
+                        codes.append(c)
+            except (ValueError, TypeError):
+                continue
 
-    if not codes:
+    pet_defaults = _seed_pet_defaults(merged)
+
+    if not codes and pet_defaults is None:
         return None
 
     scaffold_path = scaffold_sidecar_path(output_tsv)
@@ -1198,17 +1430,91 @@ def _write_recording_meta_scaffold(merged: pd.DataFrame, output_tsv: Path):
         return None
 
     spec = RecordingMetaSpec(
-        event_maps={"*": {c: "" for c in sorted(codes)}},
+        event_maps={"*": {c: "" for c in sorted(codes)}} if codes else {},
     )
+    if pet_defaults is not None:
+        spec.pet_defaults = pet_defaults
     scaffold_path.write_text(dump_spec(spec), encoding="utf-8")
     return scaffold_path
+
+
+def _write_converter_preview(
+    merged: pd.DataFrame,
+    probe_stats,
+    output_tsv: Path,
+) -> None:
+    """Record what the conversion will answer by itself, per kind of file.
+
+    Written on every scan, into an existing scaffold if there is one, because
+    unlike the event map this is DERIVED: it describes the data as it is now,
+    so a rescan should refresh it rather than preserve a stale copy. It is
+    never merged into a user's answers and never written to a sidecar.
+
+    Two sources, and the cheap one always runs: the header facts the scan read
+    out of each recording anyway, and, when the user asked for a probe
+    conversion, the sidecars dcm2niix actually produced.
+    """
+    from ..metadata.converter_preview import (
+        merge_previews, preview_by_row, preview_from_inventory, preview_from_probe,
+    )
+
+    preview = merge_previews(
+        preview_from_inventory(merged),
+        preview_from_probe(merged, probe_stats),
+    )
+    by_row = preview_by_row(merged)
+    if not preview and not by_row:
+        return
+
+    scaffold_path = scaffold_sidecar_path(output_tsv)
+    spec = load_spec(scaffold_path) if scaffold_path.exists() else RecordingMetaSpec()
+    spec.converter_preview = preview
+    spec.row_preview = by_row
+    scaffold_path.write_text(dump_spec(spec), encoding="utf-8")
+
+
+def _seed_pet_defaults(merged: pd.DataFrame):
+    """Seed the scaffold's PET block from values the scan is sure of.
+
+    Only unambiguous facts are seeded, and only when every PET row in the
+    dataset agrees on them. A tracer or radionuclide that differs between rows
+    is a per-row property, not a dataset default, so seeding one would be
+    wrong for the others.
+
+    The dose is NOT seeded: it is per-injection by definition, and a shared
+    default would be actively misleading. It stays a per-row suggestion the
+    user adopts deliberately.
+
+    Returns ``None`` when there is no PET in the dataset or nothing agreed on.
+    """
+    if "bids_guess_datatype" not in merged.columns:
+        return None
+    pet_rows = merged[merged["bids_guess_datatype"].astype(str) == "pet"]
+    if pet_rows.empty:
+        return None
+
+    def _unanimous(column: str) -> Optional[str]:
+        if column not in pet_rows.columns:
+            return None
+        values = {
+            str(v).strip() for v in pet_rows[column] if str(v).strip()
+        }
+        return values.pop() if len(values) == 1 else None
+
+    from ..recording_meta import PetAcquisitionSpec
+
+    seeded = PetAcquisitionSpec(
+        tracer_name=_unanimous("tracer_suggestion"),
+        tracer_radionuclide=_unanimous("radionuclide_suggestion"),
+    )
+    return seeded if seeded.model_dump(exclude_none=True, exclude_defaults=True) else None
 
 
 def _unified_column_order(df: pd.DataFrame) -> list[str]:
     """Final unified TSV column order. Locked contract:
 
     ``TSV(24) + BIDS_GUESS(8) + ENTITIES(1) + DATASET(1) + PROBE(4) +
-    EXTENDED(3) + EEG_MEG(16) = 57``.
+    EXTENDED(3) + EEG_MEG(16) + PET(5) = 62``.
 
     The ``entities`` column carries the canonical JSON-encoded BIDS
     entity dict; the converter and ``bidsmgr-rebuild`` use it as the
@@ -1226,6 +1532,7 @@ def _unified_column_order(df: pd.DataFrame) -> list[str]:
         + [c for c in PROBE_COLUMNS if c in df.columns]
         + [c for c in EXTENDED_COLUMNS if c in df.columns]
         + [c for c in EEG_MEG_COLUMNS if c in df.columns]
+        + [c for c in PET_COLUMNS if c in df.columns]
     )
 
 
@@ -1240,7 +1547,7 @@ def _finalize_unified_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     all_cols = (
         list(TSV_COLUMNS) + list(BIDS_GUESS_COLUMNS) + list(BIDS_ENTITIES_COLUMNS)
         + list(DATASET_COLUMNS) + list(PROBE_COLUMNS) + list(EXTENDED_COLUMNS)
-        + list(EEG_MEG_COLUMNS)
+        + list(EEG_MEG_COLUMNS) + list(PET_COLUMNS)
     )
     for col in all_cols:
         if col not in df.columns:
@@ -1351,6 +1658,7 @@ def run_scan(
     n_jobs: int = 1,
     skip_bids_guess: bool = False,
     probe_convert: bool = False,
+    preview_converter_fields: bool = True,
     dataset: Optional[str] = None,
     line_freq: Optional[float] = None,
     montage: Optional[str] = None,
@@ -1362,8 +1670,11 @@ def run_scan(
 
     Walks ``dicom_root`` once for each enabled modality scanner:
 
-    * MRI scanner (``scan_dicoms_long``) — finds DICOM series.
+    * MRI scanner (``scan_dicoms_long``) — finds DICOM series, including
+      PET DICOM (which dcm2niix converts like any other).
     * EEG/MEG scanner (``scan_eeg_meg``) — finds raw EEG/MEG/iEEG/NIRS.
+    * ECAT scanner (``scan_ecat``) — finds ECAT PET, PET's non-DICOM
+      native format.
 
     Both branches run on the same input root; they look at non-
     overlapping file types so both can find their own content even in
@@ -1410,6 +1721,22 @@ def run_scan(
         montage=montage,
     )
 
+    # ECAT branch: a third independent walk. ECAT is PET's non-DICOM native
+    # format (Siemens HRRT and older CTI scanners), detected by signature
+    # rather than extension, so it cannot collide with the other two walks.
+    df_ecat = scan_ecat(Path(dicom_root), cancel_check=cancel_check)
+    if not df_ecat.empty:
+        df_ecat["dataset"] = dataset_slug or ""
+        # Each scanner numbers its subjects from sub-001 independently, so in a
+        # tree holding both ECAT and other sources the labels would collide and
+        # the later rows would silently overwrite the earlier ones at convert
+        # time. Shift the ECAT block past everything already claimed.
+        _renumber_subjects_after(df_ecat, (df, df_eeg))
+        df_eeg = (
+            df_ecat if df_eeg.empty
+            else pd.concat([df_eeg, df_ecat], ignore_index=True, sort=False)
+        )
+
     if df.empty and df_eeg.empty:
         log.warning("no DICOMs or EEG/MEG recordings found under %s", dicom_root)
         empty = _empty_unified_dataframe()
@@ -1422,12 +1749,14 @@ def run_scan(
             if col not in df_eeg.columns:
                 _init_object_column(df_eeg, col)
         merged = _finalize_unified_dataframe(df_eeg)
-        _apply_user_exclusions(merged, exclusions)
+        _finish_unified_frame(merged, exclusions)
         merged.to_csv(output_tsv, sep="\t", index=False, columns=_unified_column_order(merged))
         print(f"Inventory written to: {output_tsv}")
         scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
         if scaffold_path is not None:
             print(f"Recording-metadata scaffold written to: {scaffold_path}")
+        if preview_converter_fields:
+            _write_converter_preview(merged, None, Path(output_tsv))
         log.warning(
             "no DICOMs found; the inventory has only EEG/MEG rows. "
             "files_by_uid sidecar will not be written."
@@ -1498,16 +1827,10 @@ def run_scan(
         merged = df
     merged = _finalize_unified_dataframe(merged)
 
-    # User exclusions run last, on the unified frame, so they cover MRI +
-    # EEG/MEG rows and stamp the same proposed_issues cell after non-image
-    # flagging (mutates in place; reversible).
-    _apply_user_exclusions(merged, exclusions)
-
-    # Heads-up (warnings chip + Issues dialog + log) if the scan pooled
-    # multiple DICOM studies. Runs after non-image flagging + user exclusions
-    # so it only appends to proposed_issues and never downgrades a more severe
-    # row state.
-    _flag_mixed_study_descriptions(merged)
+    # Exclusions, name collisions and the mixed-study heads-up, on the unified
+    # frame so they cover MRI and EEG/MEG alike. Shared with the EEG-only path
+    # above, which is what stopped them drifting apart again.
+    _finish_unified_frame(merged, exclusions)
 
     merged.to_csv(
         output_tsv, sep="\t", index=False,
@@ -1521,6 +1844,11 @@ def run_scan(
     scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
     if scaffold_path is not None:
         print(f"Recording-metadata scaffold written to: {scaffold_path}")
+
+    # What the conversion will answer by itself, so the metadata template can
+    # show it instead of an empty box for a field nobody has to fill in.
+    if preview_converter_fields:
+        _write_converter_preview(merged, probe_stats, Path(output_tsv))
 
     # Always write the per-UID DICOM file map next to the TSV. ``bidsmgr-convert``
     # reads this sidecar to find the source files for each MRI row's dcm2niix call.
@@ -1632,7 +1960,34 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
 
+    parser.add_argument(
+        "--no-converter-preview", action="store_true",
+        help=(
+            "Do not record what the conversion will fill in by itself. By "
+            "default the scan notes, per kind of file, the values dcm2niix and "
+            "mne-bids produce, so the metadata form can show them instead of "
+            "an empty box for a field nobody has to answer. Costs nothing "
+            "extra: it reads what the scan and any probe conversion already "
+            "produced."
+        ),
+    )
+    parser.add_argument(
+        "--schema", default=None, metavar="VERSION",
+        help=(
+            "Which BIDS version to work to (for example 1.11.1). Decides which "
+            "fields are declared and which entities a filename may carry. "
+            "Default: the newest version shipped."
+        ),
+    )
+
     args = parser.parse_args(argv)
+    # One version for the whole run, adopted before any schema question is
+    # asked. Without this the flag would reach the validator alone and a
+    # dataset could be filled in against one version and checked against
+    # another.
+    from ..schema import set_active_version
+    set_active_version(args.schema)
+
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 
@@ -1678,6 +2033,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             Path(args.dicom_root), staged_tsv,
             n_jobs=args.jobs, skip_bids_guess=args.no_bids_guess,
             probe_convert=args.probe_convert,
+            preview_converter_fields=not args.no_converter_preview,
             dataset=args.dataset or bids_root.name,
             line_freq=args.line_freq, montage=args.montage,
             user_hints=user_hints, exclusions=exclusions,
@@ -1699,6 +2055,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         n_jobs=args.jobs,
         skip_bids_guess=args.no_bids_guess,
         probe_convert=args.probe_convert,
+        preview_converter_fields=not args.no_converter_preview,
         dataset=args.dataset,
         line_freq=args.line_freq,
         montage=args.montage,

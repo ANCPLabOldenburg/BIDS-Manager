@@ -126,7 +126,12 @@ class Dcm2niixDirect:
         # (b) a raw UID is ~64 chars (130 for a pair), which pushes
         # deep Windows BIDS trees past the 260-char ``MAX_PATH`` limit
         # and trips dcm2niix with ``rc=2``.
-        dicoms_dir = staging_dir / _safe_dicoms_dirname(task.series_uid)
+        # The basename identifies a row that has no UID; by this point it is
+        # already known to be unique, because conversion refuses to start
+        # otherwise.
+        dicoms_dir = staging_dir / _safe_dicoms_dirname(
+            task.series_uid, task.basename,
+        )
         n_staged = _stage_dicoms(task.source_files, dicoms_dir)
         if n_staged == 0:
             return ConvertResult(
@@ -195,7 +200,7 @@ class Dcm2niixDirect:
 # ---------------------------------------------------------------------------
 
 
-def _safe_dicoms_dirname(series_uid: str) -> str:
+def _safe_dicoms_dirname(series_uid: str, fallback: str = "") -> str:
     """Return the per-series staging dir name as ``_dicoms_<hash>``.
 
     The raw ``series_uid`` is unsuitable as a directory component:
@@ -210,8 +215,16 @@ def _safe_dicoms_dirname(series_uid: str) -> str:
     A 12-hex SHA-1 prefix is unique in practice (one subject's batch
     has on the order of 10² series — collision probability ≈ 2⁻⁴⁰)
     and keeps the dir at 20 chars including the ``_dicoms_`` prefix.
+
+    ``fallback`` names the row when it has no UID to hash. Only DICOM carries a
+    SeriesInstanceUID: every ECAT, EEG and MEG row has an EMPTY one, and hashing
+    the empty string gives ``da39a3ee5e6b`` for all of them, so two such rows in
+    one subject shared a staging directory and the second failed with
+    FileExistsError. Three ECAT phantoms hit exactly that.
     """
-    digest = hashlib.sha1(series_uid.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha1(
+        (series_uid or fallback or "").encode("utf-8")
+    ).hexdigest()[:12]
     return f"_dicoms_{digest}"
 
 

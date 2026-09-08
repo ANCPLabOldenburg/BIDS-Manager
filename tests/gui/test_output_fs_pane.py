@@ -313,6 +313,13 @@ def test_convert_finished_refreshes_output_pane(qtbot, tmp_path: Path) -> None:
     (bids_parent / "study").mkdir()
     (bids_parent / "study" / "marker.tsv").write_text("x\n")
 
+    # Convert finishing kicks off the post-convert chain, which ends in a MODAL
+    # message box. Nothing in a headless run can dismiss it, so leaving it armed
+    # makes this test a race: it passed only because the chain used to finish
+    # after the assertions did. Silence the dialog, which is not what this test
+    # is about.
+    panel._show_convert_dialog = lambda *_a, **_k: None
+
     panel._on_convert_finished(rc=0, bids_parent=bids_parent)
     _wait_scan_idle(qtbot, panel._output_pane)
 

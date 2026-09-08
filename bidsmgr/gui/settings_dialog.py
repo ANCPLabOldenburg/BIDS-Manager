@@ -89,6 +89,7 @@ class SettingsDialog(QDialog):
         v = QVBoxLayout(self)
 
         tabs = QTabWidget()
+        tabs.addTab(self._build_bids_version_tab(), "BIDS version")
         tabs.addTab(self._build_display_tab(), "Display")
         tabs.addTab(self._build_system_tab(), "System")
         tabs.addTab(self._build_scan_tab(), "Scan")
@@ -224,6 +225,18 @@ class SettingsDialog(QDialog):
             "naming with the actual file count + extensions)"
         )
         form.addRow("Probe:", self._scan_probe)
+
+        self._scan_preview = QCheckBox(
+            "Record what the conversion fills in by itself"
+        )
+        self._scan_preview.setToolTip(
+            "Note, per kind of file, the values dcm2niix and mne-bids produce, "
+            "so the metadata form can show them instead of asking for a field "
+            "nobody has to answer.\n\nCosts nothing extra: it reads what the "
+            "scan, and any probe conversion, already produced. With Probe on "
+            "it covers MRI and PET as well as EEG and MEG."
+        )
+        form.addRow("Converter fields:", self._scan_preview)
 
         self._scan_skip_bids_guess = QCheckBox(
             "Skip dcm2niix BidsGuess classifier (use only the legacy "
@@ -596,6 +609,72 @@ class SettingsDialog(QDialog):
         v.addStretch(1)
         return w
 
+    def _build_bids_version_tab(self) -> QWidget:
+        """Which version of the standard this session works to.
+
+        Its own tab, and the first one, because it is not a validation
+        preference. It decides which fields every metadata form asks for, which
+        entities a filename may carry, what gets stamped into
+        dataset_description.json and what validation reports. It used to sit
+        under Validation, which is where it reached when validation was the only
+        thing that read it.
+        """
+        w = QWidget()
+        v = QVBoxLayout(w)
+
+        box = QGroupBox("BIDS version")
+        form = QFormLayout(box)
+
+        self._validate_schema = QComboBox()
+        self._validate_schema.addItem("Newest available (recommended)", userData="")
+        for ver in schema.available_versions():
+            self._validate_schema.addItem(f"BIDS {ver}", userData=ver)
+        self._validate_schema.setToolTip(
+            "The version of BIDS this session works to. Several ship with "
+            "BIDS Manager.\n\nChoose an older one to work to a dataset that "
+            "was built against it, so the forms ask for that version's fields "
+            "and validation judges it by that version's rules."
+        )
+        self._validate_schema.currentIndexChanged.connect(self._describe_bids_version)
+        form.addRow("Work to:", self._validate_schema)
+
+        self._version_summary = QLabel()
+        self._version_summary.setWordWrap(True)
+        self._version_summary.setStyleSheet("color: #8b949e;")
+        form.addRow("", self._version_summary)
+        v.addWidget(box)
+
+        note = QLabel(
+            "Applies to the whole pipeline: what the metadata forms ask for, "
+            "which entities a filename may carry, the BIDSVersion written into "
+            "dataset_description.json, and what validation reports.\n\n"
+            "The command line takes the same choice per run, as --schema."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #8b949e;")
+        v.addWidget(note)
+        v.addStretch(1)
+        return w
+
+    def _describe_bids_version(self) -> None:
+        """Say what the highlighted version actually is, in its own terms.
+
+        A version number alone does not tell anyone what changes. The counts do,
+        and they come from the schema rather than from a note that would go
+        stale.
+        """
+        chosen = self._validate_schema.currentData() or None
+        try:
+            namespace = schema.get_schema(chosen)
+            self._version_summary.setText(
+                f"BIDS {namespace.bids_version}: "
+                f"{len(namespace.objects.datatypes)} datatypes, "
+                f"{len(namespace.rules.entities)} entities, "
+                f"{len(namespace.objects.metadata)} metadata fields."
+            )
+        except Exception:
+            self._version_summary.setText("")
+
     def _build_validation_tab(self) -> QWidget:
         """Validation-engine (bidsval) knobs.
 
@@ -608,23 +687,6 @@ class SettingsDialog(QDialog):
 
         box = QGroupBox("Validation engine (bidsval)")
         form = QFormLayout(box)
-
-        # BIDS schema version. bidsval bundles several; "" = its default.
-        self._validate_schema = QComboBox()
-        self._validate_schema.addItem("Bundled default (recommended)", userData="")
-        try:
-            import bidsval
-            for ver in bidsval.available_versions():
-                self._validate_schema.addItem(f"BIDS schema {ver}", userData=ver)
-        except Exception:
-            pass
-        self._validate_schema.setToolTip(
-            "Validate against this BIDS schema version. bidsval bundles "
-            "several versions; the bundled default tracks the BIDS release "
-            "BIDS Manager ships with. Picking an older version validates a "
-            "dataset against that version's rules."
-        )
-        form.addRow("BIDS schema version:", self._validate_schema)
 
         self._validate_max_rows = QSpinBox()
         self._validate_max_rows.setRange(1, 10_000_000)
@@ -719,6 +781,7 @@ class SettingsDialog(QDialog):
 
         self._scan_jobs.setValue(max(1, min(s.scan_n_jobs, cap)))
         self._scan_probe.setChecked(s.scan_probe_convert)
+        self._scan_preview.setChecked(s.scan_converter_preview)
         self._scan_skip_bids_guess.setChecked(s.scan_skip_bids_guess)
 
         self._convert_jobs.setValue(max(1, min(s.convert_n_jobs, cap)))
@@ -733,9 +796,10 @@ class SettingsDialog(QDialog):
         self._post_validate_strict.setChecked(s.post_validate_strict)
         self._post_validate_html.setChecked(s.post_validate_html)
 
-        # Validation engine.
+        # BIDS version, then the validation engine's own knobs.
         sidx = self._validate_schema.findData(s.validate_schema_version)
         self._validate_schema.setCurrentIndex(sidx if sidx >= 0 else 0)
+        self._describe_bids_version()
         self._validate_max_rows.setValue(max(1, int(s.validate_max_rows)))
         shidx = self._validate_show.findData(s.validate_show)
         self._validate_show.setCurrentIndex(shidx if shidx >= 0 else 0)
@@ -790,6 +854,7 @@ class SettingsDialog(QDialog):
 
         s.scan_n_jobs = self._scan_jobs.value()
         s.scan_probe_convert = self._scan_probe.isChecked()
+        s.scan_converter_preview = self._scan_preview.isChecked()
         s.scan_skip_bids_guess = self._scan_skip_bids_guess.isChecked()
 
         s.convert_n_jobs = self._convert_jobs.value()
@@ -811,6 +876,10 @@ class SettingsDialog(QDialog):
         s.validate_flag_todos = self._validate_flag_todos.isChecked()
 
         s.save()
+        # Adopt the chosen version now rather than at the next launch: every
+        # schema answer in the process is memoised, so this also drops the
+        # answers about the old one.
+        schema.set_active_version(s.validate_schema_version)
         self.accept()
 
 

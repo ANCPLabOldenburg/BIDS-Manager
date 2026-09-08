@@ -116,6 +116,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     persisted = AppSettings.load()
     initial_theme = args.theme or persisted.theme
 
+    # Which BIDS version this session speaks. Set before any window exists, so
+    # the first form built already asks the right questions. Until this, the
+    # setting reached the validator alone: a dataset could be checked against
+    # one version while being filled in against another.
+    from .schema import set_active_version
+    set_active_version(persisted.validate_schema_version)
+
     theme = ThemeManager(app, font_scale=persisted.font_scale)
     theme.apply(initial_theme)
 

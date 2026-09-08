@@ -54,6 +54,8 @@ log = logging.getLogger(__name__)
 # the dataset display name + a missing flag ride alongside for the delegate.
 _RECENT_PATH_ROLE = Qt.ItemDataRole.UserRole
 _RECENT_NAME_ROLE = Qt.ItemDataRole.UserRole + 1
+# The dataset's own title, when it differs from the folder name.
+_RECENT_TITLE_ROLE = Qt.ItemDataRole.UserRole + 4
 _RECENT_MISSING_ROLE = Qt.ItemDataRole.UserRole + 2
 
 # Static resource links surfaced in the "Getting started" card. Texts are
@@ -64,12 +66,27 @@ _RESOURCE_LINKS: tuple[tuple[str, str], ...] = (
     ("Tutorial walkthrough", "https://ancplaboldenburg.github.io/bids_manager_documentation/tutorial.html"),
     ("Source code on GitHub", "https://github.com/ANCPLabOldenburg/BIDS-Manager"),
 )
-# Sample datasets (hosted on the UOL cloud) the docs offer for trying the tool.
+# Sample datasets, offered two ways: straight to the download for somebody who
+# knows which one they want, and to the documentation section for somebody who
+# does not. The section says what each dataset demonstrates and what a full run
+# of it produces, which a bare link cannot.
+#
+# These are hosted on the UOL cloud and must be kept in step with the "Pick a
+# dataset" section of the tutorial page. They have drifted before: the list here
+# had four while the documentation offered six, and one share link was reissued
+# when its dataset changed, so the application handed out a stale file. If you
+# add or replace a dataset, change both.
 _SAMPLE_DATASETS: tuple[tuple[str, str], ...] = (
     ("MRI walkthrough dataset", "https://cloud.uol.de/s/g9gMPpwL7Xg49y9/download"),
+    ("Advanced MRI (Siemens) dataset", "https://cloud.uol.de/s/ZxaZCtHJPLjtDbR/download"),
+    ("PET, DICOM and ECAT with blood", "https://cloud.uol.de/s/CGcjfTpxzFWnrdz/download"),
     ("EEG motor-imagery dataset", "https://cloud.uol.de/s/T66zc5mN4eeZPGK/download"),
     ("MEG Elekta sample dataset", "https://cloud.uol.de/s/btGeke5NNkDcs6G/download"),
-    ("Advanced MRI (Siemens) dataset", "https://cloud.uol.de/s/ZxaZCtHJPLjtDbR/download"),
+    ("Multimodal: MRI, PET, EEG and MEG", "https://cloud.uol.de/s/o6XCk6zH9DYpoes/download"),
+)
+_SAMPLE_DATASETS_URL = (
+    "https://ancplaboldenburg.github.io/bids_manager_documentation/"
+    "tutorial.html#datasets"
 )
 
 
@@ -95,17 +112,38 @@ def _parse_qcolor(value: str) -> QColor:
 
 
 def _dataset_display_name(bids_root: Path) -> str:
-    """Dataset Name from ``dataset_description.json``, else the folder name."""
-    dd = Path(bids_root) / "dataset_description.json"
-    if dd.exists():
-        try:
-            data = json.loads(dd.read_text(encoding="utf-8"))
-            name = str(data.get("Name", "")).strip()
-            if name:
-                return name
-        except (OSError, ValueError):
-            pass
+    """What this project is called: its folder name.
+
+    It used to be the ``Name`` from ``dataset_description.json``, falling back
+    to the folder. That made the label a user reads as "which project am I in"
+    an editable metadata field: typing a publication title into the template
+    renamed the project in the interface while the folder on disk stayed put,
+    and the two drifted apart with nothing to say so.
+
+    The folder is the project's identity everywhere else, in the recent list, in
+    the ``dataset`` column, in the output path, so it is the name shown. The
+    title lives beside it, see :func:`_dataset_title`.
+    """
     return Path(bids_root).name
+
+
+def _dataset_title(bids_root: Path) -> str:
+    """The dataset's own title, when it says something the folder does not.
+
+    Empty when the two agree, which is the usual case and needs no second
+    label, or when there is no dataset description to read.
+    """
+    dd = Path(bids_root) / "dataset_description.json"
+    if not dd.exists():
+        return ""
+    try:
+        data = json.loads(dd.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    title = str(data.get("Name", "") or "").strip()
+    return "" if title == Path(bids_root).name else title
 
 
 class _RecentItemDelegate(QStyledItemDelegate):
@@ -118,6 +156,7 @@ class _RecentItemDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index) -> None:  # noqa: N802
         pal = CUR()
         name = str(index.data(_RECENT_NAME_ROLE) or "")
+        title = str(index.data(_RECENT_TITLE_ROLE) or "")
         path = str(index.data(_RECENT_PATH_ROLE) or "")
         missing = bool(index.data(_RECENT_MISSING_ROLE))
 
@@ -139,11 +178,31 @@ class _RecentItemDelegate(QStyledItemDelegate):
         painter.setFont(name_font)
         painter.setPen(QColor(pal["dim"] if missing else pal["accent"]))
         label = f"{name}   (missing)" if missing else name
+        name_rect = QRect(rect.x(), rect.y(), rect.width(), half)
         painter.drawText(
-            QRect(rect.x(), rect.y(), rect.width(), half),
+            name_rect,
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             label,
         )
+
+        # The dataset's own title, beside the project name and in a quieter
+        # tone: it says what the data IS, where the name says where it lives.
+        if title and not missing:
+            used = painter.fontMetrics().horizontalAdvance(label) + 10
+            title_font = QFont(option.font)
+            title_font.setBold(False)
+            title_font.setItalic(True)
+            painter.setFont(title_font)
+            painter.setPen(QColor(pal["muted"]))
+            room = rect.width() - used
+            if room > 40:
+                painter.drawText(
+                    QRect(rect.x() + used, rect.y(), room, half),
+                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                    painter.fontMetrics().elidedText(
+                        title, Qt.TextElideMode.ElideRight, room,
+                    ),
+                )
 
         # Path (dim, just one step smaller than the name and middle-elided).
         # The app font is sized in PIXELS, so ``pointSizeF()`` is -1; derive the
@@ -360,6 +419,12 @@ class WelcomePanel(QWidget):
         lay.addWidget(sample)
         for text, url in _SAMPLE_DATASETS:
             lay.addWidget(self._link_label(text, url))
+        # One line rather than a paragraph: the card already runs past the fold
+        # on a first run, and the label says plainly enough what the link is for.
+        lay.addWidget(self._link_label(
+            "Compare them, and see what each one demonstrates",
+            _SAMPLE_DATASETS_URL,
+        ))
         return card
 
     def _build_updates_card(self) -> QFrame:
@@ -429,6 +494,7 @@ class WelcomePanel(QWidget):
             item = QListWidgetItem()
             item.setData(_RECENT_PATH_ROLE, p)
             item.setData(_RECENT_NAME_ROLE, _dataset_display_name(Path(p)) if exists else Path(p).name)
+            item.setData(_RECENT_TITLE_ROLE, _dataset_title(Path(p)) if exists else "")
             item.setData(_RECENT_MISSING_ROLE, not exists)
             if not exists:
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)

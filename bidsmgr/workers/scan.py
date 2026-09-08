@@ -69,6 +69,8 @@ class ScanWorker(QThread):
       behaviour in tests; views pass cpu-count-derived defaults).
     * ``skip_bids_guess`` — skip the dcm2niix BidsGuess classifier.
     * ``probe_convert``   — extra per-series dcm2niix probe pass.
+    * ``preview_converter_fields`` — record what the conversion answers
+      by itself, so the metadata form can show it rather than ask.
     """
 
     progress = pyqtSignal(str)
@@ -89,6 +91,7 @@ class ScanWorker(QThread):
         n_jobs: int = 1,
         skip_bids_guess: bool = False,
         probe_convert: bool = False,
+        preview_converter_fields: bool = True,
         user_hints=None,
         exclusions=None,
         parent=None,
@@ -102,6 +105,7 @@ class ScanWorker(QThread):
         self._n_jobs = n_jobs
         self._skip_bids_guess = skip_bids_guess
         self._probe_convert = probe_convert
+        self._preview_converter_fields = preview_converter_fields
         # User scan rules (classifier hints + exclusions), already converted
         # to the engine's frozen dataclasses by the caller.
         self._user_hints = user_hints
@@ -146,6 +150,7 @@ class ScanWorker(QThread):
                 n_jobs=self._n_jobs,
                 skip_bids_guess=self._skip_bids_guess,
                 probe_convert=self._probe_convert,
+                preview_converter_fields=self._preview_converter_fields,
                 dataset=self._dataset,
                 line_freq=self._line_freq,
                 montage=self._montage,

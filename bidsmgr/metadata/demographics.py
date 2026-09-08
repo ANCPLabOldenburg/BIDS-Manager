@@ -11,6 +11,8 @@ demographic columns.
 
 from __future__ import annotations
 
+import re
+
 import logging
 from pathlib import Path
 from typing import Optional
@@ -52,6 +54,43 @@ def normalize_handedness(value: object) -> str:
     if s in ("R", "L", "A"):  # already canonical
         return s
     return _HAND_MAP.get(s.lower(), "")
+
+
+_DICOM_AGE_RE = re.compile(r"^\s*(\d{1,3})\s*([DWMY])\s*$", re.IGNORECASE)
+
+# How many of each DICOM age unit make a year. Days and weeks are approximate
+# by nature; BIDS wants years and does not ask for more precision than that.
+_AGE_UNIT_YEARS = {"Y": 1.0, "M": 12.0, "W": 52.0, "D": 365.0}
+
+
+def normalize_age(value: object) -> str:
+    """Return an age in YEARS as a bare number, or ``""`` when unusable.
+
+    DICOM writes ``PatientAge`` as three digits and a unit, so a 65-year-old is
+    ``065Y`` and an infant may be ``018M``. BIDS wants ``age`` to be a number,
+    and the raw DICOM string was being copied into participants.tsv unchanged,
+    which the validator rightly rejects as not a number.
+
+    A value that is already numeric passes through. Anything else that cannot
+    be read as an age becomes blank rather than a guess, because a wrong age is
+    worse than a missing one.
+    """
+    s = str(value or "").strip()
+    if not s:
+        return ""
+
+    match = _DICOM_AGE_RE.match(s)
+    if match:
+        count, unit = int(match.group(1)), match.group(2).upper()
+        years = count / _AGE_UNIT_YEARS[unit]
+        # Whole years stay whole, so a 65-year-old is "65" and not "65.0".
+        return str(int(years)) if years == int(years) else f"{years:.2f}".rstrip("0")
+
+    try:
+        number = float(s)
+    except ValueError:
+        return ""
+    return str(int(number)) if number == int(number) else str(number)
 
 
 def _participant_key(value: object) -> str:

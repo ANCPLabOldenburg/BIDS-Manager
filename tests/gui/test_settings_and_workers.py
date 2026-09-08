@@ -303,3 +303,38 @@ def test_validate_worker_emits_failed_for_missing_target(qtbot, tmp_path: Path) 
     rc, _ = blocker.args
     assert rc != 0
     worker.wait()
+
+
+def test_the_post_convert_steps_name_the_datasets_they_may_touch(qtbot, tmp_path):
+    """The GUI hands the post-convert steps the PARENT of the dataset, because
+    that is where convert puts each one. Projects are kept side by side, so
+    without saying which datasets this run produced, the metadata step wrote one
+    project's dataset name into every neighbour."""
+    import pandas as pd
+    from bidsmgr.gui.converter_panel import ConverterPanel
+    from bidsmgr.gui.models import InventoryTableModel
+
+    panel = ConverterPanel()
+    qtbot.addWidget(panel)
+
+    # Free path: the inventory says which datasets it produced.
+    panel._model = InventoryTableModel(pd.DataFrame([
+        {"include": "1", "dataset": "StudyA"},
+        {"include": "1", "dataset": "StudyA"},
+    ]))
+    assert panel._converted_datasets() == ["StudyA"]
+
+    # Project mode: exactly the project, whatever the table says.
+    panel._bids_root = tmp_path / "MyProject"
+    assert panel._converted_datasets() == ["MyProject"]
+
+
+
+def test_no_filter_is_not_the_same_as_an_empty_one(qtbot):
+    """None means "nothing to filter on"; an empty list would mean "touch
+    nothing", which would silently skip the step."""
+    from bidsmgr.gui.converter_panel import ConverterPanel
+
+    panel = ConverterPanel()
+    qtbot.addWidget(panel)
+    assert panel._converted_datasets() is None

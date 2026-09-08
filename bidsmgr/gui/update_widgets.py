@@ -28,7 +28,8 @@ import logging
 import os
 from typing import Optional
 
-from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, QTimer, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
@@ -259,6 +260,27 @@ def _on_startup_check_done(window: QWidget, latest: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Where the release notes live, and how a version becomes an anchor on that
+# page: 1.2.6 is ``#v126``, 1.2.4.2 is ``#v1242``. Dropping the dots is the
+# convention the documentation already uses.
+_UPDATES_URL = (
+    "https://ancplaboldenburg.github.io/bids_manager_documentation/updates.html"
+)
+
+
+def release_notes_url(version: str) -> str:
+    """The release-notes page, anchored at ``version`` when that is possible.
+
+    A version that is not the usual dotted digits (a dev build, a local
+    install) still gets the page, just not the anchor. Better to open the notes
+    at the top than to send someone to a fragment that does not exist.
+    """
+    anchor = version.replace(".", "").strip()
+    if anchor and anchor.isdigit():
+        return f"{_UPDATES_URL}#v{anchor}"
+    return _UPDATES_URL
+
+
 def _prompt_and_launch_update(
     parent: QWidget,
     current: str,
@@ -266,29 +288,44 @@ def _prompt_and_launch_update(
 ) -> None:
     """Confirmation dialog → detached helper → GUI quit.
 
-    Always shows two buttons: ``Yes`` (update now) and ``No`` (defer).
-    The default button is ``No`` so an accidental Enter / Space while
-    the main window has focus cannot trigger a self-terminating update.
-    The dialog reopens on the next launch if the user is still on an
-    older version.
-    """
-    msg = QMessageBox(parent)
-    msg.setWindowTitle("Update available")
-    msg.setIcon(QMessageBox.Icon.Information)
-    msg.setText(
-        f"A newer bids-manager release is available.\n\n"
-        f"Installed: {current}\n"
-        f"PyPI:        {latest}\n\n"
-        "Update now? The GUI will close, install the update, and reopen."
-    )
-    btn_yes = msg.addButton("Yes", QMessageBox.ButtonRole.AcceptRole)
-    btn_no = msg.addButton("No", QMessageBox.ButtonRole.RejectRole)
-    msg.setDefaultButton(btn_no)
-    msg.setEscapeButton(btn_no)
-    msg.exec()
+    Three buttons. ``What changed`` opens the release notes for the version on
+    offer and leaves the dialog up, because deciding whether to take an update
+    is exactly the moment somebody wants to read what is in it, and an update
+    closes the application to install itself. ``Yes`` updates, ``No`` defers.
 
-    if msg.clickedButton() is btn_yes:
-        _launch_helper_and_quit(parent)
+    The default button is ``No`` so an accidental Enter / Space while the main
+    window has focus cannot trigger a self-terminating update. The dialog
+    reopens on the next launch if the user is still on an older version.
+    """
+    while True:
+        msg = QMessageBox(parent)
+        msg.setWindowTitle("Update available")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(
+            f"A newer bids-manager release is available.\n\n"
+            f"Installed: {current}\n"
+            f"PyPI:        {latest}\n\n"
+            "Update now? The GUI will close, install the update, and reopen."
+        )
+        msg.setInformativeText(
+            "Not sure? Read what changed in this release first."
+        )
+        btn_notes = msg.addButton("What changed", QMessageBox.ButtonRole.ActionRole)
+        btn_yes = msg.addButton("Yes", QMessageBox.ButtonRole.AcceptRole)
+        btn_no = msg.addButton("No", QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(btn_no)
+        msg.setEscapeButton(btn_no)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked is btn_notes:
+            # Opening the notes is not an answer to the question, so ask it
+            # again rather than making the user wait for the next launch.
+            QDesktopServices.openUrl(QUrl(release_notes_url(latest)))
+            continue
+        if clicked is btn_yes:
+            _launch_helper_and_quit(parent)
+        return
 
 
 def _launch_helper_and_quit(parent: QWidget) -> None:
@@ -308,5 +345,6 @@ def _launch_helper_and_quit(parent: QWidget) -> None:
 __all__ = [
     "attach_update_widgets",
     "check_for_updates_interactive",
+    "release_notes_url",
     "run_startup_check",
 ]

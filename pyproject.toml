@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "1.2.5.2"
+version = "1.2.6"
 description = "Schema-driven BIDS converter, curator, and editor (re-imagination of BIDS-Manager v0.2.5)"
 readme = "README.md"
 license = "MIT"
@@ -49,12 +49,17 @@ dependencies = [
     "bidsschematools>=1.0,<=1.2.2",
     "ancpbids>=0.3,<=0.3.1",
 
-    # BIDS validation engine. The Editor validator + ``bidsmgr-validate`` delegate
-    # to bidsval (schema-driven, pydantic-typed, false-positive-verified against
-    # the reference validator). It pulls only deps BIDS Manager already ships
+    # BIDS validation engine, and the interpreter of the BIDS schema. The Editor
+    # validator + ``bidsmgr-validate`` delegate to bidsval (schema-driven,
+    # pydantic-typed, false-positive-verified against the reference validator),
+    # and since 0.1.0 ``bidsmgr/schema/`` reads which sidecar fields the standard
+    # declares from ``bidsval.schema`` rather than deriving them again here (see
+    # CLAUDE.md guard 8). It pulls only deps BIDS Manager already ships
     # (bidsschematools, pydantic, nibabel, pandas, mne), so the footprint barely
-    # changes. 0.0.x is pre-1.0; allow patch releases, not a 0.1 minor bump.
-    "bidsval>=0.0.2,<0.1.0",
+    # changes. 0.1.0 is the first release carrying that namespace; 0.1.1 adds
+    # the INVALID_LOCATION check for a well-named file in a folder that is not
+    # a datatype, which the Editor needs to stop painting such files green.
+    "bidsval>=0.1.1,<0.2.0",
 
     # GUI.
     "pyqt6>=6.5,<=6.11.0",
@@ -66,6 +71,16 @@ dependencies = [
     "dcm2niix>=1.0.20240202,<=1.0.20260416",
     "pydicom>=2.4,<=3.0.2",
     "nibabel>=5.0,<=5.4.2",
+
+    # PET. pet2bids is the reference implementation from the OpenNeuroPET group,
+    # and the work it does that we would otherwise duplicate is real: reading
+    # PMOD blood curves, and parsing the ECAT7 headers our own reader skims.
+    #
+    # It does NOT bring its own dcm2niix. It looks for one on PATH and only
+    # unzips its bundled copy when it finds none, so the binary pinned above is
+    # the one both of us use. BIDS Manager sets DCM2NIIX_PATH explicitly so
+    # there is never a question about which.
+    "pypet2bids>=1.5.1,<2",
 
     # EEG / MEG / iEEG conversion stack.
     "mne>=1.6,<=1.12.1",

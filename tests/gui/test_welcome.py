@@ -147,18 +147,20 @@ def test_resources_card_lists_links(qtbot, isolated_settings) -> None:
     links = [
         l for l in panel.findChildren(QLabel) if l.objectName() == "welcome-link"
     ]
-    # 3 resource links + 4 sample datasets + 1 update-notes link = 8 clickable
-    # links, all external.
-    assert len(links) == 8
+    # 3 resource links + 6 sample datasets + 1 link to the section that
+    # compares them + 1 update-notes link = 11 clickable links, all external.
+    assert len(links) == 11
     assert all(l.openExternalLinks() for l in links)
     hrefs = " ".join(l.text() for l in links)
     assert "bids_manager_documentation" in hrefs       # docs site
     assert "github.com/ANCPLabOldenburg" in hrefs       # source
-    assert "cloud.uol.de" in hrefs                       # sample data
+    assert "cloud.uol.de" in hrefs                       # sample data, direct
+    assert "tutorial.html#datasets" in hrefs             # sample data, compared
     assert "updates.html" in hrefs                       # update notes
-    # Raw URLs never show as the visible text — friendly labels only.
+    # Raw URLs never show as the visible text: friendly labels only.
     assert ">Documentation website<" in hrefs
     assert ">MEG Elekta sample dataset<" in hrefs
+    assert ">Compare them, and see what each one demonstrates<" in hrefs
 
 
 def test_recent_rows_carry_name_and_path(qtbot, isolated_settings, tmp_path) -> None:
@@ -166,6 +168,7 @@ def test_recent_rows_carry_name_and_path(qtbot, isolated_settings, tmp_path) -> 
         _RECENT_MISSING_ROLE,
         _RECENT_NAME_ROLE,
         _RECENT_PATH_ROLE,
+        _RECENT_TITLE_ROLE,
     )
 
     panel = WelcomePanel()
@@ -180,7 +183,14 @@ def test_recent_rows_carry_name_and_path(qtbot, isolated_settings, tmp_path) -> 
         for i in range(panel._recent.count())
     }
     real = by_path[str(root)]
-    assert real.data(_RECENT_NAME_ROLE) == "Fancy Name"      # dataset Name, not slug
+    # The PROJECT is its folder. It used to be the dataset Name, which made the
+    # label a user reads as "which project am I in" an editable metadata field:
+    # typing a publication title renamed the project in the interface while the
+    # folder stayed put.
+    assert real.data(_RECENT_NAME_ROLE) == root.name
+    # The title sits beside it, and only when it says something the folder does
+    # not.
+    assert real.data(_RECENT_TITLE_ROLE) == "Fancy Name"
     assert real.data(_RECENT_MISSING_ROLE) is False
     missing = by_path[str(tmp_path / "gone")]
     assert missing.data(_RECENT_MISSING_ROLE) is True
@@ -246,7 +256,12 @@ def test_project_switcher_shows_and_switches(qapp, isolated_settings, tmp_path) 
     win._on_project_opened(a, tmp_path / "StudyA")
     qapp.processEvents()
     assert not win._header._project_btn.isHidden()
-    assert "Study A" in win._header._project_btn.text()
+    # The pill carries the PROJECT, which is its folder. The dataset's own title
+    # goes in the tooltip and, in a quieter tone, in the menu: a QPushButton
+    # renders one colour and reports its full text as its minimum width, so a
+    # title in here would look like part of the name and widen the header.
+    assert win._header._project_btn.text() == "StudyA"
+    assert "Study A" in win._header._project_btn.toolTip()
 
     # The dropdown lists the current project header + the other recent.
     win._header._rebuild_project_menu()
@@ -255,7 +270,8 @@ def test_project_switcher_shows_and_switches(qapp, isolated_settings, tmp_path) 
     # Switching to a recent rebinds both views + relabels the switcher.
     win._on_switch_project(tmp_path / "StudyB")
     qapp.processEvents()
-    assert "Study B" in win._header._project_btn.text()
+    assert win._header._project_btn.text() == "StudyB"
+    assert "Study B" in win._header._project_btn.toolTip()
     assert win.converter._bids_root == tmp_path / "StudyB"
 
 

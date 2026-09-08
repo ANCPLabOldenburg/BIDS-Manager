@@ -21,6 +21,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QLabel
 
 from bidsmgr.gui.models import COLUMNS, InventoryTableModel
 from bidsmgr.gui.properties_panel import PropertiesPanel
@@ -367,20 +368,62 @@ def test_montage_match_rate_shown_for_eeg(qtbot) -> None:
     assert hints, "montage match-rate hint should be shown"
 
 
-def test_meg_row_has_meg_acquisition_section(qtbot) -> None:
-    """A MEG row shows a MEG ACQUISITION sub-section (and no scalp montage)."""
-    from PyQt6.QtWidgets import QLabel
+def test_meg_row_can_state_a_meg_only_field(qtbot) -> None:
+    """A MEG row is asked about the dewar; the answer is kept for that row.
+
+    The MEG ACQUISITION box that used to hold this is gone. The field is not:
+    it comes from the schema now, with the rest of what a *_meg.json may carry,
+    so nothing had to be listed in code for it to be here.
+    """
     row = _eeg_row(proposed_datatype="meg", bids_guess_suffix="meg", modality="meg",
                    proposed_basename="sub-001_task-rest_meg", montage_suggestion="")
     panel, m = _build_panel_with_model(qtbot, row)
     from bidsmgr.recording_meta import default_spec
     m.set_global_spec(default_spec()); panel.set_selected_row(0)
-    texts = [w.text() for w in panel._body.findChildren(QLabel)]
-    assert any("MEG ACQUISITION" in t for t in texts)
-    assert not any("REFERENCE & MONTAGE" in t for t in texts)
-    # The MEG manual field (dewar position) writes through the override path.
-    panel._on_acq_field_changed("dewar_position", "supine")
-    assert m.global_spec().overrides["sub-001/rec.edf"].dewar_position == "supine"
+
+    m.set_row_template_field(0, "DewarPosition", "supine")
+    assert m.row_template(0) == {"DewarPosition": "supine"}
+    assert m.resolved_sidecar(0)["DewarPosition"].origin == "row"
+
+
+def test_a_row_says_where_an_inherited_value_came_from(qtbot) -> None:
+    """A value the row did not state is attributed, not left mysterious."""
+    from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
+    row = _eeg_row(proposed_datatype="meg", bids_guess_suffix="meg", modality="meg",
+                   proposed_basename="sub-001_task-rest_meg")
+    panel, m = _build_panel_with_model(qtbot, row)
+    spec = RecordingMetaSpec()
+    spec.modality_defaults["meg"] = AcquisitionSpec(institution_name="Oldenburg")
+    m.set_global_spec(spec)
+    panel.set_selected_row(0)
+
+    assert m.resolved_sidecar(0)["InstitutionName"].value == "Oldenburg"
+    assert m.sidecar_origin(0, "InstitutionName") == "the meg defaults"
+
+
+def test_echoing_an_inherited_value_stores_nothing(qtbot) -> None:
+    """Otherwise today's inherited answer freezes into the row, and a later
+    change to the dataset default would skip this one recording."""
+    from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
+    row = _eeg_row(proposed_datatype="meg", bids_guess_suffix="meg", modality="meg")
+    panel, m = _build_panel_with_model(qtbot, row)
+    spec = RecordingMetaSpec()
+    spec.modality_defaults["meg"] = AcquisitionSpec(institution_name="Oldenburg")
+    m.set_global_spec(spec)
+    panel.set_selected_row(0)
+
+    m.set_row_template_field(0, "InstitutionName", "Oldenburg")
+    assert m.row_template(0) == {}
+
+
+def test_a_field_the_table_carries_is_written_to_the_table(qtbot) -> None:
+    """One home per field. PowerLineFrequency is the line_freq column, so
+    answering it in the form must not make a second copy in the scaffold."""
+    row = _eeg_row()
+    panel, m = _build_panel_with_model(qtbot, row)
+    m.set_row_template_field(0, "PowerLineFrequency", "50")
+    assert str(m.dataframe().iloc[0]["line_freq"]) == "50"
+    assert "PowerLineFrequency" not in m.row_template(0)
 
 
 def test_minimal_metadata_title_present(qtbot) -> None:
@@ -390,15 +433,16 @@ def test_minimal_metadata_title_present(qtbot) -> None:
     assert any("MINIMAL METADATA" in t for t in texts)
 
 
-def test_manufacturer_suggestion_hint_shown(qtbot) -> None:
-    """The scan-detected/inferred manufacturer shows as a read-only hint
-    next to the manufacturer field (like the montage match)."""
-    from PyQt6.QtWidgets import QLabel
+def test_manufacturer_suggestion_is_offered_not_applied(qtbot) -> None:
+    """What the scan read out of this recording's header is offered as a choice.
+
+    It is not filled in: a vendor string can always parse wrongly, and a wrong
+    manufacturer is worse than a blank one.
+    """
     row = _eeg_row(manufacturer_suggestion="Brain Products")
-    panel, _m = _build_panel_with_model(qtbot, row)
-    hints = [w.text() for w in panel._body.findChildren(QLabel)
-             if "scan detected" in w.text() and "Brain Products" in w.text()]
-    assert hints
+    panel, m = _build_panel_with_model(qtbot, row)
+    assert "Brain Products" in panel._field_suggestions(0, "Manufacturer")
+    assert "Manufacturer" not in m.row_template(0)
 
 
 def test_per_row_has_no_institution_field(qtbot) -> None:
@@ -432,9 +476,10 @@ def test_nirs_row_has_no_reference_montage_section(qtbot) -> None:
     panel, _m = _build_panel_with_model(qtbot, row)
     texts = [w.text() for w in panel._body.findChildren(QLabel)]
     assert any("MODALITY-SPECIFIC" in t for t in texts)   # still modality-specific
-    assert any("ACQUISITION" in t for t in texts)         # device/institution block
-    assert not any("REFERENCE & MONTAGE" in t for t in texts)
+    assert any("CONVERSION" in t for t in texts)          # line frequency lives there
     assert not any("montage match" in t for t in texts)   # no montage hint
+    # Reference and ground are scalp-EEG concepts; NIRS is never asked.
+    assert not any(t.startswith("reference") or t.startswith("ground") for t in texts)
 
 
 # ---------------------------------------------------------------------------
@@ -490,3 +535,117 @@ def test_mri_row_has_no_psd_button(qtbot) -> None:
 def test_resolve_source_path_none_for_dicom_row(qtbot) -> None:
     panel, _m = _build_panel_with_model(qtbot)  # MRI row has blank source_file
     assert panel._resolve_source_path(0) is None
+
+
+# ---------------------------------------------------------------------------
+# Blood sampling, on a PET row
+# ---------------------------------------------------------------------------
+
+
+def _pet_row(**overrides) -> dict:
+    row = _func_row(
+        modality="pet",
+        proposed_datatype="pet",
+        proposed_basename="sub-001_trc-FDG_pet",
+        bids_guess_suffix="pet",
+        entities=json.dumps({"subject": "001", "tracer": "FDG"}, sort_keys=True),
+        task="",
+        companion_files="",
+    )
+    row.update(overrides)
+    return row
+
+
+def test_blood_section_appears_only_on_pet(qtbot) -> None:
+    """A blood curve is a PET concept; nothing else should be asked about it."""
+    def has_blood(panel: PropertiesPanel) -> bool:
+        return any(
+            "BLOOD SAMPLING" in w.text()
+            for w in panel.findChildren(QLabel)
+            if w.text()
+        )
+
+    pet_panel, _ = _build_panel_with_model(qtbot, _pet_row())
+    assert has_blood(pet_panel)
+
+    func_panel, _ = _build_panel_with_model(qtbot, _func_row())
+    assert not has_blood(func_panel)
+
+
+def test_linking_a_curve_stores_a_tagged_companion(qtbot, tmp_path) -> None:
+    """Blood rides the companion list, tagged so the copier leaves it alone."""
+    from bidsmgr.fixups.blood import parse_blood_role
+
+    panel, model = _build_panel_with_model(qtbot, _pet_row())
+    curve = tmp_path / "plasma.bld"
+    curve.write_text("time\tactivity\n", encoding="utf-8")
+
+    panel._set_blood(0, "plasma", "manual", str(curve))
+
+    stored = json.loads(model.dataframe().iloc[0]["companion_files"])
+    assert len(stored) == 1
+    assert parse_blood_role(stored[0]["suffix"]) == ("plasma", "manual")
+    assert stored[0]["path"] == str(curve)
+
+
+def test_relinking_replaces_rather_than_accumulates(qtbot, tmp_path) -> None:
+    """One curve per series. Picking again corrects the choice."""
+    panel, model = _build_panel_with_model(qtbot, _pet_row())
+    first, second = tmp_path / "a.bld", tmp_path / "b.bld"
+    for f in (first, second):
+        f.write_text("time\tactivity\n", encoding="utf-8")
+
+    panel._set_blood(0, "plasma", "manual", str(first))
+    panel._set_blood(0, "plasma", "automatic", str(second))
+
+    stored = json.loads(model.dataframe().iloc[0]["companion_files"])
+    assert len(stored) == 1
+    assert stored[0]["suffix"] == "blood:plasma:automatic"
+    assert stored[0]["path"] == str(second)
+
+
+def test_clearing_removes_only_that_series(qtbot, tmp_path) -> None:
+    panel, model = _build_panel_with_model(qtbot, _pet_row())
+    for series in ("plasma", "wholeblood"):
+        curve = tmp_path / f"{series}.bld"
+        curve.write_text("time\tactivity\n", encoding="utf-8")
+        panel._set_blood(0, series, "manual", str(curve))
+
+    panel._clear_blood(0, "plasma")
+
+    stored = json.loads(model.dataframe().iloc[0]["companion_files"])
+    assert [s["suffix"] for s in stored] == ["blood:wholeblood:manual"]
+
+
+def test_blood_does_not_appear_in_the_plain_companion_list(qtbot, tmp_path) -> None:
+    """It has its own section, and it is converted rather than copied."""
+    curve = tmp_path / "plasma.bld"
+    curve.write_text("time\tactivity\n", encoding="utf-8")
+    row = _pet_row(companion_files=json.dumps([
+        {"suffix": "blood:plasma:manual", "path": str(curve)},
+        {"suffix": "events", "path": "/tmp/events.tsv"},
+    ]))
+    panel, _ = _build_panel_with_model(qtbot, row)
+
+    assert panel._plain_companions == [("events", "/tmp/events.tsv")]
+
+
+def test_removing_a_plain_companion_matches_by_value(qtbot, tmp_path) -> None:
+    """The regression the hidden rows would otherwise cause.
+
+    The list on screen hides blood, so its row 0 is not the stored row 0.
+    Removing by index would delete the blood curve instead.
+    """
+    curve = tmp_path / "plasma.bld"
+    curve.write_text("time\tactivity\n", encoding="utf-8")
+    row = _pet_row(companion_files=json.dumps([
+        {"suffix": "blood:plasma:manual", "path": str(curve)},
+        {"suffix": "events", "path": "/tmp/events.tsv"},
+    ]))
+    panel, model = _build_panel_with_model(qtbot, row)
+
+    panel._companion_list.setCurrentRow(0)   # "events", the only one shown
+    panel._remove_companion(0)
+
+    stored = json.loads(model.dataframe().iloc[0]["companion_files"])
+    assert [s["suffix"] for s in stored] == ["blood:plasma:manual"]

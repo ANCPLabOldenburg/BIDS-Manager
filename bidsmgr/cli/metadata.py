@@ -18,7 +18,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Sequence, Iterable, Optional
 
 from ..metadata import DatasetMetadata, MetadataReport, run_metadata
 
@@ -49,10 +49,18 @@ def run_metadata_cli(
     write_report: bool = True,
     participants_file: Optional[Path] = None,
     phenotype_files: Optional[list[Path]] = None,
+    datasets: Optional[Sequence[str]] = None,
 ) -> int:
     """Run the metadata engine on every BIDS root under ``target``.
 
     Returns 0 if every root processed cleanly, 1 if any errored.
+
+    ``datasets`` names the roots this run is allowed to touch. Without it the
+    walk finds every BIDS root under ``target``, which is fine for a deliberate
+    command over a folder of datasets and wrong for the step that runs after a
+    conversion: projects are normally kept side by side, so the parent of one is
+    the home of all of them, and this run's dataset name was written into every
+    one of its neighbours.
 
     ``participants_file`` is an optional demographics spreadsheet whose
     ``age`` / ``sex`` / ``handedness`` columns override the inventory; it is
@@ -64,7 +72,7 @@ def run_metadata_cli(
         log.error("not a directory: %s", target)
         return 2
 
-    bids_roots = list(_iter_bids_roots(target, dataset=dataset))
+    bids_roots = list(_iter_bids_roots(target, dataset=dataset, datasets=datasets))
     if not bids_roots:
         log.warning("no BIDS roots found under %s", target)
         return 0
@@ -108,7 +116,10 @@ def run_metadata_cli(
 
 
 def _iter_bids_roots(
-    target: Path, *, dataset: Optional[str] = None,
+    target: Path,
+    *,
+    dataset: Optional[str] = None,
+    datasets: Optional[Sequence[str]] = None,
 ) -> Iterable[Path]:
     """Yield directories that look like BIDS roots under ``target``.
 
@@ -116,6 +127,15 @@ def _iter_bids_roots(
     child. ``target`` itself is checked first; if it qualifies it's
     yielded and we stop. Otherwise immediate subdirectories are checked.
     """
+    if datasets is not None:
+        # Only the roots this run produced. A caller that says which datasets it
+        # means is never given somebody else's.
+        for name in datasets:
+            candidate = target if target.name == name else target / name
+            if _looks_like_bids_root(candidate):
+                yield candidate
+        return
+
     if dataset:
         candidate = target / dataset
         if _looks_like_bids_root(candidate):
@@ -297,7 +317,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
 
+    parser.add_argument(
+        "--schema", default=None, metavar="VERSION",
+        help=(
+            "Which BIDS version to work to (for example 1.11.1). Decides which "
+            "fields are declared and which entities a filename may carry. "
+            "Default: the newest version shipped."
+        ),
+    )
+
     args = parser.parse_args(argv)
+    # One version for the whole run, adopted before any schema question is
+    # asked. Without this the flag would reach the validator alone and a
+    # dataset could be filled in against one version and checked against
+    # another.
+    from ..schema import set_active_version
+    set_active_version(args.schema)
+
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 

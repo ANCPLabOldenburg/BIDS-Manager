@@ -53,21 +53,59 @@ from PyQt6.QtWidgets import (
 import pandas as pd
 
 from .. import schema as schema_mod
+from ..fixups.blood import is_blood_role
+from ..metadata.template_plan import sidecar_section
 from ..project import Project
-from ..recording_meta import COMMON_CAP_MANUFACTURERS, COMMON_MANUFACTURERS
+from ..recording_meta import CURATED_SUGGESTIONS, SCAN_SUGGESTION_COLUMNS
 from . import icons
 from .delegates import builtin_montages
 from .metadata_help import tooltip_for
 from .models import InventoryTableModel
 from .theme_manager import CUR, scaled_px
 from .widgets import BusySpinner, PaneHeader, ValMessage
+from .widgets.template_form import (
+    CollapsibleSection,
+    FieldLabel,
+    build_field_widget,
+    connect_field_widget,
+    field_label_widget,
+    level_legend,
+    read_field_widget,
+    write_field_widget,
+)
 
-# Datatypes that carry recording-metadata (the per-row section appears only
-# for these). MEG has no scalp montage / reference / ground concept.
+# ONE label column for the whole panel. The hand-built rows used 76 and the
+# schema-driven section 140, so the two halves of the panel did not line up with
+# each other. A field name like EEGReference does not fit in 76, so the shared
+# column is wider than the old one and long names elide into it.
+_LABEL_COL = 120
+
+# Datatypes that carry a recording sidecar: the per-row metadata section and the
+# Compute-PSD action appear only for these.
 _EEG_MEG_DATATYPES = frozenset({"eeg", "meg", "ieeg", "nirs"})
 
 # Human display names for the datatypes that carry a recording sidecar.
-_MODALITY_NAMES = {"eeg": "EEG", "meg": "MEG", "ieeg": "iEEG", "nirs": "NIRS"}
+_MODALITY_NAMES = {
+    "eeg": "EEG", "meg": "MEG", "ieeg": "iEEG", "nirs": "NIRS", "pet": "PET",
+}
+
+
+def _answered_field(name: str, value):
+    """A stand-in for a field the schema does not declare for this file.
+
+    A converter can write keys BIDS never mentions. They are still shown, so
+    nothing appears from nowhere, but there is no level or vocabulary to show.
+    """
+    from ..metadata.template_plan import TemplateField
+
+    kind = (
+        "boolean" if isinstance(value, bool)
+        else "number" if isinstance(value, (int, float))
+        else "array" if isinstance(value, list)
+        else "object" if isinstance(value, dict)
+        else "string"
+    )
+    return TemplateField(name=name, level="optional", type=kind)
 
 
 def _modality_label(datatype: str) -> str:
@@ -105,25 +143,32 @@ class _EntityRow(QWidget):
     ) -> None:
         super().__init__(parent)
         self.entity_name = entity_name
-        self.setStyleSheet("background: transparent;")
+        # Scoped by object name. A bare "background: transparent" on a container
+        # cascades into the tooltips and combo popups its children raise, and
+        # they render see-through.
+        self.setObjectName("entity-row")
+        self.setStyleSheet("#entity-row { background: transparent; }")
 
         h = QHBoxLayout(self)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
 
-        label_text = entity_name
-        lbl = QLabel(label_text)
-        lbl.setMinimumWidth(76)
-        lbl.setMaximumWidth(76)
+        # The same eliding, column-width label the metadata form uses, so the
+        # entities line up with everything below them and a long name like
+        # "reconstruction" ends in an ellipsis rather than being cut mid-word.
         pal = CUR()
-        css_color = pal["text"] if required else pal["dim"]
-        suffix = f' <span style="color:{pal["error"]}">*</span>' if required else ""
+        tone = pal["muted"] if deprecated else (
+            pal["text"] if required else pal["dim"]
+        )
+        lbl = FieldLabel(
+            entity_name, tone, _LABEL_COL,
+            mark=" *" if required else "", mark_colour=pal["error"], fixed=True,
+        )
         if deprecated:
-            css_color = pal["muted"]
-            lbl.setText(f'<span style="color:{css_color};text-decoration:line-through;">{label_text}</span>')
-        else:
-            lbl.setText(f'<span style="color:{css_color}">{label_text}</span>{suffix}')
-        lbl.setTextFormat(Qt.TextFormat.RichText)
+            lbl.setStyleSheet(
+                "#field-label { color: %s; background: transparent; "
+                "text-decoration: line-through; }" % tone
+            )
         h.addWidget(lbl)
 
         self.edit = QLineEdit(value)
@@ -164,6 +209,12 @@ class PropertiesPanel(QWidget):
         # renders its busy state even across a re-render.
         self._psd_worker = None
         self._psd_row_id: Optional[str] = None
+        # Whether the schema-driven sidecar section is open. Folded by default:
+        # it offers everything the file may carry, which is the right answer to
+        # "what can I state about this recording" and the wrong thing to greet
+        # someone with in a narrow pane. Remembered for the session so a user
+        # working through a dataset opens it once, not once per row.
+        self._sidecar_expanded = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -185,6 +236,10 @@ class PropertiesPanel(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self._body)
+        # A scroll area otherwise reports its contents' minimum as its own, so
+        # the pane could not be squeezed past whatever the widest card wanted.
+        scroll.setMinimumWidth(0)
+        scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         outer.addWidget(scroll, 1)
 
         # Build the initial empty body (just a hint).
@@ -311,7 +366,8 @@ class PropertiesPanel(QWidget):
         head.addStretch(1)
         head_wrap = QWidget()
         head_wrap.setLayout(head)
-        head_wrap.setStyleSheet("background: transparent;")
+        head_wrap.setObjectName("entities-head")
+        head_wrap.setStyleSheet("#entities-head { background: transparent; }")
         self._body_layout.addWidget(head_wrap)
         self._body_layout.addSpacing(2)
 
@@ -363,11 +419,30 @@ class PropertiesPanel(QWidget):
         self._append_region_label("Modality-agnostic", agnostic=True)
         self._append_participant_section(row)
         self._append_companion_section(row)
+        if datatype == "pet":
+            self._append_region_label("Modality-specific", agnostic=False)
+            self._append_blood_section(row)
         if datatype in _EEG_MEG_DATATYPES:
             self._append_region_label("Modality-specific", agnostic=False)
             self._append_recording_section(row, datatype)
 
+        # 6. Everything else the standard lets this file carry, asked exactly as
+        # the dataset dialog asks it, but answered for this recording alone.
+        self._append_sidecar_section(row, datatype, suffix)
+
         self._body_layout.addStretch(1)
+
+    def _pet_eff(self, row: int, field: str) -> str:
+        """Effective per-row PET value (scaffold override else dataset default)."""
+        if self._model is None:
+            return ""
+        return self._model.pet_effective(row, field)
+
+    def _on_pet_field_changed(self, key: str, value: str) -> None:
+        """Commit a per-row PET override into the scaffold spec."""
+        if self._suppress_writeback or self._model is None or self._row is None:
+            return
+        self._model.set_pet_override(self._row, key, value)
 
     def _build_combo_row(self, label_text: str, value: str, *, options: list[str],
                          required: bool, slot) -> QWidget:
@@ -379,13 +454,14 @@ class PropertiesPanel(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
 
+        # The same column every other row in the panel uses, so datatype and
+        # suffix line up with the entities and the metadata below them instead
+        # of starting their own column.
         pal = CUR()
-        lbl = QLabel(label_text)
-        lbl.setMinimumWidth(76)
-        lbl.setMaximumWidth(76)
-        suffix = f' <span style="color:{pal["error"]}">*</span>' if required else ""
-        lbl.setText(f'<span style="color:{pal["text"]}">{label_text}</span>{suffix}')
-        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl = FieldLabel(
+            label_text, pal["text"], _LABEL_COL,
+            mark=" *" if required else "", mark_colour=pal["error"], fixed=True,
+        )
         h.addWidget(lbl)
 
         combo = QComboBox()
@@ -489,10 +565,11 @@ class PropertiesPanel(QWidget):
         lbl = QLabel("".join(pieces))
         lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setWordWrap(True)
+        lbl.setObjectName("path-preview")
         lbl.setStyleSheet(
-            'font-family: "SF Mono","Menlo","Monaco",monospace; '
+            '#path-preview { font-family: "SF Mono","Menlo","Monaco",monospace; '
             f'font-size: {scaled_px(11)}px; color: {pal["text"]}; '
-            'background: transparent;'
+            'background: transparent; }'
         )
         lay.addWidget(lbl)
         return f
@@ -672,7 +749,15 @@ class PropertiesPanel(QWidget):
             f'<span style="color:{pal["dim"]};"> &middot; {tag} &rarr; {destination}</span>'
         )
         lbl.setTextFormat(Qt.TextFormat.RichText)
-        lbl.setStyleSheet(f"font-size: {scaled_px(10)}px; background: transparent;")
+        lbl.setObjectName("section-head")
+        lbl.setStyleSheet(
+            f"#section-head {{ font-size: {scaled_px(10)}px; background: transparent; }}"
+        )
+        # Wrap rather than set a floor: these carry a title plus a destination
+        # path, and a plain QLabel reports all of it as its minimum width.
+        lbl.setWordWrap(True)
+        lbl.setMinimumWidth(0)
+        lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         return lbl
 
     def _append_participant_section(self, row: int) -> None:
@@ -696,117 +781,206 @@ class PropertiesPanel(QWidget):
         ))
 
     def _append_recording_section(self, row: int, datatype: str) -> None:
-        """EEG/MEG/iEEG/NIRS recording-sidecar fields -> sub-..._<datatype>.json.
+        """The one instruction the conversion needs that BIDS has no field for.
 
-        Up to three BIDS-aligned sub-sections: an Acquisition block (device +
-        line frequency - shared by all electrophysiology sidecars), a Reference
-        & montage block (EEG/iEEG only - MEG and NIRS have no scalp
-        reference/ground/montage), and a MEG-acquisition block (MEG only).
-        Institution is agnostic and lives in the Dataset-metadata dialog, NOT
-        here. Inheritance fields show the EFFECTIVE value (per-row override, else
-        the dataset default); writing the default clears the override.
+        A montage names an MNE electrode layout to APPLY during conversion, so
+        that electrodes.tsv and coordsystem.json get written. It is not metadata
+        about the recording, it is an instruction to the converter, which is why
+        the standard has no field for it and why it is the single thing in this
+        panel that does not come from the schema.
+
+        Line frequency, reference and ground USED to be here as hand-built rows.
+        They are BIDS fields, so they are now asked for by the schema-driven
+        section below like everything else, and answering them there writes the
+        same inventory column this used to write.
         """
-        mod = _modality_label(datatype)
         show_montage = datatype in ("eeg", "ieeg")
-        show_ref_ground = datatype in ("eeg", "ieeg")
-        show_cap = datatype == "eeg"
 
-        # --- Acquisition: device + line frequency (the recording's hardware).
-        # Institution is agnostic (set once for the dataset in Dataset metadata),
-        # NOT here. Device overrides live in the scaffold's overrides[row_id]
-        # (not a TSV column); each inherits the dataset default until set, and
-        # clearing it (or matching the default) restores inheritance.
         self._body_layout.addSpacing(8)
         self._body_layout.addWidget(self._divider())
         self._body_layout.addWidget(self._section_header(
-            "ACQUISITION", f"sub-..._{datatype}.json", agnostic=False, tag=mod))
-        lf = self._eff(row, "line_freq")
-        lf = lf[:-2] if lf.endswith(".0") else lf
-        self._body_layout.addWidget(self._meta_combo_row(
-            "line_freq", "line_freq", ["(blank)", "50", "60"], lf, "(blank)",
-        ))
-        # Compute-PSD action, directly below the line-frequency field. Reads the
-        # recording on a background thread and shows the same interactive PSD
-        # dialog as the Editor's recording viewer.
-        self._body_layout.addWidget(self._build_psd_row(row))
-        self._body_layout.addWidget(self._meta_combo_row(
-            "manufacturer", "manufacturer",
-            [""] + list(COMMON_MANUFACTURERS), self._acq_eff(row, "manufacturer"), "",
-            setter=self._on_acq_field_changed, editable=True,
-        ))
-        # Scan-detected/inferred manufacturer, shown like the montage match (a
-        # read-only suggestion; not auto-applied - mne-bids fills MEG itself).
-        manuf_sugg = self._cell(row, "manufacturer_suggestion")
-        if manuf_sugg:
-            self._body_layout.addWidget(
-                self._scan_hint("manufacturer", "scan detected", manuf_sugg))
-        self._body_layout.addWidget(self._meta_edit_row(
-            "model", "amplifier_model", self._acq_eff(row, "amplifier_model"),
-            setter=self._on_acq_field_changed,
-        ))
-        self._body_layout.addWidget(self._meta_edit_row(
-            "software", "software_versions", self._acq_eff(row, "software_versions"),
-            setter=self._on_acq_field_changed,
-        ))
+            "CONVERSION", "electrodes.tsv + coordsystem.json",
+            agnostic=False, tag=_modality_label(datatype)))
 
-        # --- Reference & montage: EEG/iEEG scalp fields only.
-        if show_montage or show_ref_ground:
-            self._body_layout.addSpacing(8)
-            self._body_layout.addWidget(self._divider())
-            self._body_layout.addWidget(self._section_header(
-                "REFERENCE & MONTAGE",
-                f"sub-..._{datatype}.json + electrodes.tsv",
-                agnostic=False, tag=mod))
-            if show_ref_ground:
-                self._body_layout.addWidget(self._meta_edit_row(
-                    "reference", "eeg_reference", self._eff(row, "eeg_reference"),
-                ))
-                self._body_layout.addWidget(self._meta_edit_row(
-                    "ground", "eeg_ground", self._eff(row, "eeg_ground"),
-                ))
-            if show_montage:
-                self._body_layout.addWidget(self._meta_combo_row(
-                    "montage", "montage",
-                    ["(none)"] + builtin_montages(), self._eff(row, "montage"), "(none)",
-                ))
-                # Surface the scan's best channel-name match as a read-only hint
-                # so the user can pick the montage with confidence (the scan does
-                # not auto-fill it).
-                suggestion = self._cell(row, "montage_suggestion")
-                if suggestion:
-                    self._body_layout.addWidget(self._montage_hint(suggestion))
-            if show_cap:
-                self._body_layout.addWidget(self._meta_combo_row(
-                    "cap", "cap_manufacturer",
-                    [""] + list(COMMON_CAP_MANUFACTURERS),
-                    self._acq_eff(row, "cap_manufacturer"), "",
-                    setter=self._on_acq_field_changed, editable=True,
-                ))
-
-        # --- MEG-specific acquisition (MEG only). Only fields mne-bids cannot
-        # derive from the recording: dewar position, the empty-room link, and
-        # the artefact note. Channel-derived MEG facts (head localization,
-        # digitized landmarks/head points, ...) are filled by mne-bids.
-        if datatype == "meg":
-            self._body_layout.addSpacing(8)
-            self._body_layout.addWidget(self._divider())
-            self._body_layout.addWidget(self._section_header(
-                "MEG ACQUISITION", f"sub-..._{datatype}.json", agnostic=False, tag=mod))
+        if show_montage:
             self._body_layout.addWidget(self._meta_combo_row(
-                "dewar", "dewar_position", ["", "upright", "supine"],
-                self._acq_eff(row, "dewar_position"), "",
-                setter=self._on_acq_field_changed, editable=True,
+                "montage", "montage",
+                ["(none)"], self._eff(row, "montage"), "(none)",
+                fill_on_open=builtin_montages,
             ))
-            self._body_layout.addWidget(self._meta_edit_row(
-                "empty room", "associated_empty_room",
-                self._acq_eff(row, "associated_empty_room"),
-                setter=self._on_acq_field_changed,
-            ))
-            self._body_layout.addWidget(self._meta_edit_row(
-                "artefacts", "subject_artefact_description",
-                self._acq_eff(row, "subject_artefact_description"),
-                setter=self._on_acq_field_changed,
-            ))
+            suggestion = self._cell(row, "montage_suggestion")
+            if suggestion:
+                self._body_layout.addWidget(self._montage_hint(suggestion))
+
+    # ------------------------------------------------------------------
+    # The schema-driven sidecar section, for this recording alone
+    # ------------------------------------------------------------------
+
+    def _append_sidecar_section(self, row: int, datatype: str, suffix: str) -> None:
+        """Everything the standard lets this file carry, answered per recording.
+
+        The same definition the dataset dialog renders, at a scope one step
+        down. Before this the panel wrote its own sections, so which fields a
+        user could state depended on which surface they happened to open, and
+        the two lists disagreed. Now there is one list, and the dialog says what
+        is true of every ``*_eeg.json`` while this says what is true of THIS one.
+
+        Split the same way the dialog splits it. What THIS recording already
+        answers, from its own header and its own entities, is settled and comes
+        first, in green; what it does not is asked below. Everything stays
+        editable, since correcting the one recording whose header lies is
+        exactly what a per-row answer is for.
+
+        Each control opens showing what the file will actually say, whichever
+        layer said it, with the layer named in the tooltip. Answering here
+        overrides that for this recording; clearing it hands the field back.
+        """
+        if self._model is None or not datatype:
+            return
+        answered = self._model.row_answered(row)
+        section = sidecar_section(
+            datatype, suffix or datatype,
+            self._sidecar_example_path(row, datatype, suffix),
+            answered=answered,
+        )
+        if not section.fields and not answered:
+            return
+
+        resolved = self._model.resolved_sidecar(row)
+        stated = self._model.row_template(row)
+        filename = section.target.rpartition("/")[2]
+
+        box = CollapsibleSection(
+            "Sidecar fields",
+            subtitle=filename,
+            badge=f"{len(section.fields)} to answer",
+            expanded=self._sidecar_expanded,
+        )
+        box.toggled_by_user.connect(self._remember_sidecar_expanded)
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(box)
+
+        # Settled first, in green: this recording's header and entities answer
+        # these, and the user needs to see what they need NOT fill in.
+        settled = {
+            name: answered.get(name)
+            for name in sorted(set(section.supplied) | set(answered))
+        }
+        if settled:
+            box.add(self._build_answered_block(row, section, settled))
+        box.add(level_legend(colour=True))
+
+        for field in section.fields:
+            widget = build_field_widget(field, self._field_suggestions(row, field.name))
+            answer = resolved.get(field.name)
+            if answer is not None:
+                write_field_widget(widget, answer.value)
+
+            tip = field.description or ""
+            if answer is not None and field.name not in stated:
+                # Inherited: say where from, so a value that appears out of
+                # nowhere is accountable rather than mysterious.
+                origin = self._model.sidecar_origin(row, field.name)
+                tip = (tip + "\n\n" if tip else "") + f"Currently from {origin}."
+            if tip:
+                widget.setToolTip(tip)
+
+            connect_field_widget(
+                widget, lambda f=field, w=widget: self._on_sidecar_field_changed(f, w),
+            )
+            label = field_label_widget(field, width=_LABEL_COL, fixed=True)
+            if tip:
+                label.setToolTip(f"{field.name}\n\n{tip}")
+            holder = QWidget()
+            holder.setObjectName("meta-row")
+            holder.setStyleSheet("#meta-row { background: transparent; }")
+            line = QHBoxLayout(holder)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(8)
+            line.addWidget(label)
+            line.addWidget(widget, 1)
+            box.add(holder)
+            # Reading the spectrum is how you find out which of 50 and 60 the
+            # mains was, so the action sits directly under the field it answers
+            # rather than in a block of its own.
+            if field.name == "PowerLineFrequency" and datatype in _EEG_MEG_DATATYPES:
+                box.add(self._build_psd_row(row))
+
+    def _build_answered_block(self, row: int, section, settled: dict) -> QWidget:
+        """The fields this recording already answers, folded away and editable.
+
+        Green because nothing in it is outstanding. Editable because the value
+        was read out of the data, and when the data is wrong this is the only
+        place to say so.
+        """
+        pal = CUR()
+        # Every field the file may carry, not just the ones being asked, or
+        # a required field the recording answered shows with no level.
+        declared = {f.name: f for f in section.declared}
+        box = CollapsibleSection(
+            "Already answered by the conversion",
+            subtitle="edit only to correct what the data says",
+            badge=f"{len(settled)} fields",
+            level=1,
+            expanded=False,
+            tone=pal["success"],
+        )
+        for name, value in settled.items():
+            field = declared.get(name) or _answered_field(name, value)
+            widget = build_field_widget(field, self._field_suggestions(row, name))
+            if value is not None:
+                write_field_widget(widget, value)
+            widget.setToolTip(
+                (field.description + "\n\n" if field.description else "")
+                + ("The conversion reads this from the data and will write the "
+                   "value shown. Type here only to correct it."
+                   if value is not None else
+                   "The conversion normally supplies this from the data.")
+            )
+            connect_field_widget(
+                widget, lambda f=field, w=widget: self._on_sidecar_field_changed(f, w),
+            )
+            holder = QWidget()
+            holder.setObjectName("meta-row")
+            holder.setStyleSheet("#meta-row { background: transparent; }")
+            line = QHBoxLayout(holder)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(8)
+            line.addWidget(field_label_widget(field, width=_LABEL_COL, fixed=True))
+            line.addWidget(widget, 1)
+            box.add(holder)
+        return box
+
+    def _sidecar_example_path(self, row: int, datatype: str, suffix: str) -> str:
+        """The name of the file this row will produce, for the section heading."""
+        if self._model is None:
+            return ""
+        basename = self._cell(row, "proposed_basename")
+        return f"{datatype}/{basename}.json" if basename else ""
+
+    def _field_suggestions(self, row: int, name: str) -> tuple:
+        """Values BIDS Manager offers that the standard does not.
+
+        Two sources: the vocabularies we curate, and whatever the scan read out
+        of THIS recording's own header. Neither is applied on its own, because a
+        vendor string can always parse wrongly and a wrong answer is worse than
+        a blank one.
+        """
+        curated = CURATED_SUGGESTIONS.get(name, ())
+        column = SCAN_SUGGESTION_COLUMNS.get(name, "")
+        hint = self._cell(row, column) if column else ""
+        return ((hint,) if hint and hint not in curated else ()) + curated
+
+    def _remember_sidecar_expanded(self, expanded: bool) -> None:
+        self._sidecar_expanded = expanded
+
+    def _on_sidecar_field_changed(self, field, widget) -> None:
+        """Commit one sidecar answer against this recording."""
+        if self._suppress_writeback or self._model is None or self._row is None:
+            return
+        self._model.set_row_template_field(
+            self._row, field.name, read_field_widget(widget, field),
+        )
 
     # ------------------------------------------------------------------
     # PSD compute (per-row, threaded, mirrors the Editor recording viewer)
@@ -994,7 +1168,14 @@ class PropertiesPanel(QWidget):
 
         self._companion_list = QListWidget()
         self._companion_list.setMaximumHeight(72)
-        for suffix, path in self._companions(row):
+        # Blood curves are companions too, but they have their own section and
+        # are converted rather than copied, so they are not offered here.
+        self._plain_companions = [
+            (suffix, path)
+            for suffix, path in self._companions(row)
+            if not is_blood_role(suffix)
+        ]
+        for suffix, path in self._plain_companions:
             self._companion_list.addItem(f"{suffix}: {path}")
         self._body_layout.addWidget(self._companion_list)
 
@@ -1018,6 +1199,165 @@ class PropertiesPanel(QWidget):
         h.addWidget(rem)
         h.addStretch(1)
         self._body_layout.addWidget(ctl)
+
+    def _append_blood_section(self, row: int) -> None:
+        """Attach this PET run's blood curves.
+
+        Quantitative PET rests on the arterial input function: what the tracer
+        was doing in the blood while the scanner counted it in tissue. BIDS has
+        a place for it and a lab usually has it in PMOD exports.
+
+        Three series, each drawn one of two ways. How it was drawn is not a
+        detail: a hand-drawn series and an autosampled one have different time
+        resolution, so BIDS puts them in separate files under the ``recording``
+        entity, and pet2bids asks on the console when it cannot tell. In a
+        window that is a freeze with no visible cause, which is why the method
+        is chosen here rather than guessed later.
+
+        Storage is the ordinary companion list, tagged ``blood:<series>:<method>``,
+        because a blood curve belongs to exactly one PET run in the same way an
+        events file belongs to one functional run. The copier skips these tags;
+        conversion happens in `fixups/blood.py`.
+        """
+        from ..fixups.blood import BLOOD_SERIES, parse_blood_role
+
+        labels = {
+            "wholeblood": "Whole blood",
+            "plasma": "Plasma",
+            "parentfraction": "Parent fraction",
+        }
+
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(self._divider())
+        self._body_layout.addWidget(self._section_header(
+            "BLOOD SAMPLING", "PMOD .bld curves, converted to _blood.tsv",
+            agnostic=False, tag="pet"))
+
+        linked: dict[str, tuple[str, str]] = {}
+        for tag, path in self._companions(row):
+            parsed = parse_blood_role(tag)
+            if parsed is not None:
+                linked[parsed[0]] = (parsed[1], path)
+
+        self._blood_methods: dict[str, QComboBox] = {}
+        for series in BLOOD_SERIES:
+            method, path = linked.get(series, ("manual", ""))
+
+            line = QWidget()
+            line.setObjectName("blood-row")
+            line.setStyleSheet("#blood-row { background: transparent; }")
+            h = QHBoxLayout(line)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+
+            # The panel's shared eliding label, so these line up with the
+            # entities above and every schema-driven field below, and so a long
+            # name narrows with the pane instead of setting a floor for it.
+            h.addWidget(FieldLabel(
+                labels[series], CUR()["text"], _LABEL_COL, fixed=True,
+            ))
+
+            how = QComboBox()
+            how.setObjectName("ent-input")  # opaque popup styling
+            how.addItems(["manual", "automatic"])
+            how.setCurrentText(method)
+            how.setToolTip(
+                "How the samples were drawn. Hand-drawn and autosampled series "
+                "have different time resolution, so BIDS writes them to "
+                "separate files under the recording entity."
+            )
+            how.currentTextChanged.connect(
+                lambda text, r=row, s=series: self._set_blood_method(r, s, text)
+            )
+            h.addWidget(how)
+            self._blood_methods[series] = how
+
+            pick = QPushButton("Change" if path else "Link")
+            pick.setToolTip("Choose the PMOD .bld export for this series")
+            pick.clicked.connect(
+                lambda _=False, r=row, s=series: self._link_blood(r, s)
+            )
+            h.addWidget(pick)
+
+            if path:
+                # A cross rather than the word: at the width this panel is
+                # meant to reach, a second labelled button would not fit.
+                clear = QPushButton("\u2715")
+                clear.setToolTip("Unlink this curve")
+                clear.setFixedWidth(scaled_px(24))
+                clear.clicked.connect(
+                    lambda _=False, r=row, s=series: self._clear_blood(r, s)
+                )
+                h.addWidget(clear)
+            h.addStretch(1)
+            self._body_layout.addWidget(line)
+
+            if path:
+                shown = QLabel(Path(path).name)
+                shown.setToolTip(path)
+                shown.setStyleSheet(
+                    f"color: {CUR()['dim']}; font-size: {scaled_px(10)}px; "
+                    f"background: transparent; margin-left: {scaled_px(_LABEL_COL + 8)}px;"
+                )
+                self._body_layout.addWidget(shown)
+
+        note = QLabel(
+            "Whether the plasma was dispersion-corrected, how metabolites were "
+            "measured and the withdrawal rate are sidecar fields, asked below "
+            "with everything else the standard declares."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            f"color: {CUR()['dim']}; font-size: {scaled_px(10)}px; "
+            "background: transparent;"
+        )
+        self._body_layout.addWidget(note)
+
+    def _set_blood(self, row: int, series: str, method: str, path: str) -> None:
+        """Put one blood series into the companion list, replacing any there."""
+        from ..fixups.blood import blood_role, parse_blood_role
+
+        items = [
+            (tag, existing)
+            for tag, existing in self._companions(row)
+            if (parse_blood_role(tag) or ("", ""))[0] != series
+        ]
+        if path:
+            items.append((blood_role(series, method), path))
+        self._write_companions(row, items)
+
+    def _blood_method(self, series: str) -> str:
+        combo = getattr(self, "_blood_methods", {}).get(series)
+        return combo.currentText() if combo is not None else "manual"
+
+    def _blood_path(self, row: int, series: str) -> str:
+        from ..fixups.blood import parse_blood_role
+
+        for tag, path in self._companions(row):
+            parsed = parse_blood_role(tag)
+            if parsed is not None and parsed[0] == series:
+                return path
+        return ""
+
+    def _link_blood(self, row: int, series: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Link a blood curve", "",
+            "PMOD blood files (*.bld);;All files (*)",
+        )
+        if not path:
+            return
+        self._set_blood(row, series, self._blood_method(series), path)
+
+    def _set_blood_method(self, row: int, series: str, method: str) -> None:
+        """Re-tag an already-linked curve. Nothing linked, nothing to record."""
+        if self._suppress_writeback:
+            return
+        path = self._blood_path(row, series)
+        if path:
+            self._set_blood(row, series, method, path)
+
+    def _clear_blood(self, row: int, series: str) -> None:
+        self._set_blood(row, series, "manual", "")
 
     def _companions(self, row: int) -> list[tuple[str, str]]:
         raw = self._cell(row, "companion_files")
@@ -1054,15 +1394,25 @@ class PropertiesPanel(QWidget):
         self._write_companions(row, items)
 
     def _remove_companion(self, row: int) -> None:
+        """Remove the selected companion.
+
+        Matched by value, not by index: the list on screen hides blood curves,
+        so a position in it is not a position in the stored list.
+        """
         sel = self._companion_list.currentRow()
+        shown = getattr(self, "_plain_companions", [])
+        if not (0 <= sel < len(shown)):
+            return
+        target = shown[sel]
         items = self._companions(row)
-        if 0 <= sel < len(items):
-            items.pop(sel)
+        if target in items:
+            items.remove(target)
             self._write_companions(row, items)
 
     def _meta_combo_row(self, label: str, key: str, options: list[str],
                         current: str, blank_label: str, *,
-                        setter=None, editable: bool = False) -> QWidget:
+                        setter=None, editable: bool = False,
+                        fill_on_open=None) -> QWidget:
         row_w = QWidget()
         # Scope the transparent background to THIS container only (objectName
         # selector) so it does not cascade into child combo popups / tooltips
@@ -1073,10 +1423,7 @@ class PropertiesPanel(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
         tip = tooltip_for(key)
-        lbl = QLabel(label)
-        lbl.setMinimumWidth(76)
-        lbl.setMaximumWidth(76)
-        lbl.setStyleSheet(f"color: {CUR()['dim']};")
+        lbl = FieldLabel(label, CUR()["dim"], _LABEL_COL, fixed=True)
         if tip:
             lbl.setToolTip(tip)
         h.addWidget(lbl)
@@ -1106,6 +1453,13 @@ class PropertiesPanel(QWidget):
                 lambda c=combo, k=key, bl=blank_label:
                 on_change(k, "" if c.currentText() == bl else c.currentText().strip())
             )
+        if fill_on_open is not None:
+            # An expensive list, filled the first time the user opens the box.
+            # Building it on every row selection made selecting a row slow for
+            # a list most people never look at.
+            from .recording_meta_dialog import _fill_then_show
+
+            combo.showPopup = _fill_then_show(combo, fill_on_open)
         h.addWidget(combo, 1)
         return row_w
 
@@ -1121,10 +1475,7 @@ class PropertiesPanel(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
         tip = tooltip_for(key)
-        lbl = QLabel(label)
-        lbl.setMinimumWidth(76)
-        lbl.setMaximumWidth(76)
-        lbl.setStyleSheet(f"color: {CUR()['dim']};")
+        lbl = FieldLabel(label, CUR()["dim"], _LABEL_COL, fixed=True)
         if tip:
             lbl.setToolTip(tip)
         h.addWidget(lbl)

@@ -30,7 +30,10 @@ import logging
 from pathlib import Path
 from typing import Iterable, Optional
 
-from ..recording_meta import RecordingMetaSpec, resolve_effective
+from ..recording_meta import (
+    RecordingMetaSpec,
+    resolve_effective,
+)
 from ..recording_meta.resolve import EffectiveSpec
 
 log = logging.getLogger(__name__)
@@ -86,18 +89,17 @@ def enrich_recording_sidecars(
             spec,
             getattr(task, "row_id", "") or "",
             (getattr(task, "entities", {}) or {}).get("task"),
+            datatype,
         )
 
-        # Per-row inventory cells (eeg_reference / eeg_ground) take final
-        # precedence over the resolved spec value.
-        row_ref = getattr(task, "eeg_reference", None)
-        row_gnd = getattr(task, "eeg_ground", None)
-        if row_ref:
-            eff.acquisition.eeg_reference = row_ref
-        if row_gnd:
-            eff.acquisition.eeg_ground = row_gnd
-
-        n_modified += _apply_sidecar_fields(sidecar, eff, datatype)
+        # The sidecar's own FIELDS are not written here any more. They are what
+        # the user stated, and stating them is the metadata step's job; this
+        # pass used to walk the same chain, so the same field could be written
+        # twice and the winner depended on the order the two ran in.
+        #
+        # What stays is the work that needs this context: retyping the channels
+        # the reader saw as generic, giving trigger codes their labels, and the
+        # task protocol. None of that is expressible as a sidecar field.
         n_modified += _retype_channels(sidecar, basename, eff)
         n_modified += _map_events(sidecar, basename, eff)
         n_modified += _apply_task_protocol(sidecar, eff)
@@ -135,76 +137,6 @@ def _read_json(path: Path) -> dict:
 
 def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=4) + "\n", encoding="utf-8")
-
-
-def _apply_sidecar_fields(sidecar: Path, eff: EffectiveSpec, datatype: str) -> int:
-    """Write reference/ground/filters/device/institution/extras into the JSON."""
-    acq = eff.acquisition
-    updates: dict = {}
-
-    # Common keys (every EEG/MEG/iEEG/NIRS sidecar). Each is written only when
-    # the user supplied it (truthy), so a blank value never clobbers what the
-    # backend already wrote. mne-bids DOES auto-fill Manufacturer for MEG, so the
-    # truthy guard is what preserves it when the user leaves manufacturer blank;
-    # ManufacturersModelName / SoftwareVersions / InstitutionName are mne-bids
-    # omissions, so writing them here only adds information.
-    if acq.manufacturer:
-        updates["Manufacturer"] = acq.manufacturer
-    if acq.amplifier_model:
-        updates["ManufacturersModelName"] = acq.amplifier_model
-    if acq.software_versions or acq.software:
-        updates["SoftwareVersions"] = acq.software_versions or acq.software
-    if acq.institution_name:
-        updates["InstitutionName"] = acq.institution_name
-    if acq.institution_dept:
-        updates["InstitutionalDepartmentName"] = acq.institution_dept
-
-    hw = {f.name: f.info for f in acq.filters if f.kind == "Hardware"}
-    sw = {f.name: f.info for f in acq.filters if f.kind == "Software"}
-    if hw:
-        updates["HardwareFilters"] = hw
-    if sw:
-        updates["SoftwareFilters"] = sw
-
-    # Datatype-scoped reference / ground / cap.
-    if datatype == "eeg":
-        if acq.eeg_reference:
-            updates["EEGReference"] = acq.eeg_reference
-        if acq.eeg_ground:
-            updates["EEGGround"] = acq.eeg_ground
-        if acq.cap_manufacturer:
-            updates["CapManufacturer"] = acq.cap_manufacturer
-        if acq.cap_model:
-            updates["CapManufacturersModelName"] = acq.cap_model
-    elif datatype == "ieeg":
-        if acq.eeg_reference:
-            updates["iEEGReference"] = acq.eeg_reference
-        if acq.eeg_ground:
-            updates["iEEGGround"] = acq.eeg_ground
-    elif datatype == "meg":
-        # MEG-specific fields mne-bids cannot derive from the recording. The
-        # channel-derived ones (ContinuousHeadLocalization / DigitizedLandmarks
-        # / DigitizedHeadPoints / HeadCoilFrequency) are intentionally NOT
-        # written here - mne-bids already computes them correctly.
-        if acq.dewar_position:
-            updates["DewarPosition"] = acq.dewar_position
-        if acq.associated_empty_room:
-            updates["AssociatedEmptyRoom"] = acq.associated_empty_room
-        if acq.subject_artefact_description:
-            updates["SubjectArtefactDescription"] = acq.subject_artefact_description
-
-    # Extras (non-required keys) for non-MEG datatypes.
-    if acq.extras is not None and datatype != "meg":
-        updates.update(_extras_to_keys(acq.extras))
-
-    if not updates:
-        return 0
-
-    data = _read_json(sidecar)
-    data.update(updates)
-    _write_json(sidecar, data)
-    log.info("enrich: %s sidecar +%d field(s)", sidecar.name, len(updates))
-    return 1
 
 
 def _extras_to_keys(extras) -> dict:

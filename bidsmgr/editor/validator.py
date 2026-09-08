@@ -57,6 +57,20 @@ def _now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _version(schema: Optional[str]) -> Optional[str]:
+    """The version to validate against: the caller's, else the session's.
+
+    Without this a bare ``validate()`` judged a dataset by bidsval's default
+    while every form beside it described whichever version the user chose, and
+    nothing on screen said the two disagreed.
+    """
+    if schema:
+        return schema
+    from .. import schema as schema_mod
+
+    return schema_mod.active_version()
+
+
 def validate(
     bids_root: Path,
     *,
@@ -80,7 +94,7 @@ def validate(
 
     bv_report = bidsval.validate(
         bids_root,
-        schema=schema,
+        schema=_version(schema),
         read_headers=strict,
         max_rows=max_rows,
     )
@@ -116,7 +130,7 @@ def validate_file(
     bv_verdict = bidsval.validate_file(
         bids_root,
         rel.as_posix(),
-        schema=schema,
+        schema=_version(schema),
         read_headers=False,
         max_rows=max_rows,
     )
@@ -157,7 +171,7 @@ def validate_folder(
 
     bv_report = bidsval.validate(
         bids_root,
-        schema=schema,
+        schema=_version(schema),
         read_headers=False,
         max_rows=max_rows,
     )

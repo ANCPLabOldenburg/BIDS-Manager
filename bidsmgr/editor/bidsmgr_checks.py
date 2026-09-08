@@ -19,8 +19,11 @@ of the package reads from. No Qt here (architectural rule 2).
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
+
+from bidsval import schema as bidsval_schema
 
 from .. import schema as schema_mod
 from .types import FieldLevel, Issue, Severity, SidecarField
@@ -119,6 +122,58 @@ def infer_datatype_suffix(
     return datatype, suffix
 
 
+@lru_cache(maxsize=1)
+def _sole_datatype_by_suffix() -> dict[str, str]:
+    """Suffixes only one datatype can carry, mapped to that datatype.
+
+    99 of the schema's 111 suffixes are unambiguous: only ``func`` has ``bold``,
+    only ``anat`` has ``T1w``. The other 12 are the cross-modality companions
+    (``events``, ``channels``, ``physio``), which several datatypes share and
+    which therefore cannot be settled by name.
+    """
+    owners: dict[str, set[str]] = {}
+    try:
+        for datatype in schema_mod.list_datatypes():
+            for suffix in schema_mod.list_suffixes(datatype):
+                owners.setdefault(suffix, set()).add(datatype)
+    except Exception:
+        return {}
+    return {s: next(iter(d)) for s, d in owners.items() if len(d) == 1}
+
+
+def _resolve_datatype(datatype: Optional[str], suffix: Optional[str]) -> Optional[str]:
+    """Fill in a datatype the path could not supply.
+
+    An INHERITED sidecar sits above the datatype directories: a top-level
+    ``task-rest_bold.json`` applies to every func/bold run in the dataset, but
+    nothing in its path says ``func``, so it was typed as nothing and every one
+    of its fields fell back to optional. The suffix settles it whenever only one
+    datatype claims that suffix.
+    """
+    if datatype or not suffix:
+        return datatype
+    return _sole_datatype_by_suffix().get(suffix)
+
+
+def _shown_level(level: FieldLevel, spec) -> FieldLevel:
+    """Do not badge a speculative requirement as one.
+
+    A field is speculative when the rule demanding it may not describe this
+    file at all. ``SkullStripped`` is required of DERIVATIVES and ``Genetics``
+    only of a dataset that ships a ``genetic_info.json``; neither is knowable
+    from the file in front of us. Listing them is right, the form should show
+    everything the standard allows, but painting them RED as required is a
+    demand the standard is not making, and it sends the user hunting for a
+    field they must not add.
+    """
+    if getattr(spec, "speculative", False) and level in (
+        FieldLevel.REQUIRED,
+        FieldLevel.RECOMMENDED,
+    ):
+        return FieldLevel.OPTIONAL
+    return level
+
+
 def _load_json_object(fp: Path) -> Optional[dict]:
     """Parse ``fp`` as JSON, returning the object or ``None`` (unreadable / not
     an object). Errors are bidsval's job to report; here we just need the data."""
@@ -130,7 +185,10 @@ def _load_json_object(fp: Path) -> Optional[dict]:
 
 
 def sidecar_fields_for(
-    fp: Path, datatype: Optional[str], suffix: Optional[str],
+    fp: Path,
+    datatype: Optional[str],
+    suffix: Optional[str],
+    bids_root: Optional[Path] = None,
 ) -> list[SidecarField]:
     """Build the schema-aware sidecar form rows for a JSON file.
 
@@ -142,7 +200,13 @@ def sidecar_fields_for(
     """
     if not str(fp).lower().endswith(".json"):
         return []
+    datatype = _resolve_datatype(datatype, suffix)
     if not (datatype and suffix):
+        # A top-level dataset file has no datatype and no suffix, so it cannot
+        # be addressed the same way, but it does have declared fields and they
+        # were previously invented from finding severity. Ask the schema.
+        if Path(fp).name == "dataset_description.json":
+            return _dataset_description_fields_for(fp, bids_root)
         return []
     data = _load_json_object(fp)
     if data is None:
@@ -153,7 +217,7 @@ def sidecar_fields_for(
 
     def _add_level(level: FieldLevel, getter) -> None:
         try:
-            schema_fields = getter(datatype, suffix)
+            schema_fields = getter(datatype, suffix, bids_root)
         except (KeyError, ValueError, AttributeError):
             schema_fields = []
         for fi in schema_fields or []:
@@ -164,7 +228,7 @@ def sidecar_fields_for(
             present = name in data
             value = data.get(name) if present else None
             fields.append(SidecarField(
-                level=level, name=name, value=value, present=present,
+                level=_shown_level(level, fi), name=name, value=value, present=present,
                 value_kind=value_kind(value) if present else "missing",
                 description=getattr(fi, "description", None),
             ))
@@ -182,6 +246,102 @@ def sidecar_fields_for(
         fields.append(SidecarField(
             level=FieldLevel.OPTIONAL, name=k, value=v, present=True,
             value_kind=value_kind(v),
+        ))
+    return fields
+
+
+_BIDSVAL_LEVEL_TO_FIELD_LEVEL = {
+    "required": FieldLevel.REQUIRED,
+    "recommended": FieldLevel.RECOMMENDED,
+    "optional": FieldLevel.OPTIONAL,
+    "deprecated": FieldLevel.DEPRECATED,
+    # BIDS Manager's form has no "prohibited" bar; such a field is best shown as
+    # an ordinary row the user can see and delete.
+    "prohibited": FieldLevel.OPTIONAL,
+}
+
+
+def schema_level_for(
+    field: str,
+    datatype: Optional[str],
+    suffix: Optional[str],
+    *,
+    dataset_description: bool = False,
+    bids_root: Optional[Path] = None,
+) -> Optional[FieldLevel]:
+    """The level the standard declares for ``field``, if it says anything.
+
+    Returns ``None`` when the schema has nothing to say. A caller must then
+    treat the field as OPTIONAL rather than inferring something stronger from
+    how loudly the validator complained: severity does not carry the level back,
+    since optional and prohibited are both silent.
+    """
+    datatype = _resolve_datatype(datatype, suffix)
+    try:
+        if dataset_description:
+            specs = bidsval_schema.dataset_description_fields(dataset_root=bids_root)
+        elif datatype and suffix:
+            specs = bidsval_schema.sidecar_fields(
+                datatype, suffix, dataset_root=bids_root,
+            )
+        else:
+            return None
+    except Exception:
+        return None
+    canonical = _canonical(field)
+    for spec in specs:
+        if _canonical(spec.name) == canonical:
+            return _shown_level(
+                _BIDSVAL_LEVEL_TO_FIELD_LEVEL.get(spec.level, FieldLevel.OPTIONAL),
+                spec,
+            )
+    return None
+
+
+def _dataset_description_fields_for(
+    fp: Path, bids_root: Optional[Path] = None,
+) -> list[SidecarField]:
+    """Form rows for ``dataset_description.json``.
+
+    Its levels are widely mis-stated because they are easy to guess wrong:
+    ``Name`` and ``BIDSVersion`` are required, ``License`` and ``DatasetType``
+    recommended, and ``Authors``, ``Funding``, ``EthicsApprovals`` and
+    ``ReferencesAndLinks`` are merely optional.
+    """
+    data = _load_json_object(fp)
+    if data is None:
+        return []
+    try:
+        specs = bidsval_schema.dataset_description_fields(
+            dataset_root=bids_root or Path(fp).parent,
+        )
+    except Exception:
+        specs = []
+
+    seen: set[str] = set()
+    fields: list[SidecarField] = []
+    for spec in specs:
+        if spec.name in seen:
+            continue
+        seen.add(spec.name)
+        present = spec.name in data
+        value = data.get(spec.name) if present else None
+        fields.append(SidecarField(
+            level=_shown_level(
+                _BIDSVAL_LEVEL_TO_FIELD_LEVEL.get(spec.level, FieldLevel.OPTIONAL),
+                spec,
+            ),
+            name=spec.name, value=value, present=present,
+            value_kind=value_kind(value) if present else "missing",
+            description=spec.description or None,
+        ))
+    for key, value in data.items():
+        if key in seen:
+            continue
+        seen.add(key)
+        fields.append(SidecarField(
+            level=FieldLevel.OPTIONAL, name=key, value=value, present=True,
+            value_kind=value_kind(value),
         ))
     return fields
 
@@ -215,6 +375,7 @@ def todo_issues_for(fp: Path) -> list[Issue]:
 __all__ = [
     "value_kind",
     "infer_datatype_suffix",
+    "schema_level_for",
     "sidecar_fields_for",
     "todo_issues_for",
     "sibling_json",

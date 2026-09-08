@@ -228,6 +228,13 @@ ul.issues li {
 }
 ul.issues li:first-child { border-top: 0; }
 
+ul.issues .provenance {
+    display: block;
+    margin-left: 4.2rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem;
+    opacity: 0.55;
+}
 ul.issues .rule {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
@@ -505,6 +512,12 @@ def _render_issue_list(issues: Iterable[Issue]) -> str:
             f'<span class="rule">{html.escape(issue.rule_id)}</span>'
             f'<span class="msg">{html.escape(issue.message)}</span>'
         )
+        if issue.schema_rule:
+            # Provenance, when the finding came from a schema rule. BM's own
+            # checks have none and show none.
+            parts.append(
+                f'<span class="provenance">{html.escape(issue.schema_rule)}</span>'
+            )
         if issue.fix_label:
             parts.append(
                 f'<span class="fix">{html.escape(issue.fix_label)}</span>'

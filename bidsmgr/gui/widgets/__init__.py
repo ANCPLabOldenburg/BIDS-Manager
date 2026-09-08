@@ -2,9 +2,9 @@
 
 Public surface — every widget the Converter and Editor views compose:
 
-* :class:`Chip`, :class:`VSep`, :class:`PaneHeader`, :class:`PathBar`
-  — generic primitives (toolbar chips, separators, pane headers,
-  path-display strips).
+* :class:`Chip`, :class:`VSep`, :class:`PaneHeader`, :class:`PathBar`,
+  :class:`ElidedLabel` — generic primitives (toolbar chips, separators,
+  pane headers, path-display strips, width-safe runtime text).
 * :class:`StatusBadge` + :func:`badge_paint` — severity badge widget
   and the paint helper the table delegates re-use.
 * :class:`SidecarRow`     — one row of the Editor's sidecar form.
@@ -18,7 +18,7 @@ from .image_label import ImageLabel
 from .json_tree_view import JsonTreeView
 from .nifti_viewer_pane import NiftiViewerPane
 from .panel_frame import PanelFrame
-from .primitives import Chip, PaneHeader, PathBar, VSep
+from .primitives import Chip, ElidedLabel, PaneHeader, PathBar, VSep
 from .recording_viewer_pane import RecordingViewerPane, is_recording_path
 from .sidecar_form_pane import SidecarFormPane, find_peer_files
 from .sidecar_row import SidecarRow
@@ -38,6 +38,7 @@ __all__ = [
     "BidsTreePane",
     "BusySpinner",
     "Chip",
+    "ElidedLabel",
     "ImageLabel",
     "JsonTreeView",
     "KIND_BG_TOKEN",

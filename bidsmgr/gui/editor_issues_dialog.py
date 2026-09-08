@@ -121,6 +121,7 @@ class _FileCard(QFrame):
                     body_html=issue.message,
                     fix_label=issue.fix_label,
                     field=issue.field,
+                    schema_rule=issue.schema_rule,
                 ))
 
 

@@ -219,3 +219,84 @@ def test_launch_update_helper_invokes_popen_with_helper_path(monkeypatch, tmp_pa
     pkg_idx = cmd.index("--package") + 1
     assert cmd[pkg_idx] == "bids-manager"
     assert "--restart-cmd" in cmd
+
+
+# ---------------------------------------------------------------------------
+# The release-notes link in the update prompt
+#
+# Being asked to accept an update is exactly when somebody wants to know what
+# is in it, and accepting closes the application to install itself, so the
+# question has to be answerable before the dialog goes away.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("version", "expected_anchor"),
+    [
+        ("1.2.6", "#v126"),
+        ("1.2.5", "#v125"),
+        ("1.2.4.2", "#v1242"),
+        ("2.0.0", "#v200"),
+    ],
+)
+def test_release_notes_url_anchors_at_the_version(version, expected_anchor):
+    """The documentation numbers its release cards by the version with the dots
+    dropped, so the link lands on the right card rather than the top of a long
+    page."""
+    from bidsmgr.gui.update_widgets import release_notes_url
+
+    url = release_notes_url(version)
+    assert url.endswith(expected_anchor)
+    assert "bids_manager_documentation/updates.html" in url
+
+
+@pytest.mark.parametrize("version", ["1.2.6.dev0", "", "not-a-version", "1.2.6rc1"])
+def test_release_notes_url_degrades_to_the_page(version):
+    """A dev build or a local install has no card of its own. Opening the notes
+    at the top beats sending somebody to a fragment that does not exist."""
+    from bidsmgr.gui.update_widgets import release_notes_url
+
+    assert release_notes_url(version).endswith("updates.html")
+
+
+def test_the_notes_url_points_at_a_page_the_documentation_actually_has():
+    """Guards the two halves drifting apart: the anchor scheme lives here and
+    the cards live in the documentation repository."""
+    from bidsmgr.gui.update_widgets import release_notes_url
+
+    assert release_notes_url("1.2.6") == (
+        "https://ancplaboldenburg.github.io/bids_manager_documentation/"
+        "updates.html#v126"
+    )
+
+
+def test_the_sample_datasets_section_link_is_the_documentation_page():
+    """Alongside the direct downloads, one link to the section that says what
+    each dataset demonstrates, for somebody who does not know which they
+    want."""
+    from bidsmgr.gui.welcome_panel import _SAMPLE_DATASETS_URL
+
+    assert _SAMPLE_DATASETS_URL == (
+        "https://ancplaboldenburg.github.io/bids_manager_documentation/"
+        "tutorial.html#datasets"
+    )
+
+
+def test_every_dataset_the_documentation_offers_is_downloadable_from_the_gui():
+    """The list here and the "Pick a dataset" section drifted once already: the
+    panel had four while the documentation offered six, and one share link had
+    been reissued so the application handed out a stale file. Six distinct
+    downloads, each a share link, is the shape that has to hold."""
+    from bidsmgr.gui.welcome_panel import _SAMPLE_DATASETS
+
+    assert len(_SAMPLE_DATASETS) == 6
+    urls = [url for _label, url in _SAMPLE_DATASETS]
+    assert len(set(urls)) == 6, "a duplicated link means one dataset is unreachable"
+    assert all(u.startswith("https://cloud.uol.de/s/") for u in urls)
+    assert all(u.endswith("/download") for u in urls)
+    labels = [label for label, _url in _SAMPLE_DATASETS]
+    assert len(set(labels)) == 6
+    # Every modality the tool converts should be reachable from the Home tab.
+    joined = " ".join(labels).lower()
+    for modality in ("mri", "pet", "eeg", "meg", "multimodal"):
+        assert modality in joined, modality

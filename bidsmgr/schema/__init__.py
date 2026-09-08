@@ -11,7 +11,8 @@ Public API:
 * ``required_entities``, ``optional_entities``, ``deprecated_entities``,
   ``allowed_entities``, ``entity_info``, ``entity_format``, ``entity_order``
 * ``required_sidecar_fields``, ``recommended_sidecar_fields``,
-  ``optional_sidecar_fields``, ``deprecated_sidecar_fields``, ``field_metadata``
+  ``optional_sidecar_fields``, ``deprecated_sidecar_fields``,
+  ``dataset_description_fields``, ``field_metadata``
 * ``build_basename``, ``build_relative_path``
 * ``validate_entity_set``, ``validate_basename``, ``validate_dataset``
 * Loader: ``get_schema``, ``schema_version``, ``bids_version``
@@ -22,14 +23,17 @@ Public API:
 from __future__ import annotations
 
 from .engine import (
+    coerce,
     allowed_entities,
     build_basename,
     build_relative_path,
     deprecated_entities,
+    dataset_description_fields,
     deprecated_sidecar_fields,
     entity_format,
     entity_info,
     entity_order,
+    field_applies,
     field_metadata,
     list_datatypes,
     list_extensions,
@@ -39,8 +43,16 @@ from .engine import (
     recommended_sidecar_fields,
     required_entities,
     required_sidecar_fields,
+    sidecar_fields,
 )
-from .loader import bids_version, get_schema, schema_version
+from .loader import (
+    active_version,
+    available_versions,
+    bids_version,
+    get_schema,
+    schema_version,
+    set_active_version,
+)
 from .types import (
     Datatype,
     Entity,
@@ -55,6 +67,10 @@ from .types import (
 from .validation import validate_basename, validate_dataset, validate_entity_set
 
 __all__ = [
+    "coerce",
+    "active_version",
+    "available_versions",
+    "set_active_version",
     # listing
     "list_datatypes",
     "list_suffixes",
@@ -72,6 +88,9 @@ __all__ = [
     "recommended_sidecar_fields",
     "optional_sidecar_fields",
     "deprecated_sidecar_fields",
+    "dataset_description_fields",
+    "sidecar_fields",
+    "field_applies",
     "field_metadata",
     # name building
     "build_basename",

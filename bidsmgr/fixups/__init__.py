@@ -21,14 +21,21 @@ Planned later: ``derivatives`` (DWI map relocation: FA/ADC/TRACE/ColFA →
 
 from .companion import attach_companion_files
 from .eeg_sidecar import enrich_recording_sidecars
+from .pet_sidecar import enrich_pet_sidecars
 from .fieldmaps import apply_fieldmap_renames
 from .intended_for import populate_intended_for
 from .scans_tsv import update_scans_tsv
+from .blood import convert_blood_files
+from .sidecar_schema import apply_stated_metadata, repair_converter_output
 
 __all__ = [
+    "convert_blood_files",
     "apply_fieldmap_renames",
     "populate_intended_for",
+    "apply_stated_metadata",
+    "repair_converter_output",
     "update_scans_tsv",
+    "enrich_pet_sidecars",
     "enrich_recording_sidecars",
     "attach_companion_files",
 ]

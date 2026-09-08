@@ -494,9 +494,9 @@ def _eeg_row(**over):
 def test_force_edf_flag_threads_onto_eeg_task(tmp_path):
     """``--force-edf`` reaches the EEG ConvertTask; default leaves it off."""
     row = _eeg_row()
-    t_off = convert_mod._row_to_task_eeg_meg(row, tmp_path)
+    t_off = convert_mod._row_to_task_file_based(row, tmp_path)
     assert t_off is not None and t_off.force_edf is False
 
-    t_on = convert_mod._row_to_task_eeg_meg(row, tmp_path, force_edf=True)
+    t_on = convert_mod._row_to_task_file_based(row, tmp_path, force_edf=True)
     assert t_on is not None and t_on.force_edf is True
     assert t_on.datatype == "eeg"

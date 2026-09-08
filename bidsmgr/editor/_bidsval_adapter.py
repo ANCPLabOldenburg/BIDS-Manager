@@ -21,8 +21,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from bidsval import Severity as BvSeverity
+from bidsval import schema as bidsval_schema
 
 from . import bidsmgr_checks as bm
+from . import pet_checks
 from .types import (
     FieldLevel,
     FileVerdict,
@@ -69,6 +71,10 @@ def to_bm_issue(bv_issue) -> Issue:
     fix's target field) becomes ``field`` so the Editor's fix button can jump to
     that row in the sidecar form. The button is only offered when there is a
     field to jump to.
+
+    ``rule`` is carried across as ``schema_rule``: the path in the BIDS schema
+    the finding came from. bidsval sets it on every issue it raises, and showing
+    it lets a user check the standard rather than trust the message.
     """
     fix = bv_issue.fix
     field = (fix.field if (fix and fix.field) else bv_issue.sub_code) or None
@@ -77,6 +83,7 @@ def to_bm_issue(bv_issue) -> Issue:
     return Issue(
         severity=to_bm_severity(bv_issue.severity),
         rule_id=bv_issue.code,
+        schema_rule=getattr(bv_issue, "rule", None) or None,
         message=_compose_message(bv_issue),
         field=field,
         line=getattr(bv_issue, "line", None),
@@ -103,7 +110,13 @@ def to_bm_file_verdict(bv_verdict, bids_root: Path, *, flag_todos: bool = True) 
     if rel.name.lower().endswith(".json"):
         if flag_todos:
             issues.extend(bm.todo_issues_for(abs_path))
-        sidecar_fields = bm.sidecar_fields_for(abs_path, datatype, suffix)
+        # PET cross-field consistency. A schema validator can only ask whether
+        # each field is present and well typed; whether the fields AGREE is
+        # arithmetic, so it lives here. All warnings, never errors.
+        issues.extend(pet_checks.pet_issues_for(abs_path))
+        sidecar_fields = bm.sidecar_fields_for(
+            abs_path, datatype, suffix, Path(bids_root),
+        )
 
     severity = rollup_severity([i.severity for i in issues])
     return FileVerdict(
@@ -131,6 +144,12 @@ def to_bm_report(
     up with the same per-file + dataset-issue accounting the GUI's own
     ``_recompute_report_summary`` uses, so the chips and summary line are stable.
     """
+    # Forget anything read from this dataset on a previous run. The form asks
+    # the schema questions that a real tree answers ("is there a
+    # genetic_info.json?"), and the user may have just created the file the
+    # answer turns on.
+    bidsval_schema.invalidate_dataset_cache()
+
     files = [
         to_bm_file_verdict(fv, bids_root, flag_todos=flag_todos)
         for fv in bv_report.files
@@ -143,7 +162,7 @@ def to_bm_report(
     # highlight / fix can locate it. bidsval flags a broader set of recommended
     # fields than the schema-derived form rows, so without this only fields that
     # already had a row (incl. present TODO fields) could be highlighted.
-    _ensure_field_rows(files)
+    _ensure_field_rows(files, Path(bids_root))
     dataset_issues = [to_bm_issue(i) for i in bv_report.dataset_issues.issues]
 
     report = ValidationReport(
@@ -198,36 +217,37 @@ def _mirror_sidecar_findings(files: list[FileVerdict]) -> None:
             target.severity = rollup_severity([i.severity for i in target.issues])
 
 
-_LEVEL_RANK = {Severity.ERR: 2, Severity.WARN: 1, Severity.OK: 0}
-
-
-def _ensure_field_rows(files: list[FileVerdict]) -> None:
+def _ensure_field_rows(files: list[FileVerdict], bids_root: Path) -> None:
     """For every ``.json`` verdict, add a sidecar form row for each field that a
     finding refers to but that has no row yet (in place).
 
     The schema-derived rows (``sidecar_fields``) cover only part of what bidsval
     flags - it warns about a broader set of recommended fields. Without a row a
     finding's field cannot be scrolled to / highlighted / focused, which is why
-    only already-present (e.g. TODO) fields could be highlighted before. Added
-    rows are missing fields, leveled by the finding's worst severity.
+    only already-present (e.g. TODO) fields could be highlighted before.
+
+    The level of an added row is ASKED of the schema, never inferred from the
+    finding's severity. That inference used to read an error as required and
+    anything else as recommended, which cannot be right: the mapping is not
+    reversible, since optional and prohibited are both silent. It painted seven
+    optional ``dataset_description.json`` fields as required. Where the schema
+    says nothing, the row is optional, which claims the least.
     """
     for f in files:
         if not str(f.path).lower().endswith(".json"):
             continue
         existing = {sf.name for sf in f.sidecar_fields}
-        worst: dict[str, Severity] = {}
-        for issue in f.issues:
-            if not issue.field or issue.field in existing:
-                continue
-            if _LEVEL_RANK.get(issue.severity, 0) > _LEVEL_RANK.get(
-                worst.get(issue.field, Severity.OK), 0
-            ):
-                worst[issue.field] = issue.severity
-        for name, sev in worst.items():
-            level = FieldLevel.REQUIRED if sev is Severity.ERR else FieldLevel.RECOMMENDED
+        is_dd = Path(f.path).name == "dataset_description.json"
+        for name in dict.fromkeys(
+            i.field for i in f.issues if i.field and i.field not in existing
+        ):
+            level = bm.schema_level_for(
+                name, f.datatype, f.suffix, dataset_description=is_dd,
+                bids_root=bids_root,
+            )
             f.sidecar_fields.append(SidecarField(
-                level=level, name=name, value=None, present=False,
-                value_kind="missing",
+                level=level or FieldLevel.OPTIONAL, name=name, value=None,
+                present=False, value_kind="missing",
             ))
 
 

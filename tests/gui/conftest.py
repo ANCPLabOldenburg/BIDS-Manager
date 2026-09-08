@@ -14,7 +14,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication, QSettings
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def isolated_settings(tmp_path: Path) -> Iterator[None]:
     """Redirect ``QSettings`` into a per-test INI file.
 
@@ -22,6 +22,13 @@ def isolated_settings(tmp_path: Path) -> Iterator[None]:
     and ignores ``setPath``) and points it at ``tmp_path``. The
     org/app names also get swapped so a leaked value from outside
     the sandbox cannot poison the test.
+
+    ``autouse`` because opting in is a decision every test author has to
+    remember and 17 of 37 files did not, so those wrote to the developer's
+    REAL settings store. Two consequences, both seen: a test could pass or fail
+    depending on what an earlier run had left behind, which made a genuine
+    regression indistinguishable from noise, and running the suite quietly
+    rewrote the preferences of whoever ran it.
     """
     orig_org = QCoreApplication.organizationName()
     orig_app = QCoreApplication.applicationName()

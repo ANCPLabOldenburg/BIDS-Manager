@@ -25,7 +25,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Sequence, Iterable, Optional
 
 from ..editor import Severity, ValidationReport, render_html, validate
 
@@ -48,6 +48,7 @@ def run_validate_cli(
     flag_todos: bool = True,
     write_report: bool = True,
     html_report: bool = False,
+    datasets: Optional[Sequence[str]] = None,
 ) -> int:
     """Validate every BIDS root under ``target``.
 
@@ -60,7 +61,7 @@ def run_validate_cli(
         log.error("not a directory: %s", target)
         return 2
 
-    bids_roots = list(_iter_bids_roots(target, dataset=dataset))
+    bids_roots = list(_iter_bids_roots(target, dataset=dataset, datasets=datasets))
     if not bids_roots:
         log.warning("no BIDS roots found under %s", target)
         return 2
@@ -91,9 +92,21 @@ def run_validate_cli(
 
 
 def _iter_bids_roots(
-    target: Path, *, dataset: Optional[str] = None,
+    target: Path,
+    *,
+    dataset: Optional[str] = None,
+    datasets: Optional[Sequence[str]] = None,
 ) -> Iterable[Path]:
     """Yield directories that look like BIDS roots under ``target``."""
+    if datasets is not None:
+        # Only the roots this run produced. A caller that says which datasets it
+        # means is never given somebody else's.
+        for name in datasets:
+            candidate = target if target.name == name else target / name
+            if _looks_like_bids_root(candidate):
+                yield candidate
+        return
+
     if dataset:
         candidate = target / dataset
         if _looks_like_bids_root(candidate):
@@ -286,6 +299,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    # One version for the whole run, adopted before any schema question is
+    # asked. Without this the flag would reach the validator alone and a
+    # dataset could be filled in against one version and checked against
+    # another.
+    from ..schema import set_active_version
+    set_active_version(args.schema)
+
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 

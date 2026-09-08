@@ -195,7 +195,7 @@ class TestRegistryDispatch:
     def test_priority_order(self) -> None:
         backends = default_backends()
         assert [b.name for b in backends] == [
-            "physio_dcm", "mne_bids", "dcm2niix_direct",
+            "physio_dcm", "ecat_direct", "mne_bids", "dcm2niix_direct",
         ]
 
     def test_eeg_routes_to_mne_bids(self, tmp_path: Path) -> None:

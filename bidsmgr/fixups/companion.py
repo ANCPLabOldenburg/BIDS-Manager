@@ -17,6 +17,8 @@ import logging
 import shutil
 from pathlib import Path
 
+from .blood import is_blood_role
+
 log = logging.getLogger(__name__)
 
 # BIDS companion suffixes a row may link. Constrained on purpose.
@@ -59,6 +61,9 @@ def attach_companion_files(subject_staging_dir: Path, tasks) -> int:
         prefix = basename.rsplit("_", 1)[0] if "_" in basename else basename
 
         for suffix, src in companions:
+            if is_blood_role(str(suffix)):
+                # A blood curve is converted, not copied. fixups/blood.py owns it.
+                continue
             if suffix not in ALLOWED_COMPANION_SUFFIXES:
                 log.warning(
                     "companion: unsupported suffix %r for %s; skipped", suffix, basename,

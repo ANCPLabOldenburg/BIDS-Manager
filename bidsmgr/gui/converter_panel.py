@@ -123,6 +123,10 @@ class ConverterPanel(QWidget):
     log_message = pyqtSignal(str)
     scan_finished = pyqtSignal(object, object)
     convert_finished = pyqtSignal(int, object)
+    # (current root, the new folder name) when the user asks for the dataset
+    # name change to rename the project itself. The window does the move: this
+    # panel knows what was asked, not how to close and reopen a project.
+    project_rename_requested = pyqtSignal(object, str)
 
     def __init__(self, project: Optional[Project] = None, parent=None) -> None:
         super().__init__(parent)
@@ -682,6 +686,7 @@ class ConverterPanel(QWidget):
         montage: Optional[str] = None,
         n_jobs: int = 1,
         probe_convert: bool = False,
+        preview_converter_fields: bool = True,
         skip_bids_guess: bool = False,
         user_hints=None,
         exclusions=None,
@@ -721,6 +726,7 @@ class ConverterPanel(QWidget):
             dataset=dataset, line_freq=line_freq, montage=montage,
             n_jobs=n_jobs,
             probe_convert=probe_convert,
+            preview_converter_fields=preview_converter_fields,
             skip_bids_guess=skip_bids_guess,
             user_hints=user_hints,
             exclusions=exclusions,
@@ -1135,7 +1141,10 @@ class ConverterPanel(QWidget):
             self.set_columns_visible(dlg.result_visibility())
 
     def _open_recording_meta(self) -> None:
-        """Open the dataset-level EEG/MEG recording-metadata editor.
+        """Open the dataset-level recording-metadata editor.
+
+        Covers EEG/MEG and PET plus the modality-agnostic sections; the dialog
+        shows only the blocks whose modality the scan actually found.
 
         Edits the scaffold beside the inventory TSV (the same file the scan
         seeds and the convert verb auto-discovers). Requires a loaded scan so
@@ -1151,15 +1160,40 @@ class ConverterPanel(QWidget):
         from ..recording_meta import scaffold_sidecar_path
         from .recording_meta_dialog import RecordingMetaDialog
 
+        from ..metadata.template_plan import (
+            blood_conditions, example_paths_for, pair_counts, present_pairs,
+        )
+
+        # The (datatype, suffix) pairs the scan actually found, and one real
+        # path per pair. Without them the dialog had to guess, and its guess was
+        # that a datatype names its own suffix: true for eeg and meg by
+        # coincidence, false for func, whose suffixes are bold and sbref. It
+        # showed "sub-_func.json", which is not a BIDS name, and filed the
+        # answers under "func/func", which nothing ever reads.
+        df = self._model.dataframe() if self._model is not None else None
         scaffold = scaffold_sidecar_path(self._output_tsv)
         dlg = RecordingMetaDialog(
             scaffold, self._present_datatypes(), self,
             montage_suggestions=self._montage_suggestions(),
-            manufacturer_suggestions=self._manufacturer_suggestions(),
+            scan_suggestions=self._scan_suggestions(),
+            present_pairs=present_pairs(df),
+            example_paths=example_paths_for(df),
+            pair_counts=pair_counts(df),
+            # A conditional requirement whose condition we can see holds: a
+            # parent-fraction curve attached to a run makes the metabolite
+            # fields real questions rather than ones nobody can answer.
+            also_ask={("pet", "blood"): blood_conditions(df)},
+            bids_root=self._bids_root,
         )
-        if dlg.exec() and self._model is not None:
+        if not dlg.exec():
+            return
+        if self._model is not None:
             # Re-flow the saved dataset defaults into every inherited row.
             self._model.set_global_spec(self._load_global_spec())
+        if dlg.rename_project_to:
+            self.project_rename_requested.emit(
+                self._bids_root, dlg.rename_project_to,
+            )
 
     def _load_global_spec(self):
         """Load the recording-metadata scaffold for the current inventory.
@@ -1218,10 +1252,22 @@ class ConverterPanel(QWidget):
             return []
         return self._distinct_column("montage_suggestion")
 
-    def _manufacturer_suggestions(self) -> list[str]:
-        """Distinct per-recording manufacturer suggestions found at scan (header
-        for EEG, file-format inference for MEG), for the dialog's summary hint."""
-        return self._distinct_column("manufacturer_suggestion")
+    def _scan_suggestions(self) -> dict[str, list[str]]:
+        """What the scan read out of the recordings, per BIDS field.
+
+        Which column carries which field is stated once, in recording_meta, so
+        the dataset dialog and the per-row panel offer the same hints. Two
+        collectors used to do this with the field names written out here, and
+        they had drifted: the dialog paired tracer with radionuclide into one
+        "FDG / F18" string, which reads well as a summary and is not a value
+        anyone should be offered for either field.
+        """
+        from ..recording_meta import SCAN_SUGGESTION_COLUMNS
+
+        return {
+            name: self._distinct_column(column)
+            for name, column in SCAN_SUGGESTION_COLUMNS.items()
+        }
 
     def _distinct_column(self, column: str) -> list[str]:
         """Order-preserving distinct non-blank values of a model column."""
@@ -1376,12 +1422,10 @@ class ConverterPanel(QWidget):
         # the GUI responsive when the worker is firehose-logging.
         self._log_buffer.append(text)
         # Mirror the latest line into the spinner's status text so the
-        # user has a live one-liner of what's happening.
+        # user has a live one-liner of what's happening. No length guard
+        # needed: the spinner's label elides to the toolbar's own width.
         if self._spinner.is_busy():
-            first_line = text.splitlines()[0] if text else ""
-            if len(first_line) > 80:
-                first_line = first_line[:77] + "…"
-            self._spinner.set_message(first_line)
+            self._spinner.set_message(text.splitlines()[0])
 
     def _flush_log_buffer(self) -> None:
         if not self._log_buffer:
@@ -1533,6 +1577,7 @@ class ConverterPanel(QWidget):
             # columns + the Recording-metadata editor), not scan settings.
             n_jobs=s.scan_n_jobs,
             probe_convert=s.scan_probe_convert,
+            preview_converter_fields=s.scan_converter_preview,
             skip_bids_guess=s.scan_skip_bids_guess,
             user_hints=s.to_user_hints(),
             exclusions=s.to_exclusions(),
@@ -1689,6 +1734,29 @@ class ConverterPanel(QWidget):
     # Post-convert chain
     # ------------------------------------------------------------------
 
+    def _converted_datasets(self) -> Optional[list[str]]:
+        """The datasets THIS conversion wrote, by folder name.
+
+        The post-convert steps are given the parent directory, because that is
+        where convert puts each dataset. Projects are normally kept side by
+        side, so that parent is the home of all of them, and a metadata run
+        there wrote this project's name into every one of its neighbours.
+
+        In project mode there is exactly one; on a free path the inventory's
+        ``dataset`` column says which, and only those are touched.
+        """
+        if self._bids_root is not None:
+            return [self._bids_root.name]
+        if self._model is None or "dataset" not in self._model.dataframe().columns:
+            # Nothing to filter on. Say so with None rather than an empty list,
+            # which would mean "touch nothing" and silently skip the step.
+            return None
+        names = sorted({
+            name for name in (str(v).strip() for v in self._model.dataframe()["dataset"])
+            if name and name.lower() not in ("nan", "none")
+        })
+        return names or None
+
     def _maybe_run_post_convert(self, bids_parent: Path) -> bool:
         """Kick off the metadata + validate chain if settings say so.
 
@@ -1729,6 +1797,7 @@ class ConverterPanel(QWidget):
         s = self._app_settings
         worker = MetadataWorker(
             bids_parent,
+            datasets=self._converted_datasets(),
             inventory_tsv=self._output_tsv,
             # Metadata-engine name defaults to each BIDS root's folder
             # name (i.e. the dataset slug) when ``name`` is None.
@@ -1746,6 +1815,7 @@ class ConverterPanel(QWidget):
         s = self._app_settings
         worker = ValidateWorker(
             bids_parent,
+            datasets=self._converted_datasets(),
             strict=s.post_validate_strict,
             schema=s.validate_schema_version or None,
             max_rows=s.validate_max_rows,

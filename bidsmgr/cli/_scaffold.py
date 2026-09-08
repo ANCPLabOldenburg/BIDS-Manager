@@ -73,6 +73,7 @@ def ensure_dataset_description(
     *,
     name: Optional[str] = None,
     generated_by: Optional[dict] = None,
+    fields: Optional[dict] = None,
 ) -> None:
     """Create or update ``<bids_root>/dataset_description.json``.
 
@@ -83,6 +84,13 @@ def ensure_dataset_description(
     seeds ``Name`` on first write (defaults to the folder name); an existing
     ``Name`` is never overwritten. ``generated_by`` is the backend stamp to
     record; pass ``None`` to scaffold a dataset without adding a generator entry.
+
+    ``fields`` are what the user STATED about this dataset, and they win over
+    what is on disk, ``Name`` included. Everything else set here is a default
+    filled in for want of an answer; these are the answer. Until this existed
+    the agnostic half of the metadata template reached the file only if a
+    separate metadata run happened afterwards, so a user who filled in the form
+    and converted saw none of it.
     """
     p = bids_root / "dataset_description.json"
     if p.exists():
@@ -96,6 +104,10 @@ def ensure_dataset_description(
     data.setdefault("Name", name or bids_root.name)
     data.setdefault("BIDSVersion", schema_bids_version())
     data.setdefault("DatasetType", "raw")
+
+    for key, value in (fields or {}).items():
+        if value not in (None, "", [], {}):
+            data[key] = value
 
     if generated_by is not None:
         existing = data.get("GeneratedBy")

@@ -359,3 +359,50 @@ def test_validate_report_severity_values_round_trip(qapp) -> None:
     assert Severity.OK.value == "ok"
     assert Severity.WARN.value == "warn"
     assert Severity.ERR.value == "err"
+
+
+# ---------------------------------------------------------------------------
+# Provenance in the side validation pane
+# ---------------------------------------------------------------------------
+
+
+def test_the_side_pane_shows_where_a_finding_comes_from(qtbot, tmp_path) -> None:
+    """The pane is where a user reads findings, so it is where provenance belongs.
+
+    It was carried into the issues dialog and the HTML report first, and the
+    pane, which is the one people actually look at, still showed none.
+    """
+    import json
+
+    from bidsmgr.editor import validator as v
+    from bidsmgr.gui.widgets.val_message import ValMessage
+    from bidsmgr.gui.widgets.validation_pane import ValidationPane
+
+    root = tmp_path / "ds"
+    (root / "sub-01" / "anat").mkdir(parents=True)
+    (root / "dataset_description.json").write_text(json.dumps(
+        {"Name": "t", "BIDSVersion": "1.11.1", "DatasetType": "raw"}
+    ))
+    (root / "sub-01" / "anat" / "sub-01_T1w.nii.gz").write_bytes(b"x")
+
+    report = v.validate(root)
+    target = next(f for f in report.files if f.issues)
+
+    pane = ValidationPane()
+    qtbot.addWidget(pane)
+    pane.set_report(report)
+    pane.set_current_file(root / target.path, root)
+
+    rows = pane.findChildren(ValMessage)
+    assert rows, "expected findings to be rendered"
+    with_provenance = [r for r in rows if getattr(r, "_schema_rule", "")]
+    assert with_provenance, "no row showed where it came from"
+    assert all(r._schema_rule.startswith("rules.") for r in with_provenance)
+
+
+def test_a_finding_without_a_schema_rule_shows_no_provenance(qtbot) -> None:
+    from bidsmgr.gui.widgets.val_message import ValMessage
+
+    row = ValMessage("warn", "bidsmgr.todo_placeholder", "our own convention")
+    qtbot.addWidget(row)
+    assert row._schema_rule == ""

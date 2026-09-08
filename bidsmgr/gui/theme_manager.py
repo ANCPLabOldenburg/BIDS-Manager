@@ -74,6 +74,11 @@ DARK: dict[str, str] = {
     'surface2':   '#161b22',
     'surface3':   '#1c2128',
     'border':     '#21262d',
+    # The outline of a control a user types into. Deliberately brighter than
+    # 'border': that one separates panels quietly, while an input has to be
+    # findable at a glance, and on this near-black surface the panel border is
+    # all but invisible.
+    'input_border': '#586069',
     'subtle':     '#1a1f26',
     'text':       '#e6edf3',
     'dim':        '#8b949e',
@@ -110,6 +115,7 @@ LIGHT: dict[str, str] = {
     'surface2':   '#ffffff',
     'surface3':   '#eef1f4',
     'border':     '#d0d7de',
+    'input_border': '#8c959f',
     'subtle':     '#e5e7ea',
     'text':       '#1f2328',
     'dim':        '#656d76',

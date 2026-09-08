@@ -53,6 +53,7 @@ class ValMessage(QFrame):
         body_html: str,
         fix_label: Optional[str] = None,
         field: Optional[str] = None,
+        schema_rule: Optional[str] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -92,6 +93,11 @@ class ValMessage(QFrame):
         body_l.setTextFormat(Qt.TextFormat.RichText)
         body_widget.addWidget(body_l, 1)
 
+        # Where the standard says this, when there is a schema rule behind it.
+        # Findings BIDS Manager raises itself have none, and show none rather
+        # than an invented provenance.
+        self._schema_rule = schema_rule or ""
+
         self._field_name = field or ""
         if fix_label:
             btn = QPushButton(fix_label)
@@ -102,6 +108,23 @@ class ValMessage(QFrame):
             body_widget.addWidget(btn, 0, Qt.AlignmentFlag.AlignTop)
 
         right.addLayout(body_widget)
+
+        # Provenance last, quiet, and only when there is one: the schema path
+        # the finding came from, so the standard can be checked rather than the
+        # message trusted.
+        if self._schema_rule:
+            prov = QLabel(self._schema_rule)
+            prov.setObjectName("val-provenance")
+            prov.setWordWrap(True)
+            prov.setToolTip(
+                "Where this comes from in the BIDS schema.\n"
+                "Look it up in the specification to see what the standard says."
+            )
+            prov.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            right.addWidget(prov)
+
         h.addLayout(right, 1)
 
 

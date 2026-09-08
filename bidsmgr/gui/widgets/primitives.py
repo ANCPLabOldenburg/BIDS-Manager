@@ -13,6 +13,8 @@ Object-name conventions (consumed by ``theme.qss``):
 * ``PaneHeader``    → ``pane-h5`` — 28px uppercase pane title.
 * ``PathBar``       → ``pathbar`` (root), ``path-label`` (left text),
   ``path-field`` (readonly QLineEdit), ``tb-btn-ghost`` (change button).
+* ``ElidedLabel``   → keeps the object name it is given; used wherever
+  runtime text (a path, a log line) must never widen the window.
 
 All four respect palette swaps through the QSS alone; no per-widget
 ``repaint_for_palette`` is needed.
@@ -22,8 +24,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from PyQt6.QtCore import QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QPainter, QPen
+from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QPainter, QPalette, QPen
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -31,6 +33,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSizePolicy,
+    QStyleOption,
 )
 
 
@@ -150,12 +153,106 @@ class VSep(QFrame):
 
 
 class PaneHeader(QLabel):
-    """28px uppercase header used at the top of every splitter pane."""
+    """28px uppercase header used at the top of every splitter pane.
+
+    It elides rather than setting a floor. A pane header carries a name and
+    often a path, and a plain QLabel reports all of it as its MINIMUM width, so
+    the header alone stopped the Properties pane narrowing past 191 px however
+    small its contents could go.
+    """
 
     def __init__(self, text: str, parent=None) -> None:
         super().__init__(text.upper(), parent)
         self.setObjectName("pane-h5")
         self.setFixedHeight(28)
+        self._full = text.upper()
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        self._full = text
+        super().setText(text)
+        self.setToolTip(text)
+        self._elide()
+
+    def minimumSizeHint(self):  # noqa: N802 - Qt override
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        room = max(0, self.width() - 12)
+        if not self._full or not room:
+            return
+        shown = self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, room,
+        )
+        if shown != QLabel.text(self):
+            QLabel.setText(self, shown)
+
+
+class ElidedLabel(QLabel):
+    """A single-line label that can never widen the window.
+
+    A plain ``QLabel`` reports its full text width as *both* its size
+    hint and its **minimum** size hint, so a long runtime string (a scan
+    path, a converter log line, a traceback in the status bar) raises the
+    layout minimum of every ancestor and Qt grows the window to honour
+    it. That is why status text used to be hard-truncated at an arbitrary
+    character count — a workaround that still let the window jump.
+
+    This label reports a zero minimum width instead and elides its text
+    to whatever width the layout happens to grant it, re-eliding on every
+    repaint (so a window resize is enough to reveal more of it). The full
+    string stays available through :meth:`text` and is mirrored into the
+    tooltip, so nothing is lost.
+    """
+
+    def __init__(
+        self,
+        text: str = "",
+        parent=None,
+        *,
+        mode: Qt.TextElideMode = Qt.TextElideMode.ElideRight,
+    ) -> None:
+        super().__init__(text, parent)
+        self._mode = mode
+        # Preferred (not Ignored): the layout still offers the label the
+        # room its text wants when there is spare width, but ShrinkFlag
+        # lets it fall back to ``minimumSizeHint`` (width 0) when there
+        # is not, instead of pushing the shortfall onto the window.
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.setToolTip(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 — Qt naming
+        super().setText(text)
+        # Hovering recovers whatever the elision dropped.
+        self.setToolTip(text)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 — Qt naming
+        """Claim no horizontal room at all; keep the natural height."""
+        return QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, _evt) -> None:  # noqa: N802 — Qt naming
+        painter = QPainter(self)
+        opt = QStyleOption()
+        # initFrom carries the QSS-resolved palette and font across, so
+        # the elided text keeps the colour theme.qss assigned to it.
+        opt.initFrom(self)
+        elided = painter.fontMetrics().elidedText(
+            self.text(), self._mode, self.width()
+        )
+        self.style().drawItemText(
+            painter,
+            self.rect(),
+            int(self.alignment()),
+            opt.palette,
+            self.isEnabled(),
+            elided,
+            QPalette.ColorRole.WindowText,
+        )
 
 
 class PathBar(QFrame):
@@ -222,4 +319,4 @@ class PathBar(QFrame):
         return raw[3:] if raw[:1] in ("✔", "○") else raw
 
 
-__all__ = ["Chip", "PaneHeader", "PathBar", "VSep"]
+__all__ = ["Chip", "ElidedLabel", "PaneHeader", "PathBar", "VSep"]

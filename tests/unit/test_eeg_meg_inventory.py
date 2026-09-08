@@ -9,6 +9,7 @@ and don't need a real mne.
 from __future__ import annotations
 
 import json
+import dataclasses
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -286,6 +287,9 @@ class _StubProbe:
     subj_age: str = ""
     event_codes: tuple[str, ...] = ()
     montage_suggestion: str = ""
+    # What mne-bids will derive from the recording, which the real probe reads
+    # while it has the file open.
+    derived_fields: dict = dataclasses.field(default_factory=dict)
 
 
 def _patch_probe(monkeypatch, *, datatype: str = "eeg") -> None:

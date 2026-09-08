@@ -43,9 +43,14 @@ class ValidateWorker(QThread):
         max_rows: int = 1000,
         flag_todos: bool = True,
         html_report: bool = False,
+        datasets=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
+        # The dataset names this run may touch. Without it the walk finds
+        # every BIDS root under the target, and projects are kept side by
+        # side, so one project's metadata reached all of them.
+        self._datasets = list(datasets) if datasets is not None else None
         self._target = Path(target)
         self._strict = strict
         self._strict_warn = strict_warn
@@ -74,8 +79,18 @@ class ValidateWorker(QThread):
                 max_rows=self._max_rows,
                 flag_todos=self._flag_todos,
                 html_report=self._html_report,
+                datasets=self._datasets,
             )
-            verdict = "clean" if rc == 0 else f"errored (rc={rc})"
+            # rc=1 means the DATASET did not pass, which is an ordinary result
+            # and the whole point of running a validator. Only rc=2 means the
+            # validator could not run at all. Calling both "errored" told the
+            # user their tool had broken when it had in fact worked and found
+            # something.
+            verdict = {
+                0: "passed: no errors",
+                1: "finished: the dataset has errors, see the report",
+                2: "could not run: no BIDS dataset found at that path",
+            }.get(rc, f"finished with an unexpected status (rc={rc})")
             self.progress.emit(f"Validation {verdict}")
             self.finished_with_result.emit(rc, self._target)
         except Exception:

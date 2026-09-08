@@ -44,12 +44,13 @@ Implementation notes
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
-from PyQt6.QtCore import QEvent, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QImage,
@@ -165,6 +166,47 @@ _WHEEL_PIXEL_STEP = 40.0
 _CROSSHAIR_HALO = QColor(0, 0, 0, 160)
 
 
+def read_pet_frame_times(nifti_path: Path) -> Optional[np.ndarray]:
+    """Frame start times in seconds for a 4-D PET image, or ``None``.
+
+    A PET series is 4-D in the same shape as a BOLD run, but its fourth axis
+    is nothing like one: BOLD frames are evenly spaced, while PET frames get
+    progressively longer as the tracer decays, so a 5 s frame and a 300 s
+    frame sit side by side. Plotting such a series against volume index draws
+    every frame the same width, which misrepresents the curve exactly where
+    it matters most, in the early fast-changing part.
+
+    So read the real times from the sidecar and plot against seconds. Returns
+    ``None`` for anything that is not a PET image with usable frame times, in
+    which case the caller keeps the volume-index axis.
+    """
+    if "_pet" not in nifti_path.name.lower():
+        return None
+    sidecar = nifti_path
+    for suffix in (".nii.gz", ".nii"):
+        if sidecar.name.lower().endswith(suffix):
+            sidecar = sidecar.with_name(sidecar.name[: -len(suffix)] + ".json")
+            break
+    if not sidecar.is_file():
+        return None
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    starts = data.get("FrameTimesStart")
+    if not isinstance(starts, list) or len(starts) < 2:
+        return None
+    try:
+        times = np.asarray([float(v) for v in starts], dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if not np.all(np.isfinite(times)):
+        return None
+    return times
+
+
 def _load_nifti(path: Path) -> tuple[Any, np.ndarray, dict]:
     """Load a NIfTI from disk into ``(img, data, meta)``.
 
@@ -213,6 +255,61 @@ def _load_nifti(path: Path) -> tuple[Any, np.ndarray, dict]:
     return img, unstructured.astype(np.float32, copy=False), meta
 
 
+class _HotKeyWatcher(QObject):
+    """Mirrors the H key's state onto the pane, application-wide.
+
+    "H + scroll" has to work while the pointer is over the canvas without the
+    canvas holding keyboard focus, which needs an application-wide filter. What
+    it must NOT need is the pane itself acting as that filter: a pane is
+    destroyed every time the editor swaps the centre widget, and the filter
+    outlived it.
+
+    Never consumes an event; it only records the key state.
+    """
+
+    def __init__(self, pane: "NiftiViewerPane") -> None:
+        super().__init__(pane)
+        self._pane = pane
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt signature
+        try:
+            et = event.type()
+            if et == QEvent.Type.KeyPress:
+                if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
+                    self._pane._h_key_down = True
+            elif et == QEvent.Type.KeyRelease:
+                if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
+                    self._pane._h_key_down = False
+            elif et == QEvent.Type.ApplicationDeactivate:
+                # Losing focus can swallow the key-release; reset so H doesn't
+                # get stuck "down" after an app switch.
+                self._pane._h_key_down = False
+        except RuntimeError:
+            # The pane went away between Qt dispatching this event and our
+            # reading it. Nothing to record, and nothing worth raising into
+            # the event loop, where an exception is fatal under PyQt6.
+            pass
+        return False
+
+
+def _uninstall_watcher(watcher: _HotKeyWatcher):
+    """A destroyed-handler that captures the WATCHER, never the pane.
+
+    Connecting a bound method of the pane would hand the signal a reference to
+    the very object being destroyed, which is what has to be avoided here.
+    """
+
+    def _handler(*_args) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.removeEventFilter(watcher)
+            except RuntimeError:
+                pass
+
+    return _handler
+
+
 class NiftiViewerPane(QWidget):
     """2-D slice viewer for ``.nii`` / ``.nii.gz`` files.
 
@@ -237,6 +334,10 @@ class NiftiViewerPane(QWidget):
         self.setObjectName("pane-dark")
 
         self._current_file: Optional[Path] = None
+        # X values for the 4-D graph: real seconds for PET, volume index
+        # otherwise. Shared between the rebuild and the cheap marker update.
+        self._graph_x: Optional[np.ndarray] = None
+        self._graph_x_is_time: bool = False
         self._current_root: Optional[Path] = None
         # Loaded array + nibabel image. ``None`` means no file bound.
         self._data: Optional[np.ndarray] = None
@@ -401,13 +502,23 @@ class NiftiViewerPane(QWidget):
         # canvas without it needing keyboard focus. The filter never
         # consumes events — it only mirrors the key state.
         app = QApplication.instance()
+        self._hotkey_watcher: Optional[_HotKeyWatcher] = None
         if app is not None:
-            app.installEventFilter(self)
-            # Remove the filter before the interpreter tears PyQt down.
-            # A QApplication holding an event-filter pointer to this pane
-            # during finalisation can leave sip visiting a freed wrapper
-            # (SIGBUS in sip_api_visit_wrappers at exit). Qt auto-drops
-            # this connection if the pane is destroyed first.
+            # The filter is a small CHILD object rather than the pane itself.
+            # Filtering with the pane left the QApplication holding a filter
+            # pointer to a pane that had already been destroyed, because the
+            # only teardown was on aboutToQuit and panes are destroyed long
+            # before the app quits (every time the editor swaps the centre
+            # widget). The next event dispatched then hit a dead wrapper:
+            # "RuntimeError: wrapped C/C++ object of type NiftiViewerPane has
+            # been deleted". A child dies with its parent, deterministically,
+            # and is unregistered on the way out.
+            self._hotkey_watcher = _HotKeyWatcher(self)
+            app.installEventFilter(self._hotkey_watcher)
+            self.destroyed.connect(_uninstall_watcher(self._hotkey_watcher))
+            # Also drop it before the interpreter tears PyQt down: a filter
+            # still registered at finalisation can leave sip visiting a freed
+            # wrapper (SIGBUS in sip_api_visit_wrappers at exit).
             app.aboutToQuit.connect(self._teardown_event_filter)
 
         # Single-key shortcuts (A/S/C/M/O). Scoped to the pane's focus,
@@ -429,22 +540,8 @@ class NiftiViewerPane(QWidget):
 
     def _teardown_event_filter(self) -> None:
         app = QApplication.instance()
-        if app is not None:
-            app.removeEventFilter(self)
-
-    def eventFilter(self, obj, event):  # noqa: N802 - Qt signature
-        et = event.type()
-        if et == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
-                self._h_key_down = True
-        elif et == QEvent.Type.KeyRelease:
-            if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
-                self._h_key_down = False
-        elif et == QEvent.Type.ApplicationDeactivate:
-            # Losing focus can swallow the key-release; reset so H doesn't
-            # get stuck "down" after an app switch.
-            self._h_key_down = False
-        return super().eventFilter(obj, event)
+        if app is not None and self._hotkey_watcher is not None:
+            app.removeEventFilter(self._hotkey_watcher)
 
     # ------------------------------------------------------------------
     # Public API
@@ -2279,12 +2376,24 @@ class NiftiViewerPane(QWidget):
         except ImportError:  # pragma: no cover
             return
 
+        # PET frames are unevenly spaced, so plot against real seconds when
+        # the sidecar says so. Anything else keeps the volume-index axis.
+        frame_times = (
+            read_pet_frame_times(self._current_file)
+            if self._current_file is not None else None
+        )
         level = self._scope_spin.value()
         dim = 2 * (level - 1) + 1
         half = dim // 2
         i0, j0, k0 = self._cross_voxel
         orient = self._orientation
         n_vols = self._data.shape[3]
+        if frame_times is not None and len(frame_times) == n_vols:
+            self._graph_x = frame_times
+            self._graph_x_is_time = True
+        else:
+            self._graph_x = np.arange(n_vols, dtype=float)
+            self._graph_x_is_time = False
         mark_all = self._mark_neighbors_box.isChecked()
 
         # First pass — collect every neighbour's time-series so we can
@@ -2349,19 +2458,26 @@ class NiftiViewerPane(QWidget):
                 # Disable autorange and pin both axes — the grid is a
                 # static visualisation, not an interactive plot.
                 vb.disableAutoRange()
-                plot.setXRange(0, max(n_vols - 1, 1), padding=0)
+                x_vals = self._graph_x
+                plot.setXRange(float(x_vals[0]), float(max(x_vals[-1], x_vals[0] + 1)),
+                               padding=0)
                 plot.setYRange(global_min, global_max, padding=0.02)
-                plot.hideAxis("bottom")
-                plot.hideAxis("left")
                 is_center = (r == half and c == half)
-                curve = plot.plot(
-                    np.arange(n_vols), ts, pen=curve_pen,
-                )
+                # A time axis is worth its pixels: without it, "seconds" is a
+                # claim the plot does not back up. The index axis is not, so it
+                # stays hidden as before.
+                if self._graph_x_is_time and is_center:
+                    plot.showAxis("bottom")
+                    plot.setLabel("bottom", "time", units="s")
+                else:
+                    plot.hideAxis("bottom")
+                plot.hideAxis("left")
+                curve = plot.plot(x_vals, ts, pen=curve_pen)
                 marker = None
                 if mark_all or is_center:
                     y_val = float(ts[vol_idx])
                     marker = pg.ScatterPlotItem(
-                        [vol_idx], [y_val],
+                        [float(self._graph_x[vol_idx])], [y_val],
                         size=dot_size,
                         brush=marker_brush,
                         pen=marker_pen,
@@ -2395,8 +2511,10 @@ class NiftiViewerPane(QWidget):
                 continue
             ts = cell["ts"]
             idx = max(0, min(vol_idx, len(ts) - 1))
+            x_vals = getattr(self, "_graph_x", None)
+            x_at = float(x_vals[idx]) if x_vals is not None and idx < len(x_vals) else float(idx)
             marker.setData(
-                [idx], [float(ts[idx])], size=dot_size,
+                [x_at], [float(ts[idx])], size=dot_size,
             )
 
     # ------------------------------------------------------------------

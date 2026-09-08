@@ -14,26 +14,22 @@ import functools
 import re
 
 from .. import schema as schema_mod
+from ..recording_meta.chain import _ACQ_TO_BIDS
 
-# UI field key -> BIDS ``objects.metadata`` key. ``None`` means the field is a
-# convention / non-metadata column; use ``_FALLBACKS``.
+# UI field key -> BIDS ``objects.metadata`` key.
+#
+# Read from the chain rather than listed here. This module used to keep its own
+# copy, so "which BIDS field does ``dewar_position`` mean" had two answers that
+# had to be kept equal by hand: a tooltip could describe one field while the
+# converter wrote another. The chain owns that translation because it is what
+# the chain does.
 _FIELD_BIDS_KEY: dict[str, str] = {
-    "manufacturer": "Manufacturer",
-    "amplifier_model": "ManufacturersModelName",
-    "software_versions": "SoftwareVersions",
-    "institution_name": "InstitutionName",
-    "institution_dept": "InstitutionalDepartmentName",
-    "line_freq": "PowerLineFrequency",
-    "eeg_reference": "EEGReference",
-    "eeg_ground": "EEGGround",
-    "cap_manufacturer": "CapManufacturer",
-    "cap_model": "CapManufacturersModelName",
-    # MEG-specific (manual only - channel-derived MEG fields are left to mne-bids)
-    "dewar_position": "DewarPosition",
-    "associated_empty_room": "AssociatedEmptyRoom",
-    "subject_artefact_description": "SubjectArtefactDescription",
-    "manufacturer_suggestion": "Manufacturer",
+    attr: names[0] for attr, names in _ACQ_TO_BIDS if names
 }
+# One alias the table adds: a read-only column showing what the scan detected,
+# which documents the same field.
+_FIELD_BIDS_KEY["manufacturer_suggestion"] = "Manufacturer"
+_FIELD_BIDS_KEY["line_freq"] = "PowerLineFrequency"
 
 # Fields that are BIDS conventions or participants.tsv columns (not sidecar
 # metadata keys), so they are not in ``objects.metadata``.

@@ -25,7 +25,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
@@ -178,6 +178,15 @@ class ProbeResult:
     # enters it explicitly.
     event_codes: tuple[str, ...] = ()  # distinct annotation/trigger labels
     montage_suggestion: str = ""       # "name (matched/total)" for EEG/iEEG, else ""
+    # The sidecar fields mne-bids will derive from this recording, by BIDS name.
+    #
+    # Read here rather than guessed later because the scanner is already holding
+    # the file open. Without it the template had to consult a list measured once
+    # on one tree, which was wrong in both directions: it hid EEGReference and
+    # EEGGround, which mne-bids writes as "n/a" because BIDS demands the key
+    # rather than because it knows the answer, and it claimed PowerLineFrequency
+    # was derived when the value came from BIDS Manager's own default.
+    derived_fields: dict = field(default_factory=dict)
 
 
 def _detect_datatype(raw) -> str:
@@ -302,6 +311,7 @@ def _probe(path: Path) -> Optional[ProbeResult]:
 
     return ProbeResult(
         source=path,
+        derived_fields=_mne_bids_derives(raw, datatype, sfreq, duration_sec),
         sfreq=sfreq,
         n_channels=n_channels,
         n_times=n_times,
@@ -417,6 +427,80 @@ def _montage_chname_sets() -> dict[str, frozenset[str]]:
             continue
         out[name] = frozenset(re.sub(r"[^a-z0-9]", "", c.lower()) for c in m.ch_names)
     return out
+
+
+# MNE channel type -> the BIDS count field mne-bids writes for it. Counts are
+# per type, so a recording with 64 EEG and 2 EOG channels answers two fields
+# rather than one total that answers none of them.
+_COUNT_FIELDS: dict[str, str] = {
+    "eeg": "EEGChannelCount",
+    "ecg": "ECGChannelCount",
+    "eog": "EOGChannelCount",
+    "emg": "EMGChannelCount",
+    "misc": "MISCChannelCount",
+    "stim": "TriggerChannelCount",
+    "mag": "MEGChannelCount",
+    "grad": "MEGChannelCount",
+    "ref_meg": "MEGREFChannelCount",
+    "seeg": "SEEGChannelCount",
+    "ecog": "ECOGChannelCount",
+}
+
+
+def _mne_bids_derives(raw, datatype: str, sfreq: float, duration_sec: float) -> dict:
+    """The sidecar fields mne-bids fills from this recording, by BIDS name.
+
+    Only real answers. A field mne-bids writes as ``"n/a"`` to satisfy BIDS is
+    absent here, because the point of this is to tell a form what it need not
+    ask for, and "n/a" is exactly what it must ask for.
+    """
+    out: dict = {}
+    if sfreq > 0:
+        out["SamplingFrequency"] = sfreq
+    if duration_sec > 0:
+        out["RecordingDuration"] = round(duration_sec, 3)
+    # The scanner only ever opens a Raw, and mne-bids writes "continuous" for
+    # one. Stating it here keeps the form from asking about something that is
+    # decided by which reader was used.
+    out["RecordingType"] = "continuous"
+
+    counts: dict[str, int] = {}
+    try:
+        types = raw.get_channel_types()
+    except Exception:
+        types = []
+    for ch_type in types:
+        name = _COUNT_FIELDS.get(ch_type)
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    # A count of zero is an answer too: "this recording has no ECG channel" is
+    # what mne-bids writes, and it is true.
+    for name in set(_COUNT_FIELDS.values()):
+        if _applies_to(name, datatype):
+            out[name] = counts.get(name, 0)
+
+    line_freq = raw.info.get("line_freq")
+    if line_freq:
+        out["PowerLineFrequency"] = float(line_freq)
+
+    try:
+        montage = raw.get_montage()
+    except Exception:
+        montage = None
+    if montage is not None and datatype in ("eeg", "ieeg"):
+        out["EEGPlacementScheme"] = "based on the digitized electrode positions"
+
+    return out
+
+
+def _applies_to(field_name: str, datatype: str) -> bool:
+    """Does this datatype's sidecar declare this count field?"""
+    from .. import schema as schema_mod
+
+    try:
+        return bool(schema_mod.field_applies(field_name, datatype, datatype))
+    except Exception:
+        return False
 
 
 def _best_montage(ch_names) -> str:
@@ -828,6 +912,10 @@ def scan_eeg_meg(
             # Manufacturer is NOT seeded here - it is a read-only suggestion
             # (manufacturer_suggestion) and mne-bids fills the MEG sidecar value.
             "_event_codes": json.dumps(list(probe.event_codes)),
+            # Internal (leading underscore -> dropped from the TSV): what
+            # mne-bids will derive from this recording, so the template can
+            # show it instead of asking.
+            "_derived_fields": json.dumps(probe.derived_fields),
             "dataset": dataset or "",
             # Surface the classifier-style columns so the inspector's
             # ``suffix`` and ``data`` columns show useful values for
@@ -991,6 +1079,7 @@ def _unsupported_row(
         "Handedness": "",
         "PatientAge": "",
         "_event_codes": json.dumps([]),
+        "_derived_fields": json.dumps({}),
         "dataset": dataset or "",
         "bids_guess_classifier": "eeg_meg_scanner",
         "bids_guess_datatype": "eeg",

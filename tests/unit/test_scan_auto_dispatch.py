@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from bidsmgr.cli.scan import (
 )
 from bidsmgr.inventory import eeg_meg as eeg_meg_mod
 from bidsmgr.inventory.eeg_meg import EEG_MEG_COLUMNS
+from bidsmgr.inventory.pet import PET_COLUMNS
 from bidsmgr.inventory.mri_dicom import (
     EXTENDED_COLUMNS,
     TSV_COLUMNS,
@@ -41,26 +43,31 @@ from bidsmgr.inventory.mri_dicom import (
 class TestUnifiedColumnContract:
     def test_full_unified_column_layout(self) -> None:
         """Locked schema: TSV(24) + BIDS_GUESS(8) + ENTITIES(1) +
-        DATASET(1) + PROBE(4) + EXTENDED(3) + EEG_MEG(16) = 57.
+        DATASET(1) + PROBE(4) + EXTENDED(3) + EEG_MEG(16) + PET(5) = 62.
 
         TSV gained ``Handedness`` (demographics) + ``companion_files`` (per-row
         curated-companion links); EEG_MEG gained ``eeg_reference`` /
         ``eeg_ground`` (per-row overrides) and the read-only scan hints
-        ``montage_suggestion`` + ``manufacturer_suggestion``. The ``entities``
-        JSON column is the canonical basename source.
+        ``montage_suggestion`` + ``manufacturer_suggestion``. PET added five
+        read-only scan hints of its own (tracer, radionuclide, reconstruction
+        method and filter, injected dose). The ``entities`` JSON column is the
+        canonical basename source.
         """
         df = _empty_unified_dataframe()
         cols = _unified_column_order(df)
-        assert len(cols) == 24 + 8 + 1 + 1 + 4 + 3 + 16
+        assert len(cols) == 24 + 8 + 1 + 1 + 4 + 3 + 16 + 5
         # ``dataset`` comes after BidsGuess + the new ``entities`` column.
         ds_idx = cols.index("dataset")
         assert ds_idx == len(TSV_COLUMNS) + len(BIDS_GUESS_COLUMNS) + 1
         # ``entities`` lives between BidsGuess and dataset.
         entities_idx = cols.index("entities")
         assert entities_idx == len(TSV_COLUMNS) + len(BIDS_GUESS_COLUMNS)
-        # Order: MRI groups first, EEG/MEG last.
+        # Order: MRI groups first, then EEG/MEG, then PET. Appending PET at the
+        # end is what keeps every pre-PET column index unchanged.
         assert cols[: len(TSV_COLUMNS)] == list(TSV_COLUMNS)
-        assert cols[-len(EEG_MEG_COLUMNS):] == list(EEG_MEG_COLUMNS)
+        assert cols[-len(PET_COLUMNS):] == list(PET_COLUMNS)
+        assert cols[-len(PET_COLUMNS) - len(EEG_MEG_COLUMNS): -len(PET_COLUMNS)] == \
+            list(EEG_MEG_COLUMNS)
 
     def test_finalize_fills_missing_with_empty_string(self) -> None:
         """``concat`` introduces NaN; finalize replaces with ``""``."""
@@ -108,6 +115,8 @@ class _StubProbe:
     subj_age: str = ""
     event_codes: tuple[str, ...] = ()
     montage_suggestion: str = ""
+    derived_fields: dict = dataclasses.field(default_factory=dict)
+
 
 
 def _patch_eeg_probe(monkeypatch, *, datatype: str = "eeg") -> None:

@@ -144,10 +144,11 @@ class TestCanHandle:
 class TestRegistryDispatch:
     def test_default_backends_priority_order(self) -> None:
         backends = default_backends()
-        # Priority: physio (narrowest), mne-bids (eeg/meg/ieeg/nirs),
-        # dcm2niix-direct (broad MRI fallback).
+        # Priority: physio (narrowest), ecat (pet rows with an ECAT
+        # signature), mne-bids (eeg/meg/ieeg/nirs), dcm2niix-direct (broad
+        # MRI fallback, and the DICOM PET path).
         assert [b.name for b in backends] == [
-            "physio_dcm", "mne_bids", "dcm2niix_direct",
+            "physio_dcm", "ecat_direct", "mne_bids", "dcm2niix_direct",
         ]
 
     def test_physio_task_routes_to_physio_backend(self, tmp_path: Path) -> None:

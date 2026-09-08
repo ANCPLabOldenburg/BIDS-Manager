@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="948" height="976" viewBox="0 0 948 976" role="img" aria-label="BIDS Manager workflow: raw MRI, PET, EEG, MEG, iEEG, physio and blood recordings are scanned, reviewed, converted, enriched, curated and validated into one BIDS dataset, with every step recorded in the project log.">
+<rect x="0.5" y="0.5" width="947.0" height="975.0" rx="18" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+<text x="28.0" y="36.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#7d868f;font-weight:600;letter-spacing:1.5px">WHAT GOES IN</text>
+<rect x="28.0" y="48.0" width="892.0" height="90.0" rx="14" fill="#161c24" stroke="#3d444d" stroke-width="1"/>
+<rect x="46.0" y="66.0" width="87.1" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<circle cx="63.0" cy="86.0" r="4" fill="#4C9AFF"/>
+<text x="75.0" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">MRI</text>
+<text x="59.0" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">DICOM</text>
+<rect x="143.1" y="66.0" width="124.4" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<circle cx="160.1" cy="86.0" r="4" fill="#F2994A"/>
+<text x="172.1" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">PET</text>
+<text x="156.1" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">DICOM, ECAT7</text>
+<rect x="277.5" y="66.0" width="235.3" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<circle cx="294.5" cy="86.0" r="4" fill="#57C7A3"/>
+<text x="306.5" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">EEG / iEEG</text>
+<text x="290.5" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">EDF, BDF, BrainVision, EEGLAB</text>
+<rect x="522.9" y="66.0" width="130.9" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<circle cx="539.9" cy="86.0" r="4" fill="#B39DDB"/>
+<text x="551.9" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">MEG</text>
+<text x="535.9" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">FIF, CTF, KIT</text>
+<rect x="663.8" y="66.0" width="124.4" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<circle cx="680.8" cy="86.0" r="4" fill="#8B949E"/>
+<text x="692.8" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">Physio</text>
+<text x="676.8" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">Siemens CMRR</text>
+<rect x="798.2" y="66.0" width="103.8" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<circle cx="815.2" cy="86.0" r="4" fill="#E5534B"/>
+<text x="827.2" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">Blood</text>
+<text x="811.2" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">PMOD</text>
+<path d="M171.3 148.0 V203.0" stroke="#4a525c" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M164.3 203.0 L171.3 210.0 L178.3 203.0 Z" fill="#4a525c"/>
+<text x="28.0" y="194.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#7d868f;font-weight:600;letter-spacing:1.5px">WHAT IT DOES</text>
+<path d="M171.3 236.0 H776.7" stroke="#4a525c" stroke-width="2" stroke-linecap="round"/>
+<path d="M318.2 231.0 L326.2 236.0 L318.2 241.0 Z" fill="#4a525c"/>
+<path d="M620.8 231.0 L628.8 236.0 L620.8 241.0 Z" fill="#4a525c"/>
+<path d="M171.3 470.0 H776.7" stroke="#4a525c" stroke-width="2" stroke-linecap="round"/>
+<path d="M318.2 465.0 L326.2 470.0 L318.2 475.0 Z" fill="#4a525c"/>
+<path d="M620.8 465.0 L628.8 470.0 L620.8 475.0 Z" fill="#4a525c"/>
+<rect x="28.0" y="252.0" width="286.7" height="144.0" rx="14" fill="#161c24" stroke="#3d444d" stroke-width="1"/>
+<circle cx="171.3" cy="236.0" r="16" fill="#4FC3F7" stroke="#0d1117" stroke-width="3"/>
+<text x="171.3" y="241.5" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#04222f;font-weight:600">1</text>
+<text x="171.3" y="292.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:18px;fill:#e6edf3;font-weight:600">Scan</text>
+<text x="171.3" y="320.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">Reads every file rather than</text>
+<text x="171.3" y="340.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">trusting its name, and proposes a</text>
+<text x="171.3" y="360.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">BIDS name for each series.</text>
+<rect x="330.7" y="252.0" width="286.7" height="144.0" rx="14" fill="#161c24" stroke="#3d444d" stroke-width="1"/>
+<circle cx="474.0" cy="236.0" r="16" fill="#4FC3F7" stroke="#0d1117" stroke-width="3"/>
+<text x="474.0" y="241.5" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#04222f;font-weight:600">2</text>
+<text x="474.0" y="292.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:18px;fill:#e6edf3;font-weight:600">Review</text>
+<text x="474.0" y="320.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">One editable table. Fix subjects,</text>
+<text x="474.0" y="340.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">sessions, tasks and runs, and</text>
+<text x="474.0" y="360.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">settle name clashes before writing.</text>
+<rect x="633.3" y="252.0" width="286.7" height="144.0" rx="14" fill="#161c24" stroke="#3d444d" stroke-width="1"/>
+<circle cx="776.7" cy="236.0" r="16" fill="#4FC3F7" stroke="#0d1117" stroke-width="3"/>
+<text x="776.7" y="241.5" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#04222f;font-weight:600">3</text>
+<text x="776.7" y="292.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:18px;fill:#e6edf3;font-weight:600">Convert</text>
+<text x="776.7" y="320.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">Per subject, into staging.</text>
+<text x="776.7" y="340.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">Committed only when it finishes.</text>
+<text x="776.7" y="364.0" text-anchor="middle" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:11px;fill:#7d868f">dcm2niix  ·  mne-bids  ·  nibabel</text>
+<text x="776.7" y="379.0" text-anchor="middle" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:11px;fill:#7d868f">bidsphysio  ·  pet2bids</text>
+<rect x="28.0" y="486.0" width="286.7" height="144.0" rx="14" fill="#161c24" stroke="#3d444d" stroke-width="1"/>
+<circle cx="171.3" cy="470.0" r="16" fill="#4FC3F7" stroke="#0d1117" stroke-width="3"/>
+<text x="171.3" y="475.5" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#04222f;font-weight:600">4</text>
+<text x="171.3" y="526.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:18px;fill:#e6edf3;font-weight:600">Enrich</text>
+<text x="171.3" y="554.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">Answer what the files cannot say.</text>
+<text x="171.3" y="574.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">The form, and its requirement</text>
+<text x="171.3" y="594.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">levels, come from the schema.</text>
+<rect x="330.7" y="486.0" width="286.7" height="144.0" rx="14" fill="#161c24" stroke="#3d444d" stroke-width="1"/>
+<circle cx="474.0" cy="470.0" r="16" fill="#4FC3F7" stroke="#0d1117" stroke-width="3"/>
+<text x="474.0" y="475.5" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#04222f;font-weight:600">5</text>
+<text x="474.0" y="526.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:18px;fill:#e6edf3;font-weight:600">Curate</text>
+<text x="474.0" y="554.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">Sidecars as schema-aware forms,</text>
+<text x="474.0" y="574.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">tables as spreadsheets, and viewers</text>
+<text x="474.0" y="594.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">for volumes and signals.</text>
+<rect x="633.3" y="486.0" width="286.7" height="144.0" rx="14" fill="#161c24" stroke="#3d444d" stroke-width="1"/>
+<circle cx="776.7" cy="470.0" r="16" fill="#4FC3F7" stroke="#0d1117" stroke-width="3"/>
+<text x="776.7" y="475.5" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#04222f;font-weight:600">6</text>
+<text x="776.7" y="526.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:18px;fill:#e6edf3;font-weight:600">Validate</text>
+<text x="776.7" y="554.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">Every finding names the schema rule</text>
+<text x="776.7" y="574.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">it came from, and the fix button</text>
+<text x="776.7" y="594.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">opens the field that needs it.</text>
+<path d="M776.7 396.0 V409.0 A16 16 0 0 1 760.7 425.0 H187.3 A16 16 0 0 0 171.3 441.0 V446.0" stroke="#4a525c" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M164.3 446.0 L171.3 453.0 L178.3 446.0 Z" fill="#4a525c"/>
+<path d="M776.7 640.0 V679.0" stroke="#4a525c" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M769.7 679.0 L776.7 686.0 L783.7 679.0 Z" fill="#4a525c"/>
+<text x="28.0" y="682.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#7d868f;font-weight:600;letter-spacing:1.5px">WHAT COMES OUT</text>
+<rect x="28.0" y="696.0" width="892.0" height="192.0" rx="14" fill="#161c24" stroke="#3d444d" stroke-width="1"/>
+<rect x="46.0" y="714.0" width="398.6" height="156.0" rx="10" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+<path d="M68.0 748.0 V827.0" stroke="#7d868f" stroke-width="1.3" fill="none" opacity="0.65"/>
+<text x="60.0" y="740.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#e6edf3;font-weight:600">sub-001/</text>
+<path d="M68.0 758.0 H80.0" stroke="#7d868f" stroke-width="1.3" opacity="0.65"/>
+<text x="86.0" y="763.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#e6edf3">anat/</text>
+<text x="138.0" y="763.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#a9b1ba">sub-001_T1w.nii.gz</text>
+<text x="286.2" y="763.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#7d868f">+ .json</text>
+<path d="M68.0 781.0 H80.0" stroke="#7d868f" stroke-width="1.3" opacity="0.65"/>
+<text x="86.0" y="786.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#e6edf3">func/</text>
+<text x="138.0" y="786.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#a9b1ba">sub-001_task-rest_bold.nii.gz</text>
+<text x="372.0" y="786.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#7d868f">+ .json</text>
+<path d="M68.0 804.0 H80.0" stroke="#7d868f" stroke-width="1.3" opacity="0.65"/>
+<text x="86.0" y="809.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#e6edf3">pet/</text>
+<text x="138.0" y="809.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#a9b1ba">sub-001_trc-18FFDG_pet.nii.gz</text>
+<text x="372.0" y="809.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#7d868f">+ .json</text>
+<path d="M68.0 827.0 H80.0" stroke="#7d868f" stroke-width="1.3" opacity="0.65"/>
+<text x="86.0" y="832.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#e6edf3">eeg/</text>
+<text x="138.0" y="832.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#a9b1ba">sub-001_task-rest_eeg.edf</text>
+<text x="340.8" y="832.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#7d868f">+ .json</text>
+<text x="138.0" y="855.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:13px;fill:#a9b1ba">sub-001_task-rest_channels.tsv</text>
+<rect x="470.6" y="721.0" width="206.0" height="28.0" rx="14" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+<text x="483.6" y="741.0" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:12.5px;fill:#a9b1ba">dataset_description.json</text>
+<text x="692.6" y="741.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">written from your answers</text>
+<rect x="470.6" y="759.3" width="206.0" height="28.0" rx="14" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+<text x="483.6" y="779.3" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:12.5px;fill:#a9b1ba">participants.tsv</text>
+<text x="692.6" y="779.3" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">one row per subject</text>
+<rect x="470.6" y="797.7" width="206.0" height="28.0" rx="14" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+<text x="483.6" y="817.7" text-anchor="start" style="font-family:ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, monospace;font-size:12.5px;fill:#a9b1ba">*_scans.tsv</text>
+<text x="692.6" y="817.7" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">the files written, and when</text>
+<rect x="470.6" y="836.0" width="206.0" height="28.0" rx="14" fill="#102c17" stroke="#1f6f2e" stroke-width="1"/>
+<text x="573.6" y="856.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#3fb950;font-weight:600">0 errors</text>
+<text x="692.6" y="856.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">checked against the schema</text>
+<rect x="28.0" y="908.0" width="892.0" height="44.0" rx="12" fill="#161c24" stroke="#3d444d" stroke-width="1"/>
+<circle cx="51.0" cy="930.0" r="4.5" fill="#4FC3F7"/>
+<text x="66.0" y="935.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">Underneath all six steps: every scan is versioned and every edit recorded, so curation can be resumed or undone.</text>
+</svg>

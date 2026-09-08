@@ -5,8 +5,18 @@ with Multi view, control enable/disable, and the data path into the GL
 view — without requiring a live OpenGL context. The ``RaycastGLWidget``
 is created (a ``QOpenGLWidget``) but never shown, so ``initializeGL`` /
 rendering don't run; the volume is stashed as ``pending`` and observed
-via :meth:`RaycastGLWidget.has_volume`. This keeps the suite green under
-the headless ``offscreen`` Qt platform used in CI.
+via :meth:`RaycastGLWidget.has_volume`.
+
+One thing DOES need a live context, and it is not the wiring: the GPU gate.
+``nifti_viewer_pane`` asks :func:`gpu_available` whether an OpenGL 3.3 core
+context can be created and hides the 3-D controls when it cannot, which is right
+for a user on a machine without one and fatal for these tests, because Qt's
+``offscreen`` platform cannot create a context at all. Every assertion about a
+3-D button being enabled failed for that reason alone, and the failures read as
+broken code when the code was doing exactly what it should.
+
+So the gate is forced open for this module. What is under test is the wiring the
+gate protects, and there is no point testing it against a gate that is shut.
 """
 
 from __future__ import annotations
@@ -28,6 +38,19 @@ from bidsmgr.gui.widgets.nifti_gl_view import (
 
 
 pytestmark = pytest.mark.gui
+
+
+@pytest.fixture(autouse=True)
+def _pretend_there_is_a_gpu(monkeypatch):
+    """Open the GPU gate, so the wiring behind it can be exercised.
+
+    Not a workaround for a bug: the gate correctly reports that Qt's offscreen
+    platform has no OpenGL, and these tests are about what happens when it does.
+    A real render check needs a real context and lives elsewhere.
+    """
+    from bidsmgr.gui.widgets import nifti_gl_view
+
+    monkeypatch.setattr(nifti_gl_view, "gpu_available", lambda: True)
 
 
 def _write_nifti(path: Path, arr: np.ndarray) -> None:

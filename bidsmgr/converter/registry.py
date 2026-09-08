@@ -10,7 +10,11 @@ Today's roster (priority order — narrower matches first):
 * ``PhysioDcmBackend`` — claims rows whose ``suffix == "physio"`` that
   look like Siemens CMRR ``_PhysioLog.dcm`` outputs. Wraps
   ``bidsphysio.dcm2bidsphysio``.
-* ``Dcm2niixDirect`` — broad MRI fallback. Claims everything else.
+* ``EcatDirect`` — claims PET rows whose source carries the ECAT
+  ``MATRIX7x`` signature (Siemens HRRT and older CTI scanners, which
+  dcm2niix cannot read). Uses nibabel, no subprocess.
+* ``Dcm2niixDirect`` — broad MRI fallback. Claims everything else,
+  including PET rows that came from DICOM.
 
 Future: ``mne_bids`` (EEG/MEG/iEEG), ``passthrough`` (already-BIDS).
 """
@@ -51,8 +55,10 @@ def default_backends(
     discovery) out of the import path until actually used.
 
     Order: ``PhysioDcmBackend`` (suffix=physio narrow match) →
+    ``EcatDirect`` (datatype=pet AND an ECAT signature) →
     ``MneBidsBackend`` (datatype ∈ eeg/meg/ieeg/nirs) →
-    ``Dcm2niixDirect`` (broad MRI fallback). Each upstream backend's
+    ``Dcm2niixDirect`` (broad MRI fallback, which is also the DICOM PET
+    path). Each upstream backend's
     ``can_handle`` declines the others' datatypes so the dispatch is
     unambiguous.
 
@@ -62,11 +68,13 @@ def default_backends(
     :class:`ConvertTask`.
     """
     from .backends.dcm2niix_direct import Dcm2niixDirect
+    from .backends.ecat_direct import EcatDirect
     from .backends.mne_bids import MneBidsBackend
     from .backends.physio_dcm import PhysioDcmBackend
 
     return [
         PhysioDcmBackend(),
+        EcatDirect(),
         MneBidsBackend(),
         Dcm2niixDirect(dcm2niix_bin=dcm2niix_bin),
     ]

@@ -45,7 +45,15 @@ from ...project import (
     UserToggleInclude,
 )
 from ...project.types import ProjectState
-from ...recording_meta import AcquisitionSpec, RecordingMetaSpec
+from ...recording_meta import (
+    AcquisitionSpec,
+    describe_origin,
+    is_varies,
+    resolve_attribute,
+    resolve_sidecar_fields,
+    PetAcquisitionSpec,
+    RecordingMetaSpec,
+)
 from ..delegates import HIGHLIGHT_ROLE, INHERITED_ROLE, PAYLOAD_ROLE, ROW_STATE_ROLE
 
 log = logging.getLogger(__name__)
@@ -61,6 +69,30 @@ _INHERITANCE_FIELDS: dict[str, str] = {
     "eeg_ground": "eeg_ground",
 }
 
+# Which rows a metadata column means anything for.
+#
+# Without this every one of the columns below renders on every row, so with
+# dataset defaults set an anatomical scan showed a line frequency, a montage,
+# a reference and a ground. One row in nine was right.
+#
+# The answer comes from the schema wherever the column corresponds to a real
+# BIDS field, so it stays correct as the standard changes, and it is worth
+# noting where that disagrees with intuition: EEGReference applies to MEG as
+# well as EEG, because a MEG recording may carry simultaneous EEG, and iEEG
+# has its OWN pair of fields rather than reusing the EEG ones.
+_COLUMN_BIDS_FIELDS: dict[str, tuple[str, ...]] = {
+    "line_freq": ("PowerLineFrequency",),
+    "eeg_reference": ("EEGReference", "iEEGReference"),
+    "eeg_ground": ("EEGGround", "iEEGGround"),
+}
+
+# Columns with no BIDS field behind them. A montage is a BIDS Manager notion
+# (which standard electrode layout to apply on conversion), so the standard has
+# nothing to say and the scope is ours to state.
+_COLUMN_DATATYPES: dict[str, frozenset[str]] = {
+    "montage": frozenset({"eeg", "ieeg"}),
+}
+
 # Per-row recording-acquisition fields that live in the recording-metadata
 # scaffold's ``overrides[row_id]`` block rather than a TSV column (the convert
 # step's ``resolve_effective`` already layers them over the dataset defaults and
@@ -73,6 +105,15 @@ _INHERITANCE_FIELDS: dict[str, str] = {
 # different devices); institution is agnostic and lives at dataset level in the
 # Dataset-metadata dialog, NOT here. MEG fields are only the ones mne-bids
 # cannot derive. All are string-valued.
+def _as_text(value) -> str:
+    """Render a spec value for a form field, without a float's trailing .0."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 _ACQ_OVERRIDE_FIELDS: dict[str, str] = {
     "manufacturer": "manufacturer",
     "amplifier_model": "amplifier_model",
@@ -83,6 +124,36 @@ _ACQ_OVERRIDE_FIELDS: dict[str, str] = {
     "associated_empty_room": "associated_empty_room",
     "subject_artefact_description": "subject_artefact_description",
 }
+
+# The PET equivalent. Kept as its own map because the two blocks live in
+# separate spec fields (pet_defaults / pet_overrides) and share no field names,
+# so one combined map would only invite a lookup into the wrong block.
+_PET_OVERRIDE_FIELDS: dict[str, str] = {
+    "tracer_name": "tracer_name",
+    "tracer_radionuclide": "tracer_radionuclide",
+    "injected_radioactivity": "injected_radioactivity",
+    "injected_radioactivity_units": "injected_radioactivity_units",
+    "injected_mass": "injected_mass",
+    "injected_mass_units": "injected_mass_units",
+    "specific_radioactivity": "specific_radioactivity",
+    "specific_radioactivity_units": "specific_radioactivity_units",
+    "mode_of_administration": "mode_of_administration",
+    "injection_start": "injection_start",
+    "time_zero": "time_zero",
+    "scan_start": "scan_start",
+    "acquisition_mode": "acquisition_mode",
+    "units": "units",
+    "body_part": "body_part",
+    "recon_method_name": "recon_method_name",
+    "recon_filter_type": "recon_filter_type",
+}
+
+# PET spec fields typed as numbers. A blank stays None; anything unparseable is
+# rejected rather than coerced, so a typo cannot become a silent zero.
+_PET_NUMERIC_FIELDS: frozenset[str] = frozenset({
+    "injected_radioactivity", "injected_mass", "specific_radioactivity",
+    "injection_start", "scan_start",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +245,14 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("task",      "task",                   "plain",    True,  60, df_column="task"),
     ColumnSpec("run",       "run",                    "mono",     True,  50, df_column="run"),
     ColumnSpec("conf",      "conf",                   "conf",     False, 50, df_column="bids_guess_confidence"),
-    ColumnSpec("sequence",  "sequence / source",      "mono",     False, 200, df_column="sequence"),
+    # WHERE a row came from, WHAT it was read from, and WHAT the scanner called
+    # it. These were three different answers hiding behind one header: the old
+    # "sequence / source" column carried only the sequence name, source_folder
+    # was correct in the TSV and absent from the table, and format was filled
+    # for EEG/MEG alone, so no modality ever showed both an origin and a format.
+    ColumnSpec("source_folder", "origin",             "plain",    False, 160, df_column="source_folder"),
+    ColumnSpec("format",    "format",                 "mono",     False, 80,  df_column="format"),
+    ColumnSpec("sequence",  "sequence",               "mono",     False, 200, df_column="sequence"),
     ColumnSpec("basename",  "predicted basename",     "basename", False, 320, stretch=True, df_column="proposed_basename"),
     # Default-hidden — show via the column-visibility menu.
     ColumnSpec("backend",      "backend",     "mono",  False, 90,  default_visible=False),
@@ -223,9 +301,11 @@ COLUMN_DESCRIPTIONS: dict[str, str] = {
     "task":      "Task entity (task-XXX) for func / eeg / meg rows.",
     "run":       "Run index (run-N) when a series was repeated.",
     "conf":      "Classifier confidence (0-1) for the predicted datatype + suffix.",
-    "sequence":  "Scanner sequence name / source description used for classification.",
+    "source_folder": "Where the row came from: the folder inside the raw tree that holds its files.",
+    "format":    "What the row was read from: DICOM, ECAT, FIF, EDF, BrainVision, EEGLAB, CTF.",
+    "sequence":  "Scanner sequence name used for classification. Empty for formats that do not name one.",
     "basename":  "Full predicted BIDS filename (without extension).",
-    "backend":   "Converter backend that will handle the row: dcm2niix, mne-bids, or bidsphysio.",
+    "backend":   "Converter backend that will handle the row: dcm2niix, mne-bids, ecat, or bidsphysio.",
     "source_file": "Source recording path (EEG / MEG). Blank for DICOM rows.",
     "n_files":   "Number of source files in the series.",
     "acq_time":  "Acquisition time from the DICOM / recording header.",
@@ -301,6 +381,13 @@ class InventoryTableModel(QAbstractTableModel):
         # metadata dialog saves.
         self._global_spec: Optional[RecordingMetaSpec] = None
 
+        # Whether a metadata column means anything for a given kind of row,
+        # keyed by (column, datatype, suffix). Keyed on the TYPE rather than the
+        # row, so a row that changes datatype simply looks up a different entry
+        # and the cache never goes stale; it holds at most one entry per column
+        # per datatype seen.
+        self._applies_cache: dict[tuple[str, str, str], bool] = {}
+
         # Populate the mirror cells (session / task / run) from each row's
         # ``entities`` JSON on load. A fresh ``bidsmgr-scan`` TSV carries the
         # entities in JSON but leaves the mirror columns blank. Without this
@@ -315,6 +402,8 @@ class InventoryTableModel(QAbstractTableModel):
         # entities, so a well-formed scan TSV is unchanged.
         rebuild_from_entities(self._df, in_place=True)
 
+        self._warm_applies_cache()
+
         if project is not None:
             self._apply_project_overlay(project.state())
 
@@ -325,6 +414,14 @@ class InventoryTableModel(QAbstractTableModel):
         # the row-state cache from the result immediately below).
         for i in range(len(self._df)):
             self._revalidate_row(i)
+
+        # Which rows currently want a name another row also wants. Derived
+        # live rather than read from a cell: a clash is a property of the whole
+        # table as it stands right now, so anything stored at scan time is
+        # stale the moment the user edits an entity, and a red name that stays
+        # red after you have fixed it is worse than no warning at all.
+        self._colliding: set[int] = set()
+        self._recompute_collisions()
 
         # Cache per-row state so delegates don't re-derive on every paint.
         # Invalidated for one row by :meth:`refresh_row`.
@@ -357,12 +454,46 @@ class InventoryTableModel(QAbstractTableModel):
                 self.index(len(self._df) - 1, len(self.COLUMNS) - 1),
             )
 
-    def _global_default(self, df_col: str) -> str:
-        """The dataset default for an inheritance field, as a display string."""
+    def inherited_from(self, row: int, df_col: str) -> str:
+        """Which layer supplies this cell's value, as a phrase for a tooltip.
+
+        "Inherited" alone does not tell a user enough to act: the value could
+        come from the dataset defaults, from this modality's block, or from a
+        sequence template, and which one it is decides where to go and change
+        it.
+        """
         attr = _INHERITANCE_FIELDS.get(df_col)
         if attr is None or self._global_spec is None:
             return ""
-        val = getattr(self._global_spec.defaults, attr, None)
+        datatype, suffix = self.effective_datatype_suffix(row)
+        field = resolve_attribute(
+            self._global_spec, attr, datatype, suffix,
+            task=self._raw_cell(row, "task") or None,
+        )
+        if field is None:
+            return ""
+        return describe_origin(field.origin, datatype, suffix)
+
+    def _global_default(self, df_col: str, datatype: str = "", row: int = -1) -> str:
+        """The inherited value for a cell, resolved through the one chain.
+
+        ``datatype`` selects the per-modality block, and the chain then layers
+        any sequence template over it, so the table shows the same answer the
+        converter will write rather than only the part of it the dataset block
+        knows about.
+        """
+        attr = _INHERITANCE_FIELDS.get(df_col)
+        if attr is None or self._global_spec is None:
+            return ""
+        suffix = ""
+        task = None
+        if row >= 0:
+            datatype, suffix = self.effective_datatype_suffix(row)
+            task = self._raw_cell(row, "task") or None
+        field = resolve_attribute(
+            self._global_spec, attr, datatype, suffix, task=task,
+        )
+        val = field.value if field is not None else None
         if val is None:
             return ""
         if isinstance(val, float):
@@ -375,16 +506,145 @@ class InventoryTableModel(QAbstractTableModel):
         v = self._df.at[row, df_col]
         return "" if pd.isna(v) else str(v)
 
+    def _warm_applies_cache(self) -> None:
+        """Decide the modality-scoped columns up front, once per row TYPE.
+
+        Answering costs a full walk of the schema's rules, and the answer is
+        the same for every row of a given datatype and suffix. Left to the
+        paint path, the first scroll that reveals these columns pays for one
+        walk per distinct type, which reads as a stall part-way across the
+        table. Doing it at bind time costs the same work where a wait is
+        already expected, and is bounded by the number of distinct types in
+        the scan rather than the number of rows.
+        """
+        if not len(self._df):
+            return
+        scoped = set(_COLUMN_BIDS_FIELDS) | set(_COLUMN_DATATYPES)
+        seen: set[tuple[str, str]] = set()
+        for row in range(len(self._df)):
+            pair = self.effective_datatype_suffix(row)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            for df_col in scoped:
+                self.column_applies(row, df_col)
+
+    def column_applies(self, row: int, df_col: str) -> bool:
+        """True when ``df_col`` means anything for this row's datatype.
+
+        A metadata column that does not apply is not merely empty, it is
+        inapplicable: an anatomical scan has no power line frequency, and
+        offering to inherit one is offering nonsense. Columns not covered by
+        either map apply everywhere, which keeps the identity and provenance
+        columns untouched.
+        """
+        datatypes = _COLUMN_DATATYPES.get(df_col)
+        fields = _COLUMN_BIDS_FIELDS.get(df_col)
+        if datatypes is None and fields is None:
+            return True
+        datatype, suffix = self.effective_datatype_suffix(row)
+        # Asked once per cell per repaint, and the answer depends only on the
+        # column and the row's type, not on the row. Without this a table of
+        # any size re-derives the same handful of answers thousands of times.
+        cache_key = (df_col, datatype, suffix)
+        cached = self._applies_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self._compute_applies(df_col, datatype, suffix, datatypes, fields)
+        self._applies_cache[cache_key] = result
+        return result
+
+    def effective_datatype_suffix(self, row: int) -> tuple[str, str]:
+        """``(datatype, suffix)`` for the row, falling back to the guess.
+
+        A blank ``proposed_datatype`` does not mean "undecided". Scanner
+        derivatives carry one: a Siemens scout, a PhoenixZIPReport or a TENSOR
+        map is excluded from conversion and left with no proposed datatype,
+        while the classifier's guess still records what it is (``anat``,
+        ``discard``, ``derivatives``). Reading only the proposed value made
+        those rows look like blank slates, which is how a bulk edit wrote a
+        power line frequency onto a localiser.
+        """
+        datatype, suffix = self.datatype_suffix(row)
+        if not datatype and "bids_guess_datatype" in self._df.columns:
+            if 0 <= row < len(self._df):
+                raw = self._df.at[row, "bids_guess_datatype"]
+                datatype = "" if pd.isna(raw) else str(raw)
+        return datatype, suffix
+
+    def _compute_applies(self, df_col, datatype, suffix, datatypes, fields) -> bool:
+        if not datatype:
+            # Nothing anywhere says what this row is. A metadata field cannot
+            # be meaningfully set on it either, and it becomes editable the
+            # moment the row is classified.
+            return False
+        if datatypes is not None:
+            return datatype in datatypes
+        if datatype not in set(schema_mod.list_datatypes()):
+            # ``discard`` and ``derivatives`` are BIDS Manager routing labels,
+            # not datatypes. The standard declares nothing for them, and the
+            # schema lookup below would find no suffixes and wave the row
+            # through.
+            return False
+
+        # Ask about the exact pair only when the two agree. Mid-edit they often
+        # do not: a user who switches a row's datatype before its suffix leaves
+        # an eeg row still carrying "bold", and asking about eeg/bold returns
+        # False for everything, which would silently refuse the very edit that
+        # fixes the row. Falling back to "does any suffix of this datatype take
+        # the field" keeps the answer stable while the row is in flux.
+        try:
+            suffixes = [suffix] if suffix in schema_mod.list_suffixes(datatype) \
+                else list(schema_mod.list_suffixes(datatype))
+        except Exception:
+            suffixes = [suffix] if suffix else []
+        if not suffixes:
+            return False
+        return any(
+            schema_mod.field_applies(name, datatype, sfx)
+            for sfx in suffixes
+            for name in fields
+        )
+
+    def needs_per_row_answer(self, row: int, df_col: str) -> bool:
+        """True when the dataset says this field differs per recording.
+
+        The cell then wants a prompt rather than a value: the dataset-wide
+        answer is VARIES, which is a statement about where the answer lives,
+        not an answer. Distinct from blank, which means nobody has said
+        anything, and from not-applicable, which means the datatype has no
+        such field.
+        """
+        if df_col not in _INHERITANCE_FIELDS or not self.column_applies(row, df_col):
+            return False
+        if self._raw_cell(row, df_col).strip():
+            return False  # answered for this row already
+        return is_varies(self._global_default(df_col, self.effective_datatype_suffix(row)[0], row))
+
     def is_inherited(self, row: int, df_col: str) -> bool:
         """True when an inheritance-field cell is blank and a default exists."""
         if df_col not in _INHERITANCE_FIELDS:
             return False
-        return not self._raw_cell(row, df_col).strip() and bool(self._global_default(df_col))
+        if not self.column_applies(row, df_col):
+            return False
+        if is_varies(self._global_default(df_col, self.effective_datatype_suffix(row)[0], row)):
+            # Not inherited: there is nothing to inherit yet.
+            return False
+        return not self._raw_cell(row, df_col).strip() and bool(
+            self._global_default(df_col, self.effective_datatype_suffix(row)[0], row)
+        )
 
     def effective_value(self, row: int, df_col: str) -> str:
-        """The per-row override (cell) when set, else the inherited default."""
+        """The per-row override (cell) when set, else the inherited default.
+
+        A VARIES default resolves to nothing: it says the answer differs per
+        recording, so until this row supplies one there is no value here.
+        """
         cell = self._raw_cell(row, df_col).strip()
-        return cell if cell else self._global_default(df_col)
+        if cell:
+            return cell
+        default = self._global_default(df_col, self.effective_datatype_suffix(row)[0], row)
+        return "" if is_varies(default) else default
 
     # ------------------------------------------------------------------
     # Per-row acquisition overrides (recording-metadata scaffold-backed)
@@ -400,13 +660,44 @@ class InventoryTableModel(QAbstractTableModel):
         """The live recording-metadata spec (defaults + per-row overrides)."""
         return self._global_spec
 
-    def acq_default(self, field: str) -> str:
-        """The dataset default for an acquisition-override field, as a string."""
+    def acq_default(self, field: str, row: int = -1) -> str:
+        """What this field inherits, resolved through the one chain.
+
+        ``row`` supplies the datatype, suffix and task, without which the chain
+        cannot pick the per-modality block or the sequence template. Reading
+        only ``spec.defaults``, as this used to, meant the panel showed the
+        shared answer while the converter wrote the modality's or the
+        template's, which is the disconnect this chain exists to close.
+        """
         attr = _ACQ_OVERRIDE_FIELDS.get(field)
         if attr is None or self._global_spec is None:
             return ""
-        val = getattr(self._global_spec.defaults, attr, None)
+        datatype = suffix = ""
+        task = None
+        if row >= 0:
+            datatype, suffix = self.effective_datatype_suffix(row)
+            task = self._raw_cell(row, "task") or None
+        # No row id is passed, so the chain stops above the row layers: this
+        # is what the field INHERITS, and acq_effective adds the override.
+        resolved = resolve_attribute(
+            self._global_spec, attr, datatype, suffix, task=task,
+        )
+        val = resolved.value if resolved is not None else None
         return "" if val is None else str(val)
+
+    def acq_inherited_from(self, row: int, field: str) -> str:
+        """Which layer supplies this panel field, as a readable phrase."""
+        attr = _ACQ_OVERRIDE_FIELDS.get(field)
+        if attr is None or self._global_spec is None:
+            return ""
+        datatype, suffix = self.effective_datatype_suffix(row)
+        resolved = resolve_attribute(
+            self._global_spec, attr, datatype, suffix,
+            task=self._raw_cell(row, "task") or None,
+        )
+        if resolved is None:
+            return ""
+        return describe_origin(resolved.origin, datatype, suffix)
 
     def _row_override(self, row: int) -> Optional[AcquisitionSpec]:
         if self._global_spec is None:
@@ -425,13 +716,13 @@ class InventoryTableModel(QAbstractTableModel):
         return "" if val is None else str(val)
 
     def acq_effective(self, row: int, field: str) -> str:
-        """Per-row override when set, else the inherited dataset default."""
+        """Per-row override when set, else what the chain resolves for it."""
         ov = self.acq_override(row, field)
-        return ov if ov else self.acq_default(field)
+        return ov if ov else self.acq_default(field, row)
 
     def acq_is_inherited(self, row: int, field: str) -> bool:
-        """True when no per-row override is set and a dataset default exists."""
-        return not self.acq_override(row, field) and bool(self.acq_default(field))
+        """True when no per-row override is set and something is inherited."""
+        return not self.acq_override(row, field) and bool(self.acq_default(field, row))
 
     def set_acq_override(self, row: int, field: str, value: str) -> bool:
         """Set or clear a per-row acquisition override in the scaffold spec.
@@ -471,6 +762,237 @@ class InventoryTableModel(QAbstractTableModel):
         return True
 
     # ------------------------------------------------------------------
+    # Per-row sidecar fields, in the schema's own vocabulary
+    # ------------------------------------------------------------------
+    #
+    # The block above models a dozen acquisition attributes. This one carries
+    # any field the schema declares for the row's file, so the properties panel
+    # can offer exactly what the dataset dialog offers, one scope down. Both
+    # read the same chain, so a value set anywhere shows everywhere it applies.
+
+    # A few sidecar fields are also inventory columns, because the user needs
+    # them in the table to sort and bulk-edit by. Those keep the cell as their
+    # one home: a form that wrote a second copy elsewhere would show one value
+    # while the table showed another, and the converter would have to pick.
+    _CELL_BACKED_FIELDS: dict[str, tuple[str, str]] = {
+        "PowerLineFrequency": ("line_freq", "power_line_freq"),
+        "EEGReference": ("eeg_reference", "eeg_reference"),
+        "iEEGReference": ("eeg_reference", "eeg_reference"),
+        "EEGGround": ("eeg_ground", "eeg_ground"),
+        "iEEGGround": ("eeg_ground", "eeg_ground"),
+    }
+
+    def _row_context(self, row: int) -> tuple[str, str, Optional[str]]:
+        datatype, suffix = self.effective_datatype_suffix(row)
+        return datatype, suffix, (self._raw_cell(row, "task") or None)
+
+    def _row_cell_values(self, row: int) -> dict:
+        """This row's own cells, in the chain's vocabulary.
+
+        The same three the conversion passes, so the panel's picture of what
+        will be written is the one that gets written.
+        """
+        out: dict = {}
+        for column, attr in {
+            "eeg_reference": "eeg_reference",
+            "eeg_ground": "eeg_ground",
+            "line_freq": "power_line_freq",
+        }.items():
+            value = self._raw_cell(row, column)
+            if value:
+                out[attr] = value
+        return out
+
+    def resolved_sidecar(self, row: int, *, with_row: bool = True) -> dict:
+        """Every stated field for this row's sidecar, and which layer said it.
+
+        ``with_row=False`` stops above this recording, which is what the field
+        would say if the row had never been touched. That is the comparison that
+        decides whether an answer is worth storing.
+        """
+        if self._global_spec is None or not (0 <= row < len(self._df)):
+            return {}
+        datatype, suffix, task = self._row_context(row)
+        if not datatype:
+            return {}
+        return resolve_sidecar_fields(
+            self._global_spec, datatype, suffix or datatype,
+            row_id=self.row_id(row) if with_row else "", task=task,
+            row_values=self._row_cell_values(row) if with_row else None,
+        )
+
+    def row_answered(self, row: int) -> dict:
+        """What the conversion will fill in for THIS recording, by BIDS name.
+
+        Two sources, both about this one file. The scan asked the recording the
+        same questions the converter will ask and stashed the answers; and the
+        row's own entities settle a field or two by themselves, a task label
+        being the obvious one, since the converter writes whatever the row says.
+        """
+        if not (0 <= row < len(self._df)):
+            return {}
+
+        answered: dict = {}
+        # Written by the scan into the scaffold, because the inventory drops it:
+        # it is derived rather than curated, and a column of JSON in a table
+        # people read helps nobody.
+        if self._global_spec is not None:
+            stored = self._global_spec.row_preview.get(self.row_id(row))
+            if isinstance(stored, dict):
+                answered.update(stored)
+        raw = self._raw_cell(row, "_derived_fields")
+        if raw:
+            try:
+                measured = json.loads(raw)
+            except (ValueError, TypeError):
+                measured = {}
+            if isinstance(measured, dict):
+                answered.update(measured)
+
+        task = (self.entities(row) or {}).get("task") or self._raw_cell(row, "task")
+        if task:
+            answered["TaskName"] = task
+        return answered
+
+    def row_template(self, row: int) -> dict:
+        """What this one recording states, by BIDS field name."""
+        if self._global_spec is None or not (0 <= row < len(self._df)):
+            return {}
+        return dict(self._global_spec.row_templates.get(self.row_id(row), {}))
+
+    def sidecar_origin(self, row: int, name: str) -> str:
+        """Where this field's current answer comes from, as a readable phrase."""
+        resolved = self.resolved_sidecar(row).get(name)
+        if resolved is None:
+            return ""
+        datatype, suffix, task = self._row_context(row)
+        return describe_origin(resolved.origin, datatype, suffix, task or "")
+
+    def set_row_template_field(self, row: int, name: str, value) -> bool:
+        """State a sidecar field for this recording alone, or stop stating it.
+
+        An answer equal to what the row already inherits is not stored: keeping
+        it would freeze today's inherited value into this row, so a later change
+        to the dataset default would silently skip this one recording.
+        """
+        if not (0 <= row < len(self._df)):
+            return False
+
+        backing = self._CELL_BACKED_FIELDS.get(name)
+        if backing is not None:
+            column = backing[0]
+            if column in self._df.columns:
+                return self.bulk_set(
+                    [row], column, "" if value in (None, "", [], {}) else str(value),
+                )
+
+        if self._global_spec is None:
+            self._global_spec = RecordingMetaSpec()
+
+        rid = self.row_id(row)
+        current = dict(self._global_spec.row_templates.get(rid, {}))
+        blank = value in (None, "", [], {})
+
+        if not blank:
+            inherited = self.resolved_sidecar(row, with_row=False).get(name)
+            if inherited is not None and inherited.value == value:
+                blank = True
+
+        if blank and name not in current:
+            return False
+        if not blank and current.get(name) == value:
+            return False
+
+        if blank:
+            current.pop(name, None)
+        else:
+            current[name] = value
+
+        templates = dict(self._global_spec.row_templates)
+        if current:
+            templates[rid] = current
+        else:
+            templates.pop(rid, None)
+        self._global_spec = self._global_spec.model_copy(
+            update={"row_templates": templates}
+        )
+        self.recordingSpecChanged.emit()
+        self.refresh_row(row)
+        return True
+
+    # ------------------------------------------------------------------
+    # PET per-row overrides (same inheritance contract as acquisition)
+    # ------------------------------------------------------------------
+
+    def pet_default(self, field: str) -> str:
+        """The dataset default for a PET field, as a string."""
+        attr = _PET_OVERRIDE_FIELDS.get(field)
+        if attr is None or self._global_spec is None:
+            return ""
+        return _as_text(getattr(self._global_spec.pet_defaults, attr, None))
+
+    def pet_override(self, row: int, field: str) -> str:
+        """The raw per-row PET override (``""`` if unset)."""
+        attr = _PET_OVERRIDE_FIELDS.get(field)
+        if attr is None or self._global_spec is None:
+            return ""
+        over = self._global_spec.pet_overrides.get(self.row_id(row))
+        if over is None:
+            return ""
+        return _as_text(getattr(over, attr, None))
+
+    def pet_effective(self, row: int, field: str) -> str:
+        """Per-row override when set, else the inherited dataset default."""
+        ov = self.pet_override(row, field)
+        return ov if ov else self.pet_default(field)
+
+    def pet_is_inherited(self, row: int, field: str) -> bool:
+        return not self.pet_override(row, field) and bool(self.pet_default(field))
+
+    def set_pet_override(self, row: int, field: str, value: str) -> bool:
+        """Set or clear a per-row PET override in the scaffold spec.
+
+        Mirrors :meth:`set_acq_override`: writing the dataset default (or a
+        blank) clears the override so the row inherits again.
+        """
+        attr = _PET_OVERRIDE_FIELDS.get(field)
+        if attr is None or not (0 <= row < len(self._df)):
+            return False
+        if self._global_spec is None:
+            self._global_spec = RecordingMetaSpec()
+
+        new_val = (value or "").strip()
+        if new_val == self.pet_default(field):
+            new_val = ""
+        if new_val == self.pet_override(row, field):
+            return False
+
+        typed: object = new_val or None
+        if typed is not None and field in _PET_NUMERIC_FIELDS:
+            try:
+                typed = float(new_val)
+            except ValueError:
+                # Not a number: refuse rather than store a coerced value that
+                # would look deliberate in the sidecar.
+                return False
+
+        rid = self.row_id(row)
+        overrides = dict(self._global_spec.pet_overrides)
+        current = overrides.get(rid) or PetAcquisitionSpec()
+        updated = current.model_copy(update={attr: typed})
+
+        if updated == PetAcquisitionSpec():
+            overrides.pop(rid, None)
+        else:
+            overrides[rid] = updated
+        self._global_spec = self._global_spec.model_copy(
+            update={"pet_overrides": overrides})
+
+        self.recordingSpecChanged.emit()
+        self.refresh_row(row)
+        return True
+
+    # ------------------------------------------------------------------
     # Qt model API
     # ------------------------------------------------------------------
 
@@ -491,6 +1013,10 @@ class InventoryTableModel(QAbstractTableModel):
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         spec = self.COLUMNS[index.column()]
         if spec.editable:
+            # A column that means nothing for this row's datatype refuses the
+            # edit rather than accepting a value that would never be written.
+            if spec.df_column and not self.column_applies(index.row(), spec.df_column):
+                return f
             f |= Qt.ItemFlag.ItemIsEditable
         return f
 
@@ -517,6 +1043,25 @@ class InventoryTableModel(QAbstractTableModel):
         # user sees *why* a row is highlighted without unhiding the issues
         # column. Newline-split the `` | ``-joined notes for readability.
         if role == Qt.ItemDataRole.ToolTipRole:
+            # An inherited metadata cell says where its value came from, so a
+            # user knows which level to go and change.
+            spec_col = self.COLUMNS[col].df_column
+            if spec_col in _INHERITANCE_FIELDS and self.column_applies(row, spec_col):
+                if self.needs_per_row_answer(row, spec_col):
+                    return (
+                        "The dataset says this differs per recording.\n"
+                        "Type the value for this one."
+                    )
+                if self.is_inherited(row, spec_col):
+                    where = self.inherited_from(row, spec_col)
+                    if where:
+                        return f"Inherited from {where}.\nType here to override it."
+            if row in self._colliding:
+                # Derived, not stored, so it disappears the moment the clash is
+                # resolved rather than lingering on a row that is now fine.
+                from ...inventory.name_collisions import DUPLICATE_ISSUE
+
+                return DUPLICATE_ISSUE
             if "proposed_issues" in self._df.columns:
                 issues = str(self._df.at[row, "proposed_issues"] or "").strip()
                 if issues:
@@ -536,6 +1081,14 @@ class InventoryTableModel(QAbstractTableModel):
 
         # Inheritance fields: a blank cell shows the dataset default (and the
         # delegate paints it muted via INHERITED_ROLE).
+        if spec.df_column and not self.column_applies(row, spec.df_column):
+            # Blank, not "—": the em dash means "inherited and empty", which
+            # would imply the field could be filled in here. It cannot.
+            if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+                return ""
+            if role == INHERITED_ROLE:
+                return False
+
         if spec.df_column in _INHERITANCE_FIELDS:
             if role == INHERITED_ROLE:
                 return self.is_inherited(row, spec.df_column)
@@ -543,7 +1096,14 @@ class InventoryTableModel(QAbstractTableModel):
                 eff = self.effective_value(row, spec.df_column)
                 if eff:
                     return eff
-                return "—" if role == Qt.ItemDataRole.DisplayRole else ""
+                if role == Qt.ItemDataRole.DisplayRole:
+                    # Three empties that mean different things. "varies" asks
+                    # for an answer, the em dash reports an empty inherited
+                    # default, and a truly blank cell says nothing was stated.
+                    return "varies?" if self.needs_per_row_answer(
+                        row, spec.df_column,
+                    ) else "—"
+                return ""
 
         if role == Qt.ItemDataRole.DisplayRole:
             return self._display_value(row, spec)
@@ -568,11 +1128,15 @@ class InventoryTableModel(QAbstractTableModel):
         df_col = spec.df_column
         if df_col is None:
             return False
+        if not self.column_applies(row, df_col):
+            return False
         new_str = "" if value is None else str(value)
         # Inheritance fields: writing a value equal to the dataset default
         # clears the cell back to "inherited" instead of storing a redundant
         # per-row override (the convert/display layers re-resolve the default).
-        if df_col in _INHERITANCE_FIELDS and new_str == self._global_default(df_col):
+        if df_col in _INHERITANCE_FIELDS and new_str == self._global_default(
+            df_col, self.effective_datatype_suffix(row)[0]
+        ):
             new_str = ""
         old_str = "" if pd.isna(self._df.at[row, df_col]) else str(self._df.at[row, df_col])
         if new_str == old_str:
@@ -907,6 +1471,27 @@ class InventoryTableModel(QAbstractTableModel):
             self.refresh_row(row)
         return changed
 
+    def _recompute_collisions(self) -> bool:
+        """Refresh which rows clash. True if the answer changed.
+
+        Cheap enough to run on every edit: it is one pass building a dict of
+        names.
+        """
+        from ...inventory.name_collisions import find_collisions
+
+        try:
+            found = find_collisions(self._df)
+        except Exception:  # noqa: BLE001 - a paint hint must never raise
+            found = {}
+        colliding = {idx for rows in found.values() for idx in rows}
+        changed = colliding != self._colliding
+        self._colliding = colliding
+        return changed
+
+    def colliding_rows(self) -> set:
+        """Rows whose BIDS name another included row also wants."""
+        return set(self._colliding)
+
     def refresh_row(self, row: int) -> None:
         """Re-derive cached state for ``row`` and notify the view.
 
@@ -919,6 +1504,20 @@ class InventoryTableModel(QAbstractTableModel):
         if not (0 <= row < len(self._df)):
             return
         self._revalidate_row(row)
+
+        # Renaming ONE row can clear the clash on ANOTHER: two rows wanted the
+        # same name and now they do not. Refreshing only the edited row left
+        # its partner painted red with nothing wrong with it, which reads as
+        # the warning being stuck.
+        if self._recompute_collisions():
+            for i in range(len(self._df)):
+                self._row_states[i] = self._derive_row_state(i)
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(self.rowCount() - 1, self.columnCount() - 1),
+            )
+            return
+
         self._row_states[row] = self._derive_row_state(row)
         left = self.index(row, 0)
         right = self.index(row, self.columnCount() - 1)
@@ -940,6 +1539,8 @@ class InventoryTableModel(QAbstractTableModel):
             return
         for i in range(len(self._df)):
             self._revalidate_row(i)
+        self._recompute_collisions()
+        for i in range(len(self._df)):
             self._row_states[i] = self._derive_row_state(i)
         self.dataChanged.emit(
             self.index(0, 0),
@@ -1064,17 +1665,33 @@ class InventoryTableModel(QAbstractTableModel):
             text = text[len("ses-"):]
         return "" if text == "—" else text
 
+    # Datatypes MneBidsBackend claims, mirroring its own ``can_handle``.
+    _MNE_BIDS_DATATYPES = frozenset({"eeg", "meg", "ieeg", "nirs"})
+
     def _backend(self, row: int) -> str:
-        """Derive the converter backend that will handle this row."""
+        """Which converter backend will handle this row.
+
+        Mirrors ``converter.registry`` in the same order the dispatcher uses:
+        physio, then ECAT, then mne-bids, then dcm2niix as the broad fallback.
+
+        This used to read "any row with a source file goes to mne-bids", which
+        is not what the registry does. An ECAT PET scan has a source file and
+        is converted by EcatDirect through nibabel, so the table named the
+        wrong tool for every ECAT row. The registry decides ECAT by reading the
+        file's signature, which is far too expensive to do per cell per
+        repaint; the ``format`` column records the same fact at scan time.
+        """
         suffix = ""
         if "bids_guess_suffix" in self._df.columns:
             suffix = str(self._df.at[row, "bids_guess_suffix"] or "")
         if suffix == "physio":
             return "bidsphysio"
-        if "source_file" in self._df.columns:
-            src = self._df.at[row, "source_file"]
-            if isinstance(src, str) and src.strip():
-                return "mne-bids"
+
+        datatype, _ = self.effective_datatype_suffix(row)
+        if datatype == "pet" and self._raw_cell(row, "format").strip().upper() == "ECAT":
+            return "ecat"
+        if datatype in self._MNE_BIDS_DATATYPES:
+            return "mne-bids"
         return "dcm2niix"
 
     @staticmethod
@@ -1180,6 +1797,13 @@ class InventoryTableModel(QAbstractTableModel):
             issues_l = str(self._df.at[row, "proposed_issues"] or "").lower()
             if "non-image series" in issues_l:
                 return "noimg"
+
+        # Two included recordings wanting one BIDS name means one overwrites
+        # the other, and conversion refuses until it is resolved. An error
+        # rather than a warning, and checked before the include and skip states
+        # because the danger comes precisely from the row being included.
+        if row in self._colliding:
+            return "err"
 
         if not self._read_include(row):
             return "skip"

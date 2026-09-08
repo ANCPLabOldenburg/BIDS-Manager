@@ -73,8 +73,9 @@ from PyQt6.QtWidgets import (
 from ..project import Project
 from .converter_panel import ConverterPanel
 from .editor_panel import EditorPanel
-from .theme_manager import ThemeManager
+from .theme_manager import CUR, ThemeManager
 from .welcome_panel import WelcomePanel
+from .widgets import ElidedLabel
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ class _ClickableLabel(QLabel):
 
 
 class _ProjectMenuRow(QWidget):
-    """A two-line row (dataset name + path) for the project-switcher menu.
+    """A two-line row (project name + path) for the project-switcher menu.
 
     Used both for the current project (display only) and for each recent
     project (clickable -> switch). Emits :pyattr:`clicked` on release when
@@ -110,7 +111,9 @@ class _ProjectMenuRow(QWidget):
 
     clicked = pyqtSignal()
 
-    def __init__(self, name: str, path: str, *, current: bool, parent=None) -> None:
+    def __init__(
+        self, name: str, path: str, *, current: bool, title: str = "", parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("proj-menu-row-current" if current else "proj-menu-row")
         self._clickable = not current
@@ -123,7 +126,17 @@ class _ProjectMenuRow(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 6, 14, 6)
         lay.setSpacing(1)
-        n = QLabel(name)
+        # The project name, and beside it the dataset's own title in a quieter
+        # tone when it says something different. One says where the data lives,
+        # the other what it is.
+        if title:
+            n = QLabel(
+                f'{name}<span style="color:{CUR()["muted"]}; font-style:italic;">'
+                f"&nbsp;&nbsp;{title}</span>"
+            )
+            n.setTextFormat(Qt.TextFormat.RichText)
+        else:
+            n = QLabel(name)
         n.setObjectName("proj-menu-name")
         p = QLabel(path)
         p.setObjectName("proj-menu-path")
@@ -278,10 +291,22 @@ class _TopHeader(QFrame):
     # ------------------------------------------------------------------
 
     def set_active_project(self, name: str, root: Path) -> None:
-        """Show the switcher with ``name`` as the current project."""
+        """Show the switcher with ``name`` as the current project.
+
+        The pill carries the project name alone. A QPushButton renders one
+        colour and reports its full text as its minimum width, so a dataset
+        title in here would both look like part of the name and widen the
+        header; it goes in the tooltip and, in two colours, in the menu below.
+        """
+        from .welcome_panel import _dataset_title
+
         self._active_project_root = Path(root)
+        title = _dataset_title(Path(root))
         self._project_btn.setText(name)
-        self._project_btn.setToolTip(f"{name}\n{root}\n\nClick to switch projects.")
+        self._project_btn.setToolTip(
+            (f"{name}\n{title}\n{root}" if title else f"{name}\n{root}")
+            + "\n\nClick to switch projects."
+        )
         self._project_btn.setVisible(True)
 
     def clear_active_project(self) -> None:
@@ -292,7 +317,7 @@ class _TopHeader(QFrame):
     def _rebuild_project_menu(self) -> None:
         """Repopulate the dropdown: current project header + recent projects."""
         from .app_settings import AppSettings
-        from .welcome_panel import _dataset_display_name
+        from .welcome_panel import _dataset_display_name, _dataset_title
 
         menu = self._project_menu
         menu.clear()
@@ -301,7 +326,8 @@ class _TopHeader(QFrame):
         if self._active_project_root is not None:
             cur = self._active_project_root
             header = _ProjectMenuRow(
-                _dataset_display_name(cur), str(cur), current=True, parent=menu,
+                _dataset_display_name(cur), str(cur), current=True,
+                title=_dataset_title(cur), parent=menu,
             )
             wa = QWidgetAction(menu)
             wa.setDefaultWidget(header)
@@ -327,7 +353,9 @@ class _TopHeader(QFrame):
                 name = _dataset_display_name(Path(p)) if exists else Path(p).name
                 row = _ProjectMenuRow(
                     name + ("   (missing)" if not exists else ""),
-                    str(p), current=False, parent=menu,
+                    str(p), current=False,
+                    title=_dataset_title(Path(p)) if exists else "",
+                    parent=menu,
                 )
                 wa = QWidgetAction(menu)
                 wa.setDefaultWidget(row)
@@ -510,11 +538,15 @@ class MainWindow(QMainWindow):
         # via :func:`update_widgets.attach_update_widgets`.
         sb = QStatusBar()
         sb.setSizeGripEnabled(False)
-        self._status_text = QLabel("Ready")
+        # Elided: worker messages carry full paths and tracebacks, and a
+        # plain QLabel would raise the window's layout minimum by the
+        # width of whatever it was last handed.
+        self._status_text = ElidedLabel("Ready")
         sb.addWidget(self._status_text, 1)
         self.setStatusBar(sb)
 
         self.converter.log_message.connect(self._set_status)
+        self.converter.project_rename_requested.connect(self._rename_project)
         self.editor.log_message.connect(self._set_status)
 
         # Bottom-right: "vX.Y.Z" + "Check updates". Wrapped in try/except
@@ -594,6 +626,52 @@ class MainWindow(QMainWindow):
             from .app_settings import AppSettings
             AppSettings.remember_active_view(view)
 
+    def _rename_project(self, root, new_name: str) -> None:
+        """Rename the project folder, then reopen it under its new name.
+
+        Asked for from the metadata form, where a user renamed the dataset and
+        said they meant the project itself. Doing it here rather than there is
+        deliberate: this is a move on disk that invalidates every open handle on
+        the old path, so it has to close the project and open the new one, which
+        is the window's job.
+
+        Anything else pointing at the old path, a script or a backup, will not
+        follow. The dialog says so before the user chooses.
+        """
+        from PyQt6.QtWidgets import QMessageBox
+
+        root = Path(root)
+        target = root.parent / new_name
+        if target == root:
+            return
+        try:
+            root.rename(target)
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Could not rename the project",
+                f"{root.name} could not be renamed to {new_name}.\n\n{exc}",
+            )
+            return
+
+        from .app_settings import AppSettings
+
+        AppSettings.forget_recent_project(root)
+        AppSettings.remember_recent_project(target)
+        self._set_status(f"Renamed project to {new_name}")
+
+        from ..cli.create import open_or_create_workspace
+
+        try:
+            reopened = open_or_create_workspace(target)
+        except Exception as exc:  # noqa: BLE001 - report, do not crash
+            QMessageBox.warning(
+                self, "Renamed, but could not reopen",
+                f"The folder is now {target}, but the project could not be "
+                f"reopened.\n\n{exc}",
+            )
+            return
+        self._on_project_opened(reopened, target)
+
     def _on_project_opened(self, project: Project, bids_root: Path) -> None:
         """Bind the project the user created/opened on Welcome and switch in.
 
@@ -660,12 +738,9 @@ class MainWindow(QMainWindow):
             tree.viewport().update()
 
     def _set_status(self, text: str) -> None:
-        # Truncate long single-line messages so the status bar doesn't
-        # blow up the window width on big tracebacks.
-        first_line = text.splitlines()[0] if text else ""
-        if len(first_line) > 200:
-            first_line = first_line[:197] + "…"
-        self._status_text.setText(first_line)
+        # Only the first line: the status bar is one row tall. Its width
+        # needs no guarding -- ``ElidedLabel`` clips to the room it has.
+        self._status_text.setText(text.splitlines()[0] if text else "")
 
 
 __all__ = ["MainWindow"]

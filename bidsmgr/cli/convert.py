@@ -61,19 +61,23 @@ from ..converter import (
 from ..fixups import (
     apply_fieldmap_renames,
     attach_companion_files,
+    convert_blood_files,
+    enrich_pet_sidecars,
     enrich_recording_sidecars,
     populate_intended_for,
+    repair_converter_output,
     update_scans_tsv,
 )
 from ..recording_meta import (
     RecordingMetaSpec,
     default_spec,
     load_spec,
+    merge_pet,
     resolve_effective,
     scaffold_sidecar_path,
 )
 from ..util.cancel import OperationCancelled, is_cancelled
-from ..util.paths import long_path, safe_path_component
+from ..util.paths import safe_path_component
 from ._scaffold import ensure_bidsignore, ensure_dataset_description
 
 log = logging.getLogger(__name__)
@@ -83,10 +87,84 @@ log = logging.getLogger(__name__)
 # dataset files (participants.tsv / scans.tsv) on every call.
 _MNE_BIDS_DATATYPES: frozenset[str] = frozenset({"eeg", "meg", "ieeg", "nirs"})
 
+# Datatypes whose row points at a single source file rather than a DICOM
+# series. ECAT PET joins the EEG/MEG family here because one ECAT file holds a
+# whole dynamic study, frames included. Unlike them it does NOT go through
+# mne-bids, so it stays in the parallel phase.
+_FILE_BASED_DATATYPES: frozenset[str] = _MNE_BIDS_DATATYPES | frozenset({"pet"})
+
 
 # ---------------------------------------------------------------------------
 # Top-level orchestration
 # ---------------------------------------------------------------------------
+
+
+
+def _apply_pet_spreadsheet(spec, path: Path, df) -> object:
+    """Fold a PET metadata spreadsheet into ``spec`` as per-row overrides.
+
+    The spreadsheet keys on whatever identifier the study used, so each row is
+    matched against the inventory's participant label, BIDS name and source
+    filename in turn. A key that matches nothing is reported rather than
+    silently dropped: a typo in the spreadsheet is exactly the kind of mistake
+    that otherwise surfaces much later as a missing field.
+    """
+    from ..metadata.pet_spreadsheet import read_pet_spreadsheet
+    from ..project.orchestration import row_id as _row_id
+
+    table = read_pet_spreadsheet(path)
+    if not table:
+        return spec
+
+    # Every identifier an inventory row answers to, mapped to EVERY row that
+    # answers to it. A participant-level key must reach all of that
+    # participant's scans, not just the first: a subject with two runs got one
+    # of them enriched and the other left blank when this mapped one-to-one.
+    aliases: dict[str, list[str]] = {}
+
+    def _add(key: str, rid: str) -> None:
+        text = key.strip()
+        if text and rid not in aliases.setdefault(text, []):
+            aliases[text].append(rid)
+
+    for i in df.index:
+        rid = _row_id(df, i)
+        for column in ("BIDS_name", "subject", "source_file"):
+            if column not in df.columns:
+                continue
+            value = str(df.at[i, column] or "").strip()
+            if not value:
+                continue
+            _add(value, rid)
+            # A participant column may or may not carry the sub- prefix.
+            _add(value[4:] if value.startswith("sub-") else f"sub-{value}", rid)
+            _add(Path(value).name, rid)
+
+    overrides = dict(spec.pet_overrides)
+    matched = 0
+    for key, block in table.items():
+        rids = aliases.get(key) or aliases.get(Path(key).name) or []
+        if not rids:
+            log.warning(
+                "PET spreadsheet row %r matches no inventory row; ignoring", key,
+            )
+            continue
+        for rid in rids:
+            existing = overrides.get(rid)
+            if existing is None:
+                overrides[rid] = block
+            else:
+                # Spreadsheet wins over an earlier override: it is the more
+                # deliberate statement of the two.
+                overrides[rid] = merge_pet(existing, block)
+        matched += 1
+
+    log.info(
+        "PET spreadsheet: applied %d of %d row(s) to %d recording(s)",
+        matched, len(table),
+        sum(len(aliases.get(k, [])) for k in table),
+    )
+    return spec.model_copy(update={"pet_overrides": overrides})
 
 
 def run_convert(
@@ -100,6 +178,7 @@ def run_convert(
     dry_run: bool = False,
     dcm2niix_bin: Optional[Path] = None,
     recording_meta: Optional[Path] = None,
+    pet_spreadsheet: Optional[Path] = None,
     raw_root: Optional[Path] = None,
     skip_residuals: bool = True,
     force_edf: bool = False,
@@ -185,6 +264,23 @@ def run_convert(
     if dataset:
         df = df[df["dataset"] == dataset].copy()
 
+    # Nothing is written until every row is known to want a different name.
+    # The scan resolves what BIDS has an answer for and flags the rest, but a
+    # TSV can be edited by hand between the two steps, and the cost of being
+    # wrong here is a recording silently overwritten by the next one.
+    #
+    # This is about two rows in THIS run colliding with each other. Whether a
+    # destination already exists from an earlier conversion is a different
+    # question, and ``--on-existing`` answers it.
+    from ..inventory.name_collisions import (
+        NameCollisionError,
+        describe_collisions,
+    )
+
+    collision_report = describe_collisions(df)
+    if collision_report:
+        raise NameCollisionError(collision_report)
+
     # The files_by_uid sidecar is only required when the inventory
     # contains MRI rows. EEG/MEG-only inventories store the recording
     # path in each row's ``source_file`` column.
@@ -211,6 +307,14 @@ def run_convert(
             log.info("auto-loaded recording-metadata scaffold %s", auto_meta)
         else:
             spec = default_spec()
+
+    # A PET metadata spreadsheet layers on top of the spec. A study's
+    # radiochemistry usually already exists as a table exported from the lab's
+    # records, and retyping it is both tedious and a fresh chance to mistype a
+    # dose. Rows are matched on participant label or source filename, whichever
+    # the spreadsheet used.
+    if pet_spreadsheet is not None:
+        spec = _apply_pet_spreadsheet(spec, Path(pet_spreadsheet), df)
 
     backends = default_backends(dcm2niix_bin=dcm2niix_bin)
     # Capture dcm2niix version once for provenance — it's still the
@@ -359,9 +463,26 @@ def _convert_subject(
         # EEG/MEG sidecar/channels/events enrichment from the recording-
         # metadata spec (no-op for MRI-only subjects or when spec is None).
         n_enriched = enrich_recording_sidecars(staging, tasks, spec)
+        # PET sidecar enrichment: rename DICOM-derived keys to their BIDS
+        # names, fill the radiochemistry the scanner cannot record, fix the
+        # fields BIDS types as per-frame arrays, and prune the patient
+        # identifiers dcm2niix leaves behind under ``-ba n``. Runs even with
+        # no spec, since the rename, type-fix and prune passes need no input.
+        n_enriched += enrich_pet_sidecars(staging, tasks, spec)
         # Copy any per-row curated companion files (events/beh/stim/...) into
         # the staged tree (place + name only; no conversion).
         n_enriched += attach_companion_files(staging, tasks)
+        # A PET run's blood curves, which ARE converted: PMOD exports become the
+        # BIDS blood tables, named for the run they belong to. Source data the
+        # user pointed at, so it belongs to the conversion.
+        n_enriched += convert_blood_files(staging, tasks)
+        # Fix what the CONVERTER wrote: a key whose spelling differs from the
+        # standard's only in case, and a scalar where the schema declares an
+        # array. Runs last so it sees what the modality fixups produced.
+        #
+        # What the USER stated is NOT applied here. That is the metadata step's
+        # job, so this verb produces a faithful conversion and no opinions.
+        n_enriched += repair_converter_output(staging)
         _prune_empty_dirs(staging)
 
         # Phase 3: atomic commit. Use the same sanitised segment we
@@ -754,11 +875,13 @@ def _row_to_task(
     force_edf: bool = False,
     spec: Optional[RecordingMetaSpec] = None,
 ) -> Optional[ConvertTask]:
-    """Detect MRI vs EEG/MEG row shape and dispatch to the right builder.
+    """Detect the row's shape and dispatch to the right builder.
 
-    MRI rows have a non-empty ``series_uid``; EEG/MEG rows have a
-    non-empty ``source_file`` and a datatype in {eeg, meg, ieeg, nirs}.
-    Anything else returns None and the caller skips it.
+    Two shapes exist. A DICOM series row carries a non-empty ``series_uid``
+    and many source files. A file-based row carries a single path in
+    ``source_file``: EEG, MEG, iEEG and NIRS recordings, and ECAT PET, whose
+    whole dynamic study lives in one file. Anything else returns None and the
+    caller skips it.
     """
     series_uid = str(row.get("series_uid", "")).strip()
     if series_uid:
@@ -768,7 +891,7 @@ def _row_to_task(
 
     source_file = str(row.get("source_file", "")).strip()
     if source_file:
-        return _row_to_task_eeg_meg(
+        return _row_to_task_file_based(
             row, bids_root, source_search_roots=source_search_roots,
             force_edf=force_edf, spec=spec,
         )
@@ -905,7 +1028,7 @@ def _parse_entities_json(row: pd.Series) -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items()}
 
 
-def _row_to_task_eeg_meg(
+def _row_to_task_file_based(
     row: pd.Series,
     bids_root: Path,
     *,
@@ -913,12 +1036,12 @@ def _row_to_task_eeg_meg(
     force_edf: bool = False,
     spec: Optional[RecordingMetaSpec] = None,
 ) -> Optional[ConvertTask]:
-    """Build a :class:`ConvertTask` for an EEG/MEG/iEEG/NIRS row.
+    """Build a :class:`ConvertTask` for a row whose source is one file.
 
-    EEG/MEG rows carry the recording's path directly in ``source_file``
-    (relative to the scan input root or absolute). The mne-bids backend
-    reads it via ``mne.io.read_raw`` and writes BIDS via
-    ``write_raw_bids``.
+    That covers EEG, MEG, iEEG and NIRS recordings, which the mne-bids
+    backend reads, and ECAT PET, which the nibabel-based ``EcatDirect``
+    backend reads. Both carry the path directly in ``source_file``, relative
+    to the scan input root or absolute.
     """
     source_file = str(row.get("source_file", "")).strip()
     if not source_file:
@@ -938,9 +1061,9 @@ def _row_to_task_eeg_meg(
         session = None
 
     datatype = str(row.get("proposed_datatype", "")).strip().lower()
-    if datatype not in {"eeg", "meg", "ieeg", "nirs"}:
-        # Either not actually an EEG/MEG row, or the user clobbered
-        # the column. Skip.
+    if datatype not in _FILE_BASED_DATATYPES:
+        # Either not actually a file-based row, or the user clobbered the
+        # column. Skip.
         return None
 
     suffix = (
@@ -969,6 +1092,19 @@ def _row_to_task_eeg_meg(
             if c.exists():
                 src_path = c
                 break
+        else:
+            # Say so here, where the reason is known. Left unresolved, the row
+            # falls past the backend that reads its format (which checks the
+            # file's signature and so needs it to exist) into the DICOM one,
+            # and fails with "no source DICOMs were accessible": true, and no
+            # help at all in working out that a path could not be resolved.
+            log.warning(
+                "could not find the source for %s: %r is relative and does "
+                "not exist under any of %s. Pass --raw-root <the folder that "
+                "was scanned> so relative paths can be resolved.",
+                basename, source_file,
+                [str(r) for r in source_search_roots] or ["the working directory"],
+            )
 
     # The row's ``entities`` column is the source of truth (the in-memory
     # rebuild ran above so it's already reconciled with display cells).
@@ -998,7 +1134,12 @@ def _row_to_task_eeg_meg(
     # source path); line_freq finally falls back to 50 Hz so
     # PowerLineFrequency is always populated (preserves prior behaviour now
     # that the dataset-wide --line-freq flag is gone).
-    eff_acq = resolve_effective(spec, source_file).acquisition if spec is not None else None
+    # The datatype selects the per-modality block: what a study says about its
+    # EEG amplifier must not reach its MEG recordings.
+    eff_acq = (
+        resolve_effective(spec, source_file, None, str(row.get("bids_guess_datatype", "") or "") or None).acquisition
+        if spec is not None else None
+    )
 
     line_freq_raw = str(row.get("line_freq", "")).strip()
     try:
@@ -1215,6 +1356,17 @@ def _print_tasks(tasks: Iterable[ConvertTask]) -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    """Entry point. Reports a name collision as a refusal, not a crash."""
+    from ..inventory.name_collisions import NameCollisionError
+
+    try:
+        return _main(argv)
+    except NameCollisionError as exc:
+        log.error("%s", exc)
+        return 1
+
+
+def _main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="bidsmgr-convert",
         description=(
@@ -1299,6 +1451,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--pet-spreadsheet", default=None, type=Path,
+        help=(
+            "Path to a PET metadata spreadsheet (.tsv / .csv / .xlsx / .ods). "
+            "One row per scan, keyed by participant label, BIDS name or source "
+            "filename, with columns for tracer, dose, mass, administration and "
+            "timing. Column names are matched loosely (Injected Dose, "
+            "injected_radioactivity and InjectedRadioactivity all work). Values "
+            "layer on top of the recording-metadata spec as per-row overrides."
+        ),
+    )
+    parser.add_argument(
         "--raw-root", default=None, type=Path,
         help=(
             "Folder the scan was run against. Used as the first "
@@ -1332,7 +1495,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
 
+    parser.add_argument(
+        "--schema", default=None, metavar="VERSION",
+        help=(
+            "Which BIDS version to work to (for example 1.11.1). Decides which "
+            "fields are declared and which entities a filename may carry. "
+            "Default: the newest version shipped."
+        ),
+    )
+
     args = parser.parse_args(argv)
+    # One version for the whole run, adopted before any schema question is
+    # asked. Without this the flag would reach the validator alone and a
+    # dataset could be filled in against one version and checked against
+    # another.
+    from ..schema import set_active_version
+    set_active_version(args.schema)
+
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 
@@ -1375,6 +1554,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             dry_run=args.dry_run,
             dcm2niix_bin=args.dcm2niix,
             recording_meta=args.recording_meta,
+            pet_spreadsheet=args.pet_spreadsheet,
             raw_root=Path(version.raw_root) if version.raw_root else args.raw_root,
             skip_residuals=not args.keep_residuals,
             force_edf=args.force_edf,
@@ -1393,6 +1573,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         dry_run=args.dry_run,
         dcm2niix_bin=args.dcm2niix,
         recording_meta=args.recording_meta,
+        pet_spreadsheet=args.pet_spreadsheet,
         raw_root=args.raw_root,
         skip_residuals=not args.keep_residuals,
         force_edf=args.force_edf,

@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import math
 
-from PyQt6.QtCore import Qt, QTimer, QPointF
+from PyQt6.QtCore import Qt, QSize, QTimer, QPointF
 from PyQt6.QtGui import QColor, QPainter
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QWidget
 
 from ..theme_manager import CUR
+from .primitives import ElidedLabel
 
 
 # Glyph footprint. Wider than tall to read clearly as ∞ rather than a
@@ -107,6 +108,10 @@ class BusySpinner(QWidget):
     and ``set_busy(False)`` to hide. Multiple sequential operations can
     safely call ``set_busy`` repeatedly — the timer is owned by the
     widget and resets on each transition.
+
+    The message is an :class:`~bidsmgr.gui.widgets.primitives.ElidedLabel`,
+    so callers may pass a full path or log line of any length: it is
+    elided to the room the toolbar has and never resizes the window.
     """
 
     def __init__(self, parent=None) -> None:
@@ -119,9 +124,12 @@ class BusySpinner(QWidget):
         self._glyph = _Lemniscate(self)
         h.addWidget(self._glyph)
 
-        self._message = QLabel("")
+        # Elided, not plain: the message carries runtime paths and log
+        # lines, and a plain QLabel would raise the toolbar's layout
+        # minimum by the full text width and grow the window with it.
+        self._message = ElidedLabel("")
         self._message.setObjectName("busy-spinner-message")
-        h.addWidget(self._message)
+        h.addWidget(self._message, 1)
 
         self._timer = QTimer(self)
         self._timer.setInterval(_TICK_MS)
@@ -129,6 +137,16 @@ class BusySpinner(QWidget):
 
         # Start hidden — the layout reserves no space when not busy.
         self.setVisible(False)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 — Qt naming
+        """Claim no horizontal room, so becoming busy never resizes the window.
+
+        The glyph is a fixed 44px and the message elides on its own, but
+        the pair still raised the toolbar's layout minimum the moment the
+        spinner appeared — enough to widen a window already sitting at
+        its minimum. A cramped toolbar now clips the glyph instead.
+        """
+        return QSize(0, super().minimumSizeHint().height())
 
     # ------------------------------------------------------------------
     def set_busy(self, busy: bool, *, message: str = "") -> None:

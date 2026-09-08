@@ -22,6 +22,27 @@ def _task(datatype="eeg", basename="sub-001_task-rest_eeg", row_id="r1", task="r
     )
 
 
+def _apply_stated(staging, spec, tasks=(), cells=None):
+    """Write what the user stated, the way ``bidsmgr-metadata`` does.
+
+    Sidecar FIELDS used to be written during conversion by this fixup, which
+    walked the same chain as the template pass, so a field could be written
+    twice and the winner depended on the order the two ran in. There is one
+    pass now and it belongs to the metadata step. These tests follow it, because
+    what they assert is what ends up in the file.
+    """
+    import pandas as pd
+    from bidsmgr.fixups.sidecar_schema import apply_stated_metadata
+
+    rows = [
+        {"proposed_basename": t.basename, "source_file": t.row_id, **(cells or {})}
+        for t in tasks
+    ]
+    return apply_stated_metadata(
+        staging, spec, pd.DataFrame(rows) if rows else None,
+    )
+
+
 def _stage_eeg(tmp_path: Path, datatype="eeg", basename="sub-001_task-rest_eeg") -> Path:
     """Create a synthetic staged datatype dir with the files mne-bids writes."""
     prefix = basename.rsplit("_", 1)[0]
@@ -81,9 +102,13 @@ def test_noop_when_spec_none(tmp_path):
 
 
 def test_sidecar_fields_written(tmp_path):
+    """What the user stated reaches the sidecar. Written by the metadata step
+    now; the task protocol still comes from the conversion, which is the pass
+    that knows which task this recording belongs to."""
     staging = _stage_eeg(tmp_path)
-    n = enrich_recording_sidecars(staging, [_task()], _full_spec())
-    assert n > 0
+    spec = _full_spec()
+    assert _apply_stated(staging, spec, [_task()]) > 0
+    enrich_recording_sidecars(staging, [_task()], spec)
     side = _read_json(staging / "eeg" / "sub-001_task-rest_eeg.json")
     assert side["EEGReference"] == "Cz"
     assert side["EEGGround"] == "AFz"
@@ -125,8 +150,8 @@ def test_meg_skips_eeg_only_keys(tmp_path):
     spec = RecordingMetaSpec(
         defaults=AcquisitionSpec(eeg_reference="Cz", manufacturer="Elekta"),
     )
-    enrich_recording_sidecars(
-        staging, [_task(datatype="meg", basename="sub-001_task-rest_meg")], spec,
+    _apply_stated(
+        staging, spec, [_task(datatype="meg", basename="sub-001_task-rest_meg")],
     )
     side = _read_json(staging / "meg" / "sub-001_task-rest_meg.json")
     assert "EEGReference" not in side  # EEG-only key skipped for MEG
@@ -139,7 +164,7 @@ def test_per_row_override_applies(tmp_path):
         defaults=AcquisitionSpec(eeg_reference="Cz"),
         overrides={"r1": AcquisitionSpec(eeg_reference="FCz")},
     )
-    enrich_recording_sidecars(staging, [_task(row_id="r1")], spec)
+    _apply_stated(staging, spec, [_task(row_id="r1")])
     side = _read_json(staging / "eeg" / "sub-001_task-rest_eeg.json")
     assert side["EEGReference"] == "FCz"
 
@@ -155,8 +180,8 @@ def test_meg_specific_fields_written(tmp_path):
             subject_artefact_description="occasional jaw clench",
         ),
     )
-    enrich_recording_sidecars(
-        staging, [_task(datatype="meg", basename="sub-001_task-rest_meg")], spec,
+    _apply_stated(
+        staging, spec, [_task(datatype="meg", basename="sub-001_task-rest_meg")],
     )
     side = _read_json(staging / "meg" / "sub-001_task-rest_meg.json")
     assert side["DewarPosition"] == "upright"
@@ -173,7 +198,70 @@ def test_meg_fields_not_written_for_eeg(tmp_path):
     spec = RecordingMetaSpec(
         defaults=AcquisitionSpec(dewar_position="supine", eeg_reference="Cz"),
     )
-    enrich_recording_sidecars(staging, [_task()], spec)
+    _apply_stated(staging, spec, [_task()])
     side = _read_json(staging / "eeg" / "sub-001_task-rest_eeg.json")
     assert "DewarPosition" not in side
     assert side["EEGReference"] == "Cz"
+
+
+# ---------------------------------------------------------------------------
+# Which datatype takes which field is the schema's call, not a branch here
+# ---------------------------------------------------------------------------
+
+
+def _spec_with_everything():
+    from bidsmgr.recording_meta import RecordingMetaSpec
+    spec = RecordingMetaSpec()
+    d = spec.defaults
+    d.manufacturer = "Brain Products"
+    d.cap_manufacturer = "EasyCap"
+    d.cap_model = "M1"
+    d.eeg_reference = "Cz"
+    d.eeg_ground = "AFz"
+    d.institution_name = "Uni Oldenburg"
+    return spec
+
+
+def _apply(tmp_path, datatype, existing=None):
+    import json
+    from bidsmgr.fixups.sidecar_schema import apply_sequence_template, fill_agnostic_fields
+    p = tmp_path / f"{datatype}.json"
+    data = dict(existing or {})
+    spec = _spec_with_everything()
+    apply_sequence_template(data, datatype, datatype, None, spec)
+    fill_agnostic_fields(data, datatype, datatype, spec)
+    p.write_text(json.dumps(data))
+    return json.loads(p.read_text())
+
+
+def test_the_cap_reaches_every_datatype_that_has_one(tmp_path):
+    """REGRESSION: the cap fields were written for EEG alone, though the schema
+    declares them for MEG and NIRS too, so a cap entered for either was
+    silently dropped. iEEG has electrodes rather than a cap, and the schema
+    says so."""
+    for datatype in ("eeg", "meg", "nirs"):
+        data = _apply(tmp_path, datatype)
+        assert data.get("CapManufacturer") == "EasyCap", datatype
+        assert data.get("CapManufacturersModelName") == "M1", datatype
+    assert "CapManufacturer" not in _apply(tmp_path, "ieeg")
+
+
+def test_reference_uses_the_name_its_datatype_uses(tmp_path):
+    """The same spec value is EEGReference on a scalp recording and
+    iEEGReference on an intracranial one."""
+    eeg = _apply(tmp_path, "eeg")
+    assert eeg["EEGReference"] == "Cz" and eeg["EEGGround"] == "AFz"
+    ieeg = _apply(tmp_path, "ieeg")
+    assert ieeg["iEEGReference"] == "Cz" and ieeg["iEEGGround"] == "AFz"
+    assert "EEGReference" not in ieeg
+
+
+def test_meg_takes_an_eeg_reference_only_with_simultaneous_eeg(tmp_path):
+    """BIDS declares EEGReference for MEG because simultaneous EEG is common,
+    not because every MEG run has it. mne-bids has already counted the
+    channels, so state it only when there are some to reference."""
+    alone = _apply(tmp_path, "meg", existing={"EEGChannelCount": 0})
+    assert "EEGReference" not in alone
+
+    combined = _apply(tmp_path, "meg", existing={"EEGChannelCount": 64})
+    assert combined["EEGReference"] == "Cz"

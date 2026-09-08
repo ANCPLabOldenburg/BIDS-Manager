@@ -69,6 +69,11 @@ class ProbeFileStats:
     n_volumes_max: int = 0
     extensions: list[str] = field(default_factory=list)
     sidecar_count: int = 0
+    # What the sidecar dcm2niix wrote actually contained. The probe already
+    # parses these to find the SeriesInstanceUID and used to throw the rest
+    # away, which is why the metadata template could not say "the converter
+    # answers this, with this value" and instead showed a blank box.
+    sidecar_fields: dict = field(default_factory=dict)
 
 
 def _run_dcm2niix_full(
@@ -153,6 +158,11 @@ def collect_probe_stats(directory: Path) -> dict[str, ProbeFileStats]:
         stats = by_uid.setdefault(uid, ProbeFileStats(series_uid=uid))
         stats.output_files.append(json_path.name)
         stats.sidecar_count += 1
+        # First sidecar wins for a series that split into several outputs
+        # (multi-echo, phase): they agree about the acquisition, which is what
+        # this is for.
+        for key, value in data.items():
+            stats.sidecar_fields.setdefault(key, value)
 
         stem = json_path.name[: -len(".json")]
 
@@ -292,7 +302,38 @@ def _probe_one_series(
             "the series; staging=%s)", uid, staging_dir,
         )
         return uid, None
+
+    _enrich_pet_probe(stats[uid], staging_dir)
     return uid, stats[uid]
+
+
+def _enrich_pet_probe(stats: "ProbeFileStats", staging_dir: Path) -> None:
+    """Add the PET fields dcm2niix leaves out to what the probe measured.
+
+    The point of probing is to know what the conversion will answer by itself,
+    so that the template asks only for what is genuinely left. Conversion
+    enriches PET sidecars from the DICOM header, so a probe that did not would
+    tell the user to supply TimeZero and then quietly supply it anyway.
+
+    Gated on PET: no MRI series should pay for reading a PET-specific header.
+    """
+    if str(stats.sidecar_fields.get("Modality", "")).upper() != "PT":
+        return
+
+    dicoms = sorted(f for f in staging_dir.glob("*") if f.is_file())
+    if not dicoms:
+        return
+
+    try:
+        from .pet_dicom_meta import dicom_sidecar_fields
+
+        extra = dicom_sidecar_fields(dicoms[0], stats.sidecar_fields)
+    except Exception as exc:  # noqa: BLE001 - a probe is advisory, never fatal
+        log.info("probe: PET enrichment skipped for %s: %s", staging_dir.name, exc)
+        return
+
+    for key, value in extra.items():
+        stats.sidecar_fields.setdefault(key, value)
 
 
 def probe_rows(

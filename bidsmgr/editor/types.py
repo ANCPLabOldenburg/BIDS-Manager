@@ -66,6 +66,12 @@ class Issue(BaseModel):
     field: Optional[str] = None  # JSON key / TSV column when applicable (or entity)
     line: Optional[int] = None   # 1-based row (incl. header) for tabular findings
     lines: list[int] = Field(default_factory=list)  # all rows a TSV column finding spans
+    # Where in the BIDS schema this finding comes from, e.g.
+    # "rules.sidecars.mri.MRIPartialFourier". Provenance, so a user can look up
+    # what the standard actually says rather than take the message on trust.
+    # Empty for the findings BIDS Manager adds itself, which have no schema rule
+    # behind them, and those show none rather than an invented one.
+    schema_rule: Optional[str] = None
     fix_label: Optional[str] = None
     fix_action: Optional[str] = None
     # A "mirror" of a finding that canonically belongs to a sibling data file

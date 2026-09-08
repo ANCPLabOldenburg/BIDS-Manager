@@ -66,10 +66,23 @@ def _warn_row(**overrides) -> dict:
     # Generic non-err-token issue so ``_derive_row_state`` keeps this
     # at ``warn``. The model's err-token list contains
     # ``suspected_abort``/``required``/``build_basename``/``missing``.
+    #
+    # The basename names its own subject, as a real one does. These rows used
+    # to share sub-001's basename while claiming to be different subjects,
+    # which cannot happen in real data and now reads as the name clash it
+    # literally is, outranking the warn state this test is about.
     base = dict(
         proposed_issues="rerouted to fmap/epi: smaller than DWI peer",
         series_uid="2.2.2",
         BIDS_name="sub-002",
+        proposed_basename="sub-002_ses-pre_task-rest_bold",
+        # The entities are the source of truth: the model rebuilds the
+        # basename from them, so overriding the display cell alone leaves this
+        # row still calling itself sub-001.
+        entities=json.dumps(
+            {"subject": "002", "session": "pre", "task": "rest"},
+            sort_keys=True,
+        ),
     )
     base.update(overrides)
     return _func_row(**base)
@@ -92,6 +105,11 @@ def _skip_row(**overrides) -> dict:
         proposed_issues="",
         series_uid="8.8.8",
         BIDS_name="sub-004",
+        proposed_basename="sub-004_ses-pre_task-rest_bold",
+        entities=json.dumps(
+            {"subject": "004", "session": "pre", "task": "rest"},
+            sort_keys=True,
+        ),
         **overrides,
     )
 

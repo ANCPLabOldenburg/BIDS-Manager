@@ -48,6 +48,27 @@ from .subject_identity import IdentityTuple, cluster_subjects, normalize_tuple
 
 DICOM_EXTS = (".dcm", ".ima")
 
+# Extensions that are never DICOM. Everything NOT on this list gets its ``DICM``
+# marker checked, because vendors ship DICOM under dotted names with no real
+# extension (Philips writes the SOP instance UID, GE Signa writes ``*.img``).
+# Listing the negatives rather than the positives is what makes those studies
+# visible; the list only exists to avoid opening files we can rule out cheaply.
+NON_DICOM_EXTS = (
+    # documents and archives
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ods", ".csv", ".tsv", ".txt",
+    ".rtf", ".zip", ".gz", ".bz2", ".xz", ".tar", ".7z", ".rar",
+    # images and media that are not DICOM
+    ".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".svg",
+    ".mp4", ".mov", ".avi", ".mp3", ".wav",
+    # neuroimaging formats handled by other scanners
+    ".nii", ".mgz", ".mgh", ".hdr", ".brik", ".head",
+    ".fif", ".edf", ".bdf", ".gdf", ".set", ".fdt", ".vhdr", ".vmrk", ".eeg",
+    ".cnt", ".con", ".sqd", ".kdf", ".mef", ".nwb", ".mff", ".egi", ".ds",
+    # code and config
+    ".py", ".sh", ".json", ".yaml", ".yml", ".xml", ".html", ".md", ".log",
+    ".ini", ".cfg", ".toml",
+)
+
 MAGNITUDE_IMGTYPE = ["ORIGINAL", "PRIMARY", "M", "ND", "NORM"]
 PHASE_IMGTYPE = ["ORIGINAL", "PRIMARY", "P", "ND"]
 
@@ -97,13 +118,23 @@ BIDS_ENTITIES_COLUMNS: tuple[str, ...] = ("entities",)
 def is_dicom_file(path: str) -> bool:
     """Return True if ``path`` looks like a DICOM file.
 
-    Files with a known extension are accepted immediately; extensionless
-    files are accepted if they carry the standard ``DICM`` marker at byte 128.
+    Files with a known extension are accepted immediately. Everything else is
+    accepted only if it carries the standard ``DICM`` marker at byte 128.
+
+    The marker check deliberately also covers names that contain dots. Vendors
+    and PACS exports routinely write DICOM under a dotted name with no real
+    extension: Philips PET exports the SOP instance UID verbatim
+    (``1.3.46.670589.28...``) and GE Signa writes ``i439953.PTDC.89.img``.
+    Treating a dot as proof of "not DICOM" skipped those studies entirely.
+
+    Names carrying an extension we positively know is not DICOM are rejected
+    without opening the file, which keeps the scan fast on trees full of
+    reports, archives and images.
     """
     name = Path(path).name.lower()
     if name.endswith(DICOM_EXTS):
         return True
-    if "." in name:
+    if name.endswith(NON_DICOM_EXTS):
         return False
     try:
         with open(path, "rb") as f:
@@ -135,6 +166,64 @@ def classify_fieldmap_type(img_list: list[str]) -> str:
     if img_list == PHASE_IMGTYPE:
         return "P"
     return ""
+
+
+def read_pet_tags(ds) -> dict:
+    """Extract the PET-relevant DICOM tags from an open dataset.
+
+    These feed the read-only *suggestion* columns in the inventory, not the
+    sidecar directly. The BIDS PET sidecar needs facts the DICOM either does
+    not carry at all (injected mass, administration mode) or carries in a
+    vendor-specific free-text form that cannot be parsed with confidence
+    (``ReconstructionMethod`` reading ``PSF+TOF 3i21s``). So the scanner
+    proposes and the user confirms, the same contract the EEG/MEG montage and
+    manufacturer suggestions already use.
+
+    Returns an empty dict for non-PET datasets, so callers can merge blindly.
+    """
+    if str(getattr(ds, "Modality", "")).strip().upper() != "PT":
+        return {}
+
+    out: dict[str, str] = {}
+
+    def _put(key: str, value) -> None:
+        if value is None:
+            return
+        # Multi-valued elements (ConvolutionKernel is routinely one) come back
+        # as pydicom MultiValue. str() on that yields a Python list repr with
+        # quotes and brackets, so join on the DICOM separator instead.
+        if isinstance(value, (list, tuple, MultiValue)):
+            text = "\\".join(str(v).strip() for v in value if str(v).strip())
+        else:
+            text = str(value).strip()
+        if text and text.lower() not in ("unknown", "none"):
+            out[key] = text
+
+    _put("units", getattr(ds, "Units", None))
+    _put("decay_correction", getattr(ds, "DecayCorrection", None))
+    _put("recon_method", getattr(ds, "ReconstructionMethod", None))
+    _put("recon_filter", getattr(ds, "ConvolutionKernel", None))
+    _put("attenuation_correction", getattr(ds, "AttenuationCorrectionMethod", None))
+    _put("randoms_correction", getattr(ds, "RandomsCorrectionMethod", None))
+    _put("scatter_correction", getattr(ds, "ScatterCorrectionMethod", None))
+    _put("frame_duration", getattr(ds, "ActualFrameDuration", None))
+    _put("frame_reference_time", getattr(ds, "FrameReferenceTime", None))
+    _put("series_time", getattr(ds, "SeriesTime", None))
+
+    # Radiopharmaceutical facts live one level down, in a sequence.
+    seq = getattr(ds, "RadiopharmaceuticalInformationSequence", None)
+    if seq:
+        item = seq[0]
+        _put("tracer", getattr(item, "Radiopharmaceutical", None))
+        _put("injected_dose", getattr(item, "RadionuclideTotalDose", None))
+        _put("half_life", getattr(item, "RadionuclideHalfLife", None))
+        _put("tracer_start_time", getattr(item, "RadiopharmaceuticalStartTime", None))
+        _put("injected_volume", getattr(item, "RadiopharmaceuticalVolume", None))
+        code_seq = getattr(item, "RadionuclideCodeSequence", None)
+        if code_seq:
+            _put("radionuclide", getattr(code_seq[0], "CodeMeaning", None))
+
+    return out
 
 
 def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
@@ -219,6 +308,11 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
         "study_date": study_date,
         "study_time": study_time,
         "has_pixels": has_pixels,
+        # The DICOM Modality tag (PT, CT, MR, ...). PET classification keys on
+        # it, and a PET/CT or PET/MR study is exactly where a series' modality
+        # cannot be inferred from the series description alone.
+        "dicom_modality": str(getattr(ds, "Modality", "")).strip().upper(),
+        "pet": read_pet_tags(ds),
         "demo": {
             "GivenName": given,
             "FamilyName": family_name,
@@ -267,6 +361,11 @@ def scan_dicoms_long(
     # an Image Pixel module (Rows/Columns). Series with no pixel-bearing
     # file are DERIVED non-image objects dcm2niix cannot convert.
     haspix: dict = defaultdict(lambda: defaultdict(dict))
+    # Per-series DICOM Modality tag (PT / CT / MR / ...) and, for PET series
+    # only, the radiopharmaceutical + reconstruction tag block. Both are
+    # constant within a series, so the first non-empty file wins.
+    dicom_modalities: dict = defaultdict(lambda: defaultdict(dict))
+    pet_tags: dict = defaultdict(lambda: defaultdict(dict))
     # study-level metadata (per series): subj_key -> folder -> (series,uid) -> study tuple
     study_uids: dict = defaultdict(lambda: defaultdict(dict))
     # all distinct study tuples seen for each subject (for session inference).
@@ -327,6 +426,12 @@ def scan_dicoms_long(
         haspix[subj_key][folder][key] = (
             haspix[subj_key][folder].get(key, False) or bool(res.get("has_pixels"))
         )
+        # DICOM Modality and the PET tag block: first non-empty file wins.
+        # Both are constant across a series, so there is nothing to reconcile.
+        if key not in dicom_modalities[subj_key][folder] and res.get("dicom_modality"):
+            dicom_modalities[subj_key][folder][key] = res["dicom_modality"]
+        if key not in pet_tags[subj_key][folder] and res.get("pet"):
+            pet_tags[subj_key][folder][key] = res["pet"]
         # Track every DICOM file path per UID for later per-series probe.
         uid_str = res["uid"]
         if uid_str:
@@ -449,6 +554,13 @@ def scan_dicoms_long(
                     # DERIVED objects (e.g. Siemens TENSOR) that dcm2niix
                     # cannot convert.
                     "_has_pixel_data": haspix[subj_key][folder].get((series, uid), False),
+                    # Also internal (leading underscore). ``cli/scan`` reads
+                    # these to classify PET, exclude the CT companion of a
+                    # PET/CT study, and seed the PET suggestion columns.
+                    "_dicom_modality": dicom_modalities[subj_key][folder].get(
+                        (series, uid), ""
+                    ),
+                    "_pet_tags": pet_tags[subj_key][folder].get((series, uid), {}),
                     **demo[subj_key],
                 })
 
@@ -467,6 +579,12 @@ def scan_dicoms_long(
     # Stamp the dataset slug across every row. ``None`` leaves it blank;
     # the CLI orchestrator resolves a default and forwards it here.
     df["dataset"] = dataset or ""
+
+    # The on-disk format these rows came from. Every scanner fills this, so a
+    # table can show WHAT a row was read from next to WHERE it came from. The
+    # column lives in the EEG/MEG block of the unified TSV for historical
+    # ordering reasons only; it is modality-agnostic.
+    df["format"] = "DICOM"
 
     if not df.empty:
         df.sort_values(["BIDS_name", "subject", "session", "acq_time"], inplace=True)

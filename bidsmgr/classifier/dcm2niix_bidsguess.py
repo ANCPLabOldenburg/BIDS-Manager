@@ -151,6 +151,31 @@ def _collect_sidecars(directory: Path) -> list[dict]:
     return out
 
 
+def canonicalise(datatype: str, suffix: str) -> tuple[str, str]:
+    """Resolve a dcm2niix datatype / suffix to the schema's own spelling.
+
+    dcm2niix does not always match the schema's case. PET is the case that
+    matters: it emits ``["PET", "PET"]`` while the schema spells both ``pet``,
+    so a case-sensitive comparison silently rejects every PET series.
+
+    The resolve is deliberately **case-insensitive rather than lowercasing**:
+    the schema spells plenty of suffixes in mixed case (``T1w``, ``FLAIR``,
+    ``UNIT1``), so ``.lower()`` would break far more than it fixed. Anything
+    with no case-insensitive match is returned untouched, and rejected by
+    :func:`_validate_classification` as before.
+    """
+    if datatype == "discard":
+        return datatype, suffix
+
+    dt_map = {d.lower(): d for d in schema.list_datatypes()}
+    dt = dt_map.get(datatype.lower(), datatype)
+    if dt not in dt_map.values():
+        return dt, suffix
+
+    sfx_map = {s.lower(): s for s in schema.list_suffixes(dt)}
+    return dt, sfx_map.get(suffix.lower(), suffix)
+
+
 def _validate_classification(datatype: str, suffix: str, entities: dict[str, str]) -> bool:
     """Return ``True`` if the schema accepts this (datatype, suffix, entities) tuple."""
     if datatype == "discard":
@@ -216,6 +241,8 @@ def classify_dicom_folder(
         except ValueError as exc:
             log.debug("could not parse BidsGuess %r: %s", guess, exc)
             continue
+        # dcm2niix's casing is not always the schema's (it emits "PET"/"PET").
+        datatype, suffix = canonicalise(datatype, suffix)
 
         uid = sidecar.get("SeriesInstanceUID")
         matching_rows = rows_by_uid.get(uid, [])

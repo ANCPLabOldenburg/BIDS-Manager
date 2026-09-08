@@ -185,13 +185,100 @@ def test_header_labels_match_spec() -> None:
         assert model.headerData(col, Qt.Orientation.Horizontal) == spec.header
 
 
+def test_origin_and_format_are_shown_by_default() -> None:
+    """Where a row came from and what it was read from are both visible.
+
+    They used to be neither: source_folder was correct in the TSV and absent
+    from the table, and one header read "sequence / source" while carrying only
+    the sequence name.
+    """
+    by_key = {c.key: c for c in COLUMNS}
+    for key in ("source_folder", "format"):
+        assert key in by_key, key
+        assert by_key[key].default_visible, key
+        assert by_key[key].df_column == key
+    assert by_key["sequence"].header == "sequence"
+
+
+# Metadata columns that only mean something for some datatypes. Editability is
+# the column's own flag AND whether the row's datatype has any use for it.
+_MODALITY_SCOPED = {"line_freq", "montage", "eeg_reference", "eeg_ground"}
+
+
 def test_flags_only_editable_columns_carry_edit_flag() -> None:
-    df = make_df([_ok_row()])
+    df = make_df([_ok_row()])  # an anat/T1w row
     model = InventoryTableModel(df)
     for col, spec in enumerate(COLUMNS):
         idx = model.index(0, col)
         editable = bool(model.flags(idx) & Qt.ItemFlag.ItemIsEditable)
-        assert editable == spec.editable, f"column {spec.key!r} editable mismatch"
+        expected = spec.editable and spec.key not in _MODALITY_SCOPED
+        assert editable == expected, f"column {spec.key!r} editable mismatch"
+
+
+def test_modality_scoped_columns_are_editable_where_they_apply() -> None:
+    """The other half: an anatomical scan has no power line frequency, but an
+    EEG recording does, and the same column must accept the edit there."""
+    df = make_df([_ok_row(
+        modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+        bids_guess_datatype="eeg", bids_guess_suffix="eeg",
+        proposed_basename="sub-001_ses-pre_task-rest_eeg",
+    )])
+    model = InventoryTableModel(df)
+    for key in ("line_freq", "montage", "eeg_reference", "eeg_ground"):
+        col = next(i for i, c in enumerate(COLUMNS) if c.key == key)
+        idx = model.index(0, col)
+        assert bool(model.flags(idx) & Qt.ItemFlag.ItemIsEditable), key
+
+
+def test_bulk_edit_does_not_reach_scanner_derivatives() -> None:
+    """REGRESSION: a bulk edit put a line frequency on Siemens localisers.
+
+    A scout, a PhoenixZIPReport and a TENSOR map are excluded from conversion
+    and carry NO ``proposed_datatype``, only the classifier's guess. Reading
+    the proposed value alone made them look like blank slates, and blank was
+    being treated as "every column applies".
+    """
+    df = make_df([
+        _ok_row(BIDS_name="sub-001", proposed_datatype="eeg", line_freq="",
+                bids_guess_datatype="eeg", bids_guess_suffix="eeg",
+                proposed_basename="sub-001_task-rest_eeg"),
+        # A localiser: no proposed datatype, guess says anat, not converted.
+        _ok_row(BIDS_name="sub-001", sequence="AAHead_Scout_64ch", line_freq="",
+                proposed_datatype="", bids_guess_datatype="anat",
+                bids_guess_suffix="localizer", include=0),
+        # A scanner derivative routed away from the BIDS tree entirely.
+        _ok_row(BIDS_name="sub-001", sequence="dwi_TENSOR", line_freq="",
+                proposed_datatype="", bids_guess_datatype="derivatives",
+                bids_guess_suffix="TENSOR", include=0),
+    ])
+    model = InventoryTableModel(df)
+
+    changed = model.bulk_set([0, 1, 2], "line_freq", "60")
+    out = model.dataframe()
+    assert changed == 1, "only the EEG row should take a line frequency"
+    assert out.at[0, "line_freq"] == "60"
+    assert out.at[1, "line_freq"] == ""
+    assert out.at[2, "line_freq"] == ""
+
+
+def test_an_inapplicable_cell_renders_blank_not_inherited() -> None:
+    """With a dataset default set, an MRI row used to display that default in
+    all four electrophysiology columns. A blank says "not applicable"; the em
+    dash the inheritance display uses would say "inherited and empty", which
+    invites an edit that would never be written."""
+    from bidsmgr.recording_meta import RecordingMetaSpec
+
+    spec = RecordingMetaSpec()
+    spec.defaults.power_line_freq = 50
+    spec.defaults.montage = "standard_1020"
+
+    model = InventoryTableModel(make_df([_ok_row()]))
+    model.set_global_spec(spec)
+    for key in ("line_freq", "montage"):
+        col = next(i for i, c in enumerate(COLUMNS) if c.key == key)
+        idx = model.index(0, col)
+        assert model.data(idx, Qt.ItemDataRole.DisplayRole) == "", key
+        assert model.setData(idx, "60", Qt.ItemDataRole.EditRole) is False, key
 
 
 # ---------------------------------------------------------------------------
@@ -781,3 +868,262 @@ def test_acq_override_meg_string_field() -> None:
     # Clear -> override dropped (back to unset).
     assert m.set_acq_override(0, "dewar_position", "") is True
     assert "a.edf" not in m.global_spec().overrides
+
+
+def test_four_states_render_distinctly() -> None:
+    """A metadata cell can be in four states and they must not look alike.
+
+    An inherited value shows the value. VARIES asks for an answer this row has
+    not given. An empty inherited default shows the em dash. A field the
+    datatype does not have shows nothing at all and refuses edits. Before this,
+    the middle two were both blank and the last one showed a value that was
+    simply wrong for the row.
+    """
+    from bidsmgr.recording_meta import VARIES, RecordingMetaSpec
+
+    spec = RecordingMetaSpec()
+    spec.defaults.power_line_freq = 50      # the same for every recording
+    spec.defaults.eeg_reference = VARIES    # differs per recording
+
+    df = make_df([
+        _ok_row(modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+                bids_guess_datatype="eeg", bids_guess_suffix="eeg",
+                line_freq="", eeg_reference="",
+                proposed_basename="sub-001_task-rest_eeg"),
+        _ok_row(line_freq="", eeg_reference=""),  # an anat/T1w row
+    ])
+    model = InventoryTableModel(df)
+    model.set_global_spec(spec)
+
+    def shown(row, key):
+        col = next(i for i, c in enumerate(COLUMNS) if c.key == key)
+        return model.data(model.index(row, col), Qt.ItemDataRole.DisplayRole)
+
+    # EEG: an inherited value, and a field that wants a per-row answer.
+    assert shown(0, "line_freq") == "50"
+    assert shown(0, "eeg_reference") == "varies?"
+    assert model.needs_per_row_answer(0, "eeg_reference")
+    assert not model.is_inherited(0, "eeg_reference")
+
+    # MRI: neither field applies, so both are blank and neither prompts.
+    assert shown(1, "line_freq") == ""
+    assert shown(1, "eeg_reference") == ""
+    assert not model.needs_per_row_answer(1, "eeg_reference")
+
+
+def test_answering_a_varies_field_clears_the_prompt() -> None:
+    from bidsmgr.recording_meta import VARIES, RecordingMetaSpec
+
+    spec = RecordingMetaSpec()
+    spec.defaults.eeg_reference = VARIES
+    df = make_df([_ok_row(
+        modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+        bids_guess_datatype="eeg", bids_guess_suffix="eeg", eeg_reference="",
+        proposed_basename="sub-001_task-rest_eeg",
+    )])
+    model = InventoryTableModel(df)
+    model.set_global_spec(spec)
+    col = next(i for i, c in enumerate(COLUMNS) if c.key == "eeg_reference")
+
+    assert model.needs_per_row_answer(0, "eeg_reference")
+    assert model.setData(model.index(0, col), "Cz", Qt.ItemDataRole.EditRole)
+    assert not model.needs_per_row_answer(0, "eeg_reference")
+    assert model.data(model.index(0, col), Qt.ItemDataRole.DisplayRole) == "Cz"
+
+
+def test_backend_column_names_the_tool_that_will_run() -> None:
+    """REGRESSION: the column read "any row with a source file is mne-bids",
+    which is not what the converter's registry does. An ECAT PET scan has a
+    source file and is converted by EcatDirect through nibabel, so the table
+    named the wrong tool for every ECAT row."""
+    df = make_df([
+        _ok_row(proposed_datatype="pet", bids_guess_datatype="pet",
+                bids_guess_suffix="pet", format="ECAT", source_file="Hoffman.v"),
+        _ok_row(proposed_datatype="pet", bids_guess_datatype="pet",
+                bids_guess_suffix="pet", format="DICOM", source_file=""),
+        _ok_row(proposed_datatype="eeg", bids_guess_datatype="eeg",
+                bids_guess_suffix="eeg", format="EEGLAB", source_file="a.set"),
+        _ok_row(format="DICOM", source_file=""),                    # anat
+        _ok_row(bids_guess_suffix="physio", format="DICOM", source_file=""),
+    ])
+    model = InventoryTableModel(df)
+    assert [model._backend(r) for r in range(5)] == [
+        "ecat", "dcm2niix", "mne-bids", "dcm2niix", "bidsphysio",
+    ]
+
+
+def test_a_cell_says_which_layer_its_value_came_from() -> None:
+    """"Inherited" alone does not tell a user enough to act on: the value may
+    come from the dataset defaults, this modality's block, or a sequence
+    template, and which one decides where to go and change it.
+
+    This also covers a disconnect: a template value never used to reach the
+    table at all, so you could set one, see nothing, and find it in the
+    sidecars after converting."""
+    from bidsmgr.recording_meta import VARIES, AcquisitionSpec, RecordingMetaSpec
+
+    spec = RecordingMetaSpec()
+    spec.defaults.montage = "standard_1020"
+    spec.modality_defaults["eeg"] = AcquisitionSpec(power_line_freq=50)
+    spec.sequence_templates = {"eeg/eeg": {"EEGReference": "Cz"}}
+    spec.defaults.eeg_ground = VARIES
+
+    df = make_df([_ok_row(
+        modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+        bids_guess_datatype="eeg", bids_guess_suffix="eeg", task="rest",
+        line_freq="", eeg_reference="", montage="", eeg_ground="",
+        proposed_basename="sub-001_task-rest_eeg",
+    )])
+    model = InventoryTableModel(df)
+    model.set_global_spec(spec)
+
+    def cell(key):
+        col = next(i for i, c in enumerate(COLUMNS) if c.key == key)
+        idx = model.index(0, col)
+        return (
+            model.data(idx, Qt.ItemDataRole.DisplayRole),
+            model.data(idx, Qt.ItemDataRole.ToolTipRole) or "",
+        )
+
+    value, tip = cell("montage")
+    assert value == "standard_1020" and "dataset defaults" in tip
+
+    value, tip = cell("line_freq")
+    assert value == "50" and "eeg defaults" in tip
+
+    # The template reaches the table, and says so.
+    value, tip = cell("eeg_reference")
+    assert value == "Cz" and "eeg/eeg template" in tip
+
+    # VARIES asks rather than reports.
+    value, tip = cell("eeg_ground")
+    assert value == "varies?" and "differs per recording" in tip
+
+
+def test_the_properties_panel_resolves_per_modality() -> None:
+    """A study running both instruments sees each one's own answer, and is told
+    where it came from."""
+    from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
+
+    spec = RecordingMetaSpec()
+    spec.modality_defaults["eeg"] = AcquisitionSpec(manufacturer="Brain Products")
+    spec.modality_defaults["meg"] = AcquisitionSpec(manufacturer="Elekta")
+    spec.sequence_templates = {"eeg/eeg": {"ManufacturersModelName": "actiCHamp"}}
+
+    df = make_df([
+        _ok_row(proposed_datatype="eeg", bids_guess_datatype="eeg",
+                bids_guess_suffix="eeg", source_file="a.set"),
+        _ok_row(proposed_datatype="meg", bids_guess_datatype="meg",
+                bids_guess_suffix="meg", source_file="a.fif"),
+    ])
+    model = InventoryTableModel(df)
+    model.set_global_spec(spec)
+
+    assert model.acq_effective(0, "manufacturer") == "Brain Products"
+    assert model.acq_effective(1, "manufacturer") == "Elekta"
+    assert "eeg defaults" in model.acq_inherited_from(0, "manufacturer")
+    assert "meg defaults" in model.acq_inherited_from(1, "manufacturer")
+    # A template value reaches the panel too.
+    assert model.acq_effective(0, "amplifier_model") == "actiCHamp"
+    assert "template" in model.acq_inherited_from(0, "amplifier_model")
+
+
+# ---------------------------------------------------------------------------
+# Colliding BIDS names
+# ---------------------------------------------------------------------------
+
+
+def _colliding_rows() -> pd.DataFrame:
+    """Two EEG recordings that resolve to one name.
+
+    The real shape of it: a workshop tree exports a rest and a video recording
+    per subject, both named after the participant code, so the task label is
+    identical and only the folder distinguishes them.
+    """
+    return pd.DataFrame([
+        {
+            "BIDS_name": "sub-001", "include": 1, "modality": "eeg",
+            "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+            "proposed_basename": "sub-001_task-CLV002_eeg",
+            "Proposed BIDS name": "sub-001_task-CLV002_eeg",
+            "entities": json.dumps({"subject": "001", "task": "CLV002"}),
+            "proposed_issues": "", "dataset": "study",
+            "source_file": f"sub-001/{where}/CLV002.set",
+            "bids_guess_skip": False, "bids_guess_confidence": "0.9",
+            "task": "CLV002", "run": "", "session": "", "series_uid": "",
+        }
+        for where in ("rest", "video")
+    ])
+
+
+def test_a_colliding_row_reads_as_an_error(qtbot) -> None:
+    """Which is what paints the basename red.
+
+    ``CellTextDelegate`` with the ``basename`` role tints to the palette's
+    error colour whenever the row state is ``err``.
+    """
+    m = InventoryTableModel(_colliding_rows())
+    assert [m._row_states[i] for i in range(2)] == ["err", "err"]
+    assert m.colliding_rows() == {0, 1}
+
+
+def test_the_reason_is_on_the_row(qtbot) -> None:
+    """Hovering any cell of the row says why."""
+    m = InventoryTableModel(_colliding_rows())
+    tip = m.data(m.index(0, 0), Qt.ItemDataRole.ToolTipRole)
+    assert tip and "same BIDS name" in tip
+
+
+def test_fixing_the_name_clears_the_red_on_BOTH_rows(qtbot) -> None:
+    """The reported confusion: it stayed red after being fixed.
+
+    The state used to come from a note stamped into the row at scan time, which
+    nothing rewrote, and an edit refreshed only the row that was edited. So the
+    row you corrected stayed red, and so did its partner, which was now fine.
+    """
+    m = InventoryTableModel(_colliding_rows())
+    assert m.colliding_rows() == {0, 1}
+
+    m.set_entity(1, "task", "video")
+
+    assert m.colliding_rows() == set()
+    assert m._row_states[0] != "err"
+    assert m._row_states[1] != "err"
+    assert m.data(m.index(0, 0), Qt.ItemDataRole.ToolTipRole) is None
+
+
+def test_excluding_one_side_clears_it_too(qtbot) -> None:
+    """An excluded row is never written, so it cannot overwrite anything."""
+    m = InventoryTableModel(_colliding_rows())
+    checkbox = next(
+        i for i, spec in enumerate(m.COLUMNS) if spec.role == "checkbox"
+    )
+    m.setData(m.index(1, checkbox), False, Qt.ItemDataRole.EditRole)
+
+    assert m.colliding_rows() == set()
+    assert m._row_states[0] != "err"
+
+
+def test_a_new_clash_appears_without_a_rescan(qtbot) -> None:
+    """Derived live, so it works in both directions."""
+    df = _colliding_rows()
+    df.at[1, "proposed_basename"] = "sub-001_task-video_eeg"
+    df.at[1, "entities"] = json.dumps({"subject": "001", "task": "video"})
+    m = InventoryTableModel(df)
+    assert m.colliding_rows() == set()
+
+    m.set_entity(1, "task", "CLV002")
+
+    assert m.colliding_rows() == {0, 1}
+    assert m._row_states[0] == "err"
+
+
+def test_unique_names_are_not_flagged(qtbot) -> None:
+    df = _colliding_rows()
+    # The entities are the source of truth; the model rebuilds the basename
+    # from them, so changing the display cell alone would be undone.
+    df.at[1, "entities"] = json.dumps({"subject": "001", "task": "video"})
+    df.at[1, "proposed_basename"] = "sub-001_task-video_eeg"
+    m = InventoryTableModel(df)
+    assert m.colliding_rows() == set()
+    assert m._row_states[0] != "err"

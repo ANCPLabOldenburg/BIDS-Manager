@@ -178,6 +178,158 @@ class TestSidecarBehaviour:
         # At least one schema field is missing (a recommended row, not present).
         assert any(not sf.present for sf in bold_json.sidecar_fields)
 
+    def test_requirement_levels_cover_the_whole_dataset(self, tmp_path: Path) -> None:
+        """Every kind of JSON gets its levels from the schema, not just the one
+        in a datatype folder.
+
+        Three cases, each of which used to come back with no schema rows at all:
+        an INHERITED sidecar at the dataset root, one at the subject level, and
+        ``dataset_description.json``. The inherited ones sit ABOVE the datatype
+        directories, so nothing in their path says ``func``; the suffix settles
+        it, since only ``func`` carries ``bold``.
+        """
+        root = tmp_path / "study"
+        root.mkdir()
+        _make_dd(root)
+        _write_pair(root / "sub-001" / "func", "sub-001_task-rest_bold",
+                    sidecar={"TaskName": "rest", "RepetitionTime": 2.0})
+        (root / "sub-001" / "func" / "sub-001_task-rest_events.tsv").write_text(
+            "onset\tduration\n0\t1\n"
+        )
+        (root / "task-rest_bold.json").write_text(json.dumps({"RepetitionTime": 2.0}))
+        (root / "sub-001" / "sub-001_task-rest_bold.json").write_text(
+            json.dumps({"TaskName": "rest"})
+        )
+
+        report = validate(root)
+        by_name = {str(f.path): f for f in report.files}
+
+        for rel in ("task-rest_bold.json", "sub-001/sub-001_task-rest_bold.json"):
+            fields = by_name[rel].sidecar_fields
+            assert fields, f"{rel} got no schema rows"
+            levels = {sf.name: sf.level for sf in fields}
+            assert levels["RepetitionTime"] is FieldLevel.REQUIRED, rel
+            assert FieldLevel.RECOMMENDED in levels.values(), rel
+
+        dd_levels = {
+            sf.name: sf.level
+            for sf in by_name["dataset_description.json"].sidecar_fields
+        }
+        # A rule with a second selector: Genetics is required only of a dataset
+        # that ships genetic_info.json. This one does not, and the form reads
+        # the actual tree, so the field is not offered at all. That is the same
+        # answer the validator gives, which is the point.
+        assert "Genetics" not in dd_levels
+        assert dd_levels["Name"] is FieldLevel.REQUIRED
+        assert dd_levels["License"] is FieldLevel.RECOMMENDED
+        # The badge that was wrong: guessing a level from a finding's severity
+        # made these required. They are optional.
+        for field in ("Funding", "EthicsApprovals", "ReferencesAndLinks"):
+            assert dd_levels[field] is FieldLevel.OPTIONAL, field
+        # Authors is recommended only while the dataset has no CITATION.cff,
+        # which this one does not. Pinned again against the validator below.
+        assert dd_levels["Authors"] is FieldLevel.RECOMMENDED
+
+
+    def test_a_conditional_dataset_rule_fires_only_when_its_file_exists(
+        self, tmp_path: Path,
+    ) -> None:
+        """``Genetics`` is required by a rule with TWO selectors: the file must
+        be dataset_description.json AND the dataset must ship genetic_info.json.
+
+        Both halves matter. Ignoring the second would demand Genetics of every
+        dataset in existence; ignoring the rule would let a genetics dataset
+        omit it.
+        """
+        def build(root: Path, *, with_genetics: bool) -> None:
+            root.mkdir()
+            _make_dd(root)
+            _write_pair(root / "sub-001" / "anat", "sub-001_T1w")
+            if with_genetics:
+                (root / "genetic_info.json").write_text(
+                    json.dumps({"GeneticLevel": "Genotype"})
+                )
+
+        def genetics_findings(root: Path) -> list[str]:
+            report = validate(root)
+            return [
+                i.rule_id
+                for f in report.files for i in f.issues if i.field == "Genetics"
+            ] + [
+                i.rule_id
+                for i in report.dataset_issues if i.field == "Genetics"
+            ]
+
+        plain = tmp_path / "plain"
+        build(plain, with_genetics=False)
+        assert genetics_findings(plain) == []
+
+        genetic = tmp_path / "genetic"
+        build(genetic, with_genetics=True)
+        assert genetics_findings(genetic), "Genetics must be required once genetic_info.json exists"
+
+        # And the FORM must agree with the validator, in both directions. A
+        # form that says optional while the validator raises an error sends the
+        # user looking for a field the tool has already decided is mandatory.
+        def dd_level(root: Path):
+            report = validate(root)
+            dd = next(f for f in report.files if f.path.name == "dataset_description.json")
+            return {sf.name: sf.level for sf in dd.sidecar_fields}.get("Genetics")
+
+        assert dd_level(plain) is None, "not offered when no genetic_info.json"
+        assert dd_level(genetic) is FieldLevel.REQUIRED, "required once it exists"
+
+
+    @pytest.mark.parametrize("present", [False, True])
+    def test_form_and_validator_agree_on_conditional_dataset_fields(
+        self, tmp_path: Path, present: bool,
+    ) -> None:
+        """The form and the validator must not disagree about one dataset.
+
+        Both of these fields hinge on whether some OTHER file exists, which
+        only a real tree can answer:
+
+        * ``Genetics`` is required once ``genetic_info.json`` is present.
+        * ``Authors`` is recommended only while ``CITATION.cff`` is ABSENT.
+
+        A form that shrugs while the validator raises an error sends the user
+        hunting for a field the tool has already decided about, and a form that
+        demands one the validator does not want sends them adding data BIDS
+        never asked for.
+        """
+        root = tmp_path / ("with" if present else "without")
+        root.mkdir()
+        _make_dd(root)
+        _write_pair(root / "sub-001" / "anat", "sub-001_T1w")
+        if present:
+            (root / "genetic_info.json").write_text(
+                json.dumps({"GeneticLevel": "Genotype"})
+            )
+            (root / "CITATION.cff").write_text(
+                "cff-version: 1.2.0\nmessage: cite\ntitle: t\nauthors:\n  - name: A\n"
+            )
+
+        report = validate(root)
+        dd = next(f for f in report.files if f.path.name == "dataset_description.json")
+        levels = {sf.name: sf.level for sf in dd.sidecar_fields}
+        flagged = {
+            i.field
+            for f in report.files for i in f.issues if i.field
+        } | {i.field for i in report.dataset_issues if i.field}
+
+        if present:
+            # genetic_info.json is there, so Genetics is a real requirement and
+            # the validator says so. CITATION.cff is there, so Authors is not.
+            assert levels["Genetics"] is FieldLevel.REQUIRED
+            assert "Genetics" in flagged
+            assert levels["Authors"] is FieldLevel.OPTIONAL
+            assert "Authors" not in flagged
+        else:
+            assert "Genetics" not in levels
+            assert "Genetics" not in flagged
+            assert levels["Authors"] is FieldLevel.RECOMMENDED
+            assert "Authors" in flagged
+
 
 class TestTodoPlaceholders:
     def test_todo_in_sidecar_is_warning_on_the_json(self, tmp_path: Path) -> None:

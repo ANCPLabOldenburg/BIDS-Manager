@@ -37,6 +37,7 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QSizePolicy,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -140,7 +141,10 @@ class ValidationPane(QWidget):
         self.setObjectName("pane")
         # Keep a small floor so the user can squeeze it down when they want
         # more room for the viewer / tree (the splitter respects this).
-        self.setMinimumWidth(72)
+        # The pane itself asks for very little; what used to stop it
+        # narrowing was the text inside it reporting its full width as a
+        # minimum. Those labels elide now.
+        self.setMinimumWidth(48)
 
         self._report: Optional[ValidationReport] = None
         self._current_file: Optional[Path] = None
@@ -169,6 +173,10 @@ class ValidationPane(QWidget):
         # can be squeezed narrow without a scrollbar popping in.
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self._body)
+        # A scroll area otherwise reports its contents' minimum as its own, so
+        # the pane could not be squeezed past whatever the widest card wanted.
+        scroll.setMinimumWidth(0)
+        scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         v.addWidget(scroll, 1)
 
         # Initial empty render.
@@ -389,6 +397,7 @@ class ValidationPane(QWidget):
                     body_html=issue.message,
                     fix_label=issue.fix_label,
                     field=issue.field,
+                    schema_rule=issue.schema_rule,
                 )
                 # Re-emit fix clicks with the file context so the host
                 # panel can jump to the right place.

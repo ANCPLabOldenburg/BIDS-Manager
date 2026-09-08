@@ -46,9 +46,14 @@ class MetadataWorker(QThread):
         inventory_tsv: Optional[Path] = None,
         name: Optional[str] = None,
         fill_todos: bool = False,
+        datasets=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
+        # The dataset names this run may touch. Without it the walk finds
+        # every BIDS root under the target, and projects are kept side by
+        # side, so one project's metadata reached all of them.
+        self._datasets = list(datasets) if datasets is not None else None
         self._target = Path(target)
         self._inventory_tsv = Path(inventory_tsv) if inventory_tsv else None
         self._name = name
@@ -71,6 +76,7 @@ class MetadataWorker(QThread):
                 inventory_tsv=self._inventory_tsv,
                 name=self._name,
                 fill_todos=self._fill_todos,
+                datasets=self._datasets,
             )
             verdict = "completed" if rc == 0 else f"completed with rc={rc}"
             self.progress.emit(f"Metadata {verdict}")
