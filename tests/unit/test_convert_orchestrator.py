@@ -138,12 +138,63 @@ class TestHappyPath:
         # dataset_description.json was written.
         assert (bids_parent / "study_a" / "dataset_description.json").exists()
         # Provenance written.
-        prov = bids_parent / "study_a" / "sub-001" / ".bidsmgr" / "provenance.json"
+        prov = (
+            bids_parent / "study_a" / ".bidsmgr" / "provenance" / "sub-001.json"
+        )
         assert prov.exists()
         prov_data = json.loads(prov.read_text())
         assert prov_data["tasks"][0]["success"] is True
         # Staging cleaned up.
         assert not (bids_parent / "study_a" / ".tmp_bidsmgr").exists()
+
+    def test_no_subject_folder_gets_a_hidden_tool_directory(
+        self, tmp_path: Path, patch_subprocess,
+    ) -> None:
+        """Tool state belongs at the dataset root, in one place.
+
+        Provenance used to be written to ``sub-XXX/.bidsmgr/``, and a hidden
+        directory inside every subject cost far more than it held: deleting a
+        subject left the folder standing because a delete excludes tool state,
+        and merging two subjects had to invent somewhere for the loser's copy
+        to live. The dataset already has exactly one place for this.
+        """
+        dicoms = _make_dicoms(tmp_path, "T1", n=2)
+        tsv = _write_inventory(
+            tmp_path,
+            [_row(series_uid="UID1", basename="sub-001_T1w")],
+            {"UID1": [str(p) for p in dicoms]},
+        )
+        bids_parent = tmp_path / "out"
+        run_convert(tsv, bids_parent, n_jobs=1)
+
+        root = bids_parent / "study_a"
+        assert (root / ".bidsmgr" / "provenance" / "sub-001.json").is_file()
+        strays = [
+            p for p in root.rglob(".bidsmgr")
+            if p.is_dir() and p.parent != root
+        ]
+        assert not strays, f"hidden tool directories inside subjects: {strays}"
+
+    def test_the_provenance_names_the_subject_folder_it_describes(
+        self, tmp_path: Path, patch_subprocess,
+    ) -> None:
+        """One file per subject at the root has to say which subject."""
+        dicoms = _make_dicoms(tmp_path, "T1", n=2)
+        tsv = _write_inventory(
+            tmp_path,
+            [_row(series_uid="UID1", basename="sub-001_T1w")],
+            {"UID1": [str(p) for p in dicoms]},
+        )
+        bids_parent = tmp_path / "out"
+        run_convert(tsv, bids_parent, n_jobs=1)
+
+        prov = json.loads(
+            (
+                bids_parent / "study_a" / ".bidsmgr" / "provenance"
+                / "sub-001.json"
+            ).read_text()
+        )
+        assert prov["subject_dir"] == "sub-001"
 
     def test_dataset_description_generatedby_is_idempotent_on_rerun(
         self, tmp_path: Path, patch_subprocess,
@@ -200,7 +251,10 @@ class TestHappyPath:
         bids_parent = tmp_path / "out"
         run_convert(tsv, bids_parent, n_jobs=1)
         prov = json.loads(
-            (bids_parent / "study_a" / "sub-001" / ".bidsmgr" / "provenance.json").read_text()
+            (
+                bids_parent / "study_a" / ".bidsmgr" / "provenance"
+                / "sub-001.json"
+            ).read_text()
         )
         assert "dcm2niix" in prov["dcm2niix_version"].lower()
         assert prov["bidsmgr_version"]
@@ -418,7 +472,10 @@ class TestFailureHandling:
         assert not (bids_parent / "study_a" / "sub-001" / "func").exists()
         # Provenance records both attempts.
         prov = json.loads(
-            (bids_parent / "study_a" / "sub-001" / ".bidsmgr" / "provenance.json").read_text()
+            (
+                bids_parent / "study_a" / ".bidsmgr" / "provenance"
+                / "sub-001.json"
+            ).read_text()
         )
         successes = [t for t in prov["tasks"] if t["success"]]
         failures = [t for t in prov["tasks"] if not t["success"]]

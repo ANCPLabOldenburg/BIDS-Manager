@@ -1,10 +1,17 @@
 """Update ``*_scans.tsv`` filename columns after fmap renames.
 
-Today this is a no-op: bidsmgr does not yet generate ``*_scans.tsv``
-files (that lands with the ``metadata/`` port from v0.2.5
-``bids_metadata_engine``). The fixup is wired into the converter now
-so the call site doesn't need to change later — when scans.tsv
-generation arrives, this module will already be in the post-conv chain.
+NOT a no-op, whatever an older version of this docstring said. Two things
+write a scans table into the staging tree before this runs:
+
+* **mne-bids**, for every EEG / MEG / iEEG recording it converts. It reads
+  ``meas_date`` off the recording and writes a real ``acq_time``, which is
+  the only place that value exists in the dataset.
+* the metadata engine, afterwards, for everything (see
+  ``metadata/engine._refresh_scans_tsv``).
+
+So a fieldmap rename in phase 2 can land on a table that already has rows,
+and the ``filename`` column has to follow the file. The rows themselves are
+not touched: only the basename portion is substituted.
 
 Reference: v0.2.5 ``post_conv_renamer.update_scans_tsv``
 (BIDS-Manager/bids_manager/post_conv_renamer.py L419-466).
@@ -39,8 +46,9 @@ def update_scans_tsv(
     Returns
     -------
     int
-        Number of ``*_scans.tsv`` files actually rewritten. ``0`` is
-        normal today (bidsmgr does not yet emit them).
+        Number of ``*_scans.tsv`` files actually rewritten. ``0`` is normal
+        for an MRI-only subject with no fieldmap rename, and for any subject
+        whose staged table names no renamed file.
     """
     if not subject_staging_dir.is_dir() or not rename_map:
         return 0

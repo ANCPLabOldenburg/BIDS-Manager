@@ -255,6 +255,60 @@ class ElidedLabel(QLabel):
         )
 
 
+class ElidedPushButton(QPushButton):
+    """A button whose label shortens instead of widening its window.
+
+    A ``QPushButton`` asks for the width of its whole label and, given less,
+    clips it mid-glyph with no ellipsis: the user sees a word cut in half and
+    cannot tell there is more. That is what a long BIDS basename or a full
+    file path did to both issue dialogs.
+
+    This one reports a zero minimum width and elides at paint time, leaving
+    :meth:`text` holding the full string. Callers (and tests) that read
+    ``text()`` still get what was set; only the pixels shorten.
+    """
+
+    def __init__(
+        self,
+        text: str = "",
+        parent=None,
+        *,
+        mode: Qt.TextElideMode = Qt.TextElideMode.ElideMiddle,
+    ) -> None:
+        super().__init__(text, parent)
+        self._mode = mode
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
+        self.setToolTip(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        super().setText(text)
+        self.setToolTip(text)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, _evt) -> None:  # noqa: N802 - Qt override
+        from PyQt6.QtWidgets import QStyleOptionButton, QStylePainter
+
+        painter = QStylePainter(self)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        # Elide against the room the style leaves for the label, not the
+        # whole widget: a framed button spends some of its width on the
+        # border and padding.
+        room = self.style().subElementRect(
+            self.style().SubElement.SE_PushButtonContents, option, self,
+        ).width()
+        option.text = option.fontMetrics.elidedText(
+            self.text(), self._mode, max(room, 0),
+        )
+        painter.drawControl(
+            self.style().ControlElement.CE_PushButton, option,
+        )
+
+
 class PathBar(QFrame):
     """One-row "label · value · trailing chips · change… button" strip.
 
@@ -319,4 +373,11 @@ class PathBar(QFrame):
         return raw[3:] if raw[:1] in ("✔", "○") else raw
 
 
-__all__ = ["Chip", "ElidedLabel", "PaneHeader", "PathBar", "VSep"]
+__all__ = [
+    "Chip",
+    "ElidedLabel",
+    "ElidedPushButton",
+    "PaneHeader",
+    "PathBar",
+    "VSep",
+]

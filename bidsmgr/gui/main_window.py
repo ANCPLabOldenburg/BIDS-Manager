@@ -15,7 +15,7 @@ from typing import Optional
 from pathlib import Path
 
 from PyQt6.QtCore import QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QPixmap
+from PyQt6.QtGui import QImage, QPixmap
 
 
 def _trim_transparent_bbox(img: QImage) -> QImage:
@@ -382,6 +382,16 @@ class _TopHeader(QFrame):
         icons.apply_button(self._theme_btn, "sun" if new == "dark" else "moon")
         AppSettings.remember_theme(new)
 
+    @staticmethod
+    def _largest_app_icon(assets: Path) -> Path:
+        """The biggest ``AppIcon<N>.png`` that exists, 128 as a floor."""
+        macos = assets / "macos"
+        for size in (1024, 512, 256, 128):
+            candidate = macos / f"AppIcon{size}.png"
+            if candidate.exists():
+                return candidate
+        return macos / "AppIcon128.png"
+
     def _apply_logo_pixmap(self, pal: dict) -> None:
         """Load the brand artwork chosen by ``AppSettings.header_logo``.
 
@@ -403,7 +413,14 @@ class _TopHeader(QFrame):
         choice = AppSettings.load().header_logo
         assets = Path(__file__).parent / "assets"
         if choice == "app_icon":
-            png = assets / "macos" / "AppIcon128.png"
+            # The LARGEST icon that ships, not the one nearest the target.
+            # The header draws it at 44 logical px, which is 88 device px on a
+            # retina screen and more again with the font scale up; a 128 px
+            # source is then barely above 1:1 and looks soft, and
+            # ``_trim_transparent_bbox`` crops the inset away before it is
+            # scaled, costing more. Downscaling from 1024 is free at load time
+            # and always at least as sharp.
+            png = self._largest_app_icon(assets)
             invert_on_dark = False
         else:
             png = assets / "logo.png"
@@ -640,12 +657,19 @@ class MainWindow(QMainWindow):
         """
         from PyQt6.QtWidgets import QMessageBox
 
+        from .fs_watch import watchers_released
+
         root = Path(root)
         target = root.parent / new_name
         if target == root:
             return
         try:
-            root.rename(target)
+            # The open handles this docstring mentions include the ones
+            # QFileSystemWatcher keeps on every directory the panes are
+            # watching under ``root``. On Windows those alone are enough to
+            # make the move fail outright. See bidsmgr.gui.fs_watch.
+            with watchers_released():
+                root.rename(target)
         except OSError as exc:
             QMessageBox.warning(
                 self, "Could not rename the project",

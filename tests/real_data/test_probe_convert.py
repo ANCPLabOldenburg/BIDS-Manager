@@ -11,7 +11,7 @@ The probe pass:
   parallel (``-j`` / ``n_jobs``).
 
 Output landing directory for the user-visible TSVs:
-``/Users/karelo/Development/datasets/BIDS_Manager/bids_manager_outputs/testing/``.
+``$BIDSMGR_TEST_OUTPUT/testing/``.
 """
 
 from __future__ import annotations
@@ -25,12 +25,11 @@ import pytest
 from bidsmgr.cli.scan import PROBE_COLUMNS, run_scan
 from bidsmgr.inventory import probe_convert as probe_convert_module
 from bidsmgr.inventory.mri_dicom import scan_dicoms_long
+from tests.fixtures.data_root import dataset
 
-REAL_MRI_ROOT = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/MRI"
-)
+REAL_MRI_ROOT = dataset("MRI")
 TESTING_OUT_ROOT = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/bids_manager_outputs/testing"
+    "$BIDSMGR_TEST_OUTPUT/testing"
 )
 
 

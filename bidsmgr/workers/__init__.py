@@ -17,6 +17,7 @@ Future workers (one per CLI verb): ``ConvertWorker``,
 """
 
 from .convert import ConvertWorker
+from .deface import DefaceRevertWorker, DefaceWorker
 from .file_report import FileReportWorker, FolderReportWorker
 from .metadata import MetadataWorker
 from .nifti_loader import NiftiLoaderWorker
@@ -33,6 +34,8 @@ from .validate import ValidateWorker
 
 __all__ = [
     "ConvertWorker",
+    "DefaceRevertWorker",
+    "DefaceWorker",
     "FileReportWorker",
     "FolderReportWorker",
     "MetadataWorker",

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "1.2.6"
+version = "1.4.0"
 description = "Schema-driven BIDS converter, curator, and editor (re-imagination of BIDS-Manager v0.2.5)"
 readme = "README.md"
 license = "MIT"
@@ -49,17 +49,14 @@ dependencies = [
     "bidsschematools>=1.0,<=1.2.2",
     "ancpbids>=0.3,<=0.3.1",
 
-    # BIDS validation engine, and the interpreter of the BIDS schema. The Editor
-    # validator + ``bidsmgr-validate`` delegate to bidsval (schema-driven,
-    # pydantic-typed, false-positive-verified against the reference validator),
-    # and since 0.1.0 ``bidsmgr/schema/`` reads which sidecar fields the standard
-    # declares from ``bidsval.schema`` rather than deriving them again here (see
-    # CLAUDE.md guard 8). It pulls only deps BIDS Manager already ships
-    # (bidsschematools, pydantic, nibabel, pandas, mne), so the footprint barely
-    # changes. 0.1.0 is the first release carrying that namespace; 0.1.1 adds
-    # the INVALID_LOCATION check for a well-named file in a folder that is not
-    # a datatype, which the Editor needs to stop painting such files green.
-    "bidsval>=0.1.1,<0.2.0",
+    # bidsval, the BIDS validation engine and the interpreter of the schema,
+    # is VENDORED at ``bidsmgr/vendor/bidsval`` rather than depended on. It is
+    # the single implementation of every schema fact BIDS Manager acts on
+    # (guard 8: which fields apply, at what level, of what type) as well as of
+    # validation itself. Depending on it through PyPI meant a schema fix could
+    # not be tested from here without publishing a release first. It pulls only
+    # deps BIDS Manager already ships, so vendoring costs nothing new. See
+    # ``bidsmgr/vendor/README.md``.
 
     # GUI.
     "pyqt6>=6.5,<=6.11.0",
@@ -81,6 +78,11 @@ dependencies = [
     # the one both of us use. BIDS Manager sets DCM2NIIX_PATH explicitly so
     # there is never a question about which.
     "pypet2bids>=1.5.1,<2",
+
+    # CITATION.cff. Reached through bidsval today, but BIDS Manager now reads
+    # and writes the file itself (the Editor renders it as a form), so the
+    # dependency is declared rather than inherited.
+    "pyyaml>=5.4,<=6.0.3",
 
     # EEG / MEG / iEEG conversion stack.
     "mne>=1.6,<=1.12.1",
@@ -110,6 +112,24 @@ dependencies = [
     # toolbar / tab / chip glyphs render identically on macOS, Linux,
     # and Windows instead of falling back to per-OS emoji fonts.
     "qtawesome>=1.3,<=1.4.2",
+
+    # Defacing and skull stripping. NOT optional: these are reached from the
+    # GUI, and somebody who installed BIDS Manager by double-clicking an
+    # installer has no terminal in which to add an extra, so an optional
+    # extra is a feature they cannot switch on.
+    #
+    # Neither adds a system dependency. niimath ships its binary inside the
+    # wheel the way dcm2niix does (no FSL, no FreeSurfer, no ANTs), and
+    # brainchop runs the mindgrab network on tinygrad, which is pure Python
+    # (no torch, no onnxruntime).
+    #
+    # The marker is load-bearing. niimath tags its wheels per Python version
+    # rather than abi3, and there is no 3.14 wheel yet, so an unconditional
+    # pin would make BIDS Manager itself UNINSTALLABLE on a Python we claim
+    # to support. On 3.14 the app installs, the menu entry greys out, and the
+    # tooltip says why. Drop the marker once the wheel exists.
+    "niimath>=1.0.20250526; python_version < '3.14'",
+    "brainchop>=0.2.5",
 ]
 
 [project.optional-dependencies]
@@ -134,12 +154,14 @@ Tracker       = "https://github.com/ANCPLabOldenburg/BIDS-Manager/issues"
 [project.scripts]
 bidsmgr           = "bidsmgr.main:main"
 bidsmgr-create    = "bidsmgr.cli.create:main"
+bidsmgr-adopt     = "bidsmgr.cli.adopt:main"
 bidsmgr-project   = "bidsmgr.cli.project:main"
 bidsmgr-scan      = "bidsmgr.cli.scan:main"
 bidsmgr-convert   = "bidsmgr.cli.convert:main"
 bidsmgr-rebuild   = "bidsmgr.cli.rebuild:main"
 bidsmgr-metadata  = "bidsmgr.cli.metadata:main"
 bidsmgr-validate  = "bidsmgr.cli.validate:main"
+bidsmgr-deface    = "bidsmgr.cli.deface:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -157,14 +179,58 @@ include = ["bidsmgr*"]
     "assets/macos/*.icns",
     "assets/windows/*.ico",
 ]
-"bidsmgr.schema"            = ["bundled/**/*"]
+# NOTE: no "bidsmgr.schema" entry. That package is a pure adapter over
+# bidsval and ships no data; it used to carry a "bundled/**/*" glob pointing
+# at a directory that does not exist, which quietly matched nothing.
+# The defacing atlas: a matched template and mask that must travel together.
+# See bidsmgr/deface/atlas/PROVENANCE.md.
+"bidsmgr.deface"            = ["atlas/*.nii.gz", "atlas/PROVENANCE.md"]
 "bidsmgr.vendor"            = ["README.md"]
 "bidsmgr.vendor.bidsphysio" = ["LICENSE"]
+"bidsmgr.vendor.bidsval"    = ["LICENSE"]
+# The schema files bidsval resolves against. Vendoring the code without this
+# ships a validator that cannot find a schema: it fell back to a separately
+# installed bidsval on a developer machine and crashed on import everywhere
+# else. 2.9 MB, six BIDS versions.
+"bidsmgr.vendor.bidsval.schema" = ["bundled/*.json"]
+
+[tool.ruff]
+# Vendored code is a verbatim copy of somebody else's package and is not ours
+# to restyle: see bidsmgr/vendor/README.md, where the refresh policy is
+# "wholesale rather than patched". Linting it reports 21 findings we would
+# have to re-introduce on every refresh, including the five that look like
+# real defects (an undefined name, two `is` comparisons against literals, two
+# `== True`). Those are worth reporting UPSTREAM, not silencing locally, and
+# they are tracked there rather than here.
+extend-exclude = ["bidsmgr/vendor"]
+
+[tool.ruff.lint]
+# Ruff's default set is E4, E7, E9, F. Kept, minus three rules this codebase
+# deliberately works against. Three named rules rather than dropping whole
+# families, so E711/E712 (comparing to None or True), E722 (bare except) and
+# E741 keep working: those catch real mistakes, and the three below are
+# formatting opinions.
+ignore = [
+    # One-line signal handlers. gui/widgets/nifti_gl_view.py has ~30 of the
+    # form `def _on_gmix(self, v): self.gl.gradient_mix = v / 100; self.gl.update()`.
+    # As a block they read as a table of slider-to-uniform bindings, and one
+    # per three lines would be 90 lines of noise. A deliberate choice.
+    "E702",   # multiple statements on one line (semicolon)
+    # Deferred imports. The architecture keeps Qt out of the engine modules
+    # (CLAUDE.md guard 2), which means importing inside a function on purpose,
+    # and the worker threads import their heavy readers in run() so the GUI
+    # starts fast. Both show up as "import not at top of file".
+    "E402",   # module level import not at top of file
+    # Assigning a lambda. Used for small local callbacks where a def would be
+    # more ceremony than the callback.
+    "E731",   # do not assign a lambda expression, use a def
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
-    "real_data: requires real datasets at /Users/karelo/Development/datasets/BIDS_Manager/raw_data, gated on env vars BIDS_MANAGER_REAL_{MRI,MEG,EEG}_DATA",
+    "real_data: requires real datasets under $BIDSMGR_TEST_DATA (see tests/fixtures/data_root.py), gated on env vars BIDS_MANAGER_REAL_{MRI,MEG,EEG,PET}_DATA",
     "gui: pytest-qt smoke tests, headless OK with QT_QPA_PLATFORM=offscreen",
+    "integration: end-to-end CLI runs against the published sample datasets; fetches ~56 MB on first use and caches it outside the checkout",
 ]

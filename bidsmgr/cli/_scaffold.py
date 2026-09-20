@@ -15,16 +15,23 @@ working dir, resolving the historical overlap of the name):
     |-- .bidsmgr/                     # BM working dir (NOT valid BIDS; bids-ignored)
     |   |-- errors/                   #   convert per-subject failure logs
     |   |-- backup/                   #   --overwrite subject backups
+    |   |-- provenance/               #   <subject>.json, one per converted subject
     |   `-- project/                  #   (reserved) event-sourced project bundle:
     |       |-- events.jsonl          #     meta.json + events.jsonl + scans/<version>/
     |       `-- meta.json
-    |-- sub-XXX/.bidsmgr/provenance.json   # per-subject convert provenance
     `-- .tmp_bidsmgr/                 # per-run staging (wiped on success)
+
+Everything the tool writes about a dataset is under that ONE directory at the
+root. Convert used to put each subject's provenance in ``sub-XXX/.bidsmgr/``;
+a hidden directory inside every subject broke deleting a subject and
+complicated merging two, so it moved here. Datasets converted by an older
+version still have theirs in the subject folder, and the Editor's delete
+handles that.
 
 The event-sourced project bundle (``bidsmgr.project``) will live under
 ``<bids_root>/.bidsmgr/project/`` rather than as a sibling ``<name>.bidsmgr/``
-directory, so it cannot collide with convert's ``errors/`` + ``backup/`` + the
-per-subject ``provenance.json`` that already live in ``.bidsmgr/``.
+directory, so it cannot collide with convert's ``errors/`` + ``backup/`` +
+``provenance/`` that already live in ``.bidsmgr/``.
 """
 
 from __future__ import annotations
@@ -63,7 +70,7 @@ def project_bundle_dir(bids_root: Path) -> Path:
 
     ``<bids_root>/.bidsmgr/project`` (see the module docstring): nested under the
     hidden working dir so it cannot collide with convert's ``errors/`` /
-    ``backup/`` / per-subject ``provenance.json``.
+    ``backup/`` / ``provenance/``.
     """
     return Path(bids_root) / ".bidsmgr" / "project"
 

@@ -25,23 +25,44 @@ from bidsmgr.inventory.pet_ecat import (
     _units_from_ecat,
     ecat_sidecar_fields,
 )
+from tests.fixtures import sample_data
+from tests.fixtures.data_root import dataset
 
-ECAT_DIR = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/PET_DICOMS/"
-    "PN000001/OpenNeuroPET-Phantoms/sourcedata"
-)
+# ``dataset`` returns None on a machine with no BIDSMGR_TEST_DATA.
+# A placeholder keeps module-level path arithmetic below importable;
+# the skip gates are what actually stop these tests running.
+# The PUBLISHED sample carries one real ECAT, a Siemens HRRT, and any machine
+# with a network can fetch it. Most of what this module asserts is about
+# reading A real header rather than about a particular scanner, so those tests
+# now run everywhere instead of on the one laptop holding the phantom set.
+SAMPLE_ECAT = sample_data.pet_ecat_file()
+
+# The lab's multi-vendor phantom set, which is richer in the two ways that
+# still matter: three files from three sites, and one with a negative
+# SCAN_START_TIME. Neither has a published example.
+ECAT_DIR = dataset("PET_DICOMS", "PN000001", "OpenNeuroPET-Phantoms", "sourcedata") or Path("__no_local_dataset__")
 ECAT_FILES = {
     "jhu": ECAT_DIR / "SiemensHRRT-JHU" / "Hoffman.v",
     "nru": ECAT_DIR / "SiemensHRRT-NRU" / "XCal-Hrrt-2022.04.21.15.43.05_EM_3D.v",
     "fzj": (
         ECAT_DIR / "SiemensMagnetomTrioBrainPET-FZJ"
-        / "XB1BN998N-BI-01_XB298-1-Global_reco_W3_nas.v"
+        / "Tracer_PET_LM_Tracer_PET_LM_1.v"
     ),
 }
+
 real_ecat = pytest.mark.skipif(
+    SAMPLE_ECAT is None,
+    reason="the published PET sample could not be fetched (offline, empty cache)",
+)
+
+multi_vendor = pytest.mark.skipif(
     os.environ.get("BIDS_MANAGER_REAL_PET_DATA") != "1"
     or not all(f.is_file() for f in ECAT_FILES.values()),
-    reason="needs BIDS_MANAGER_REAL_PET_DATA=1 and the OpenNeuroPET phantom set",
+    reason=(
+        "needs the multi-vendor OpenNeuroPET phantom set: three files from "
+        "three sites, and one with a negative SCAN_START_TIME. No published "
+        "example exists of either."
+    ),
 )
 
 
@@ -146,7 +167,7 @@ def test_an_absent_dependency_enriches_with_nothing(
 @real_ecat
 def test_the_sidecar_grows_well_past_what_we_parsed() -> None:
     """Our own reader gets five fields. The header holds far more."""
-    fields = ecat_sidecar_fields(ECAT_FILES["jhu"])
+    fields = ecat_sidecar_fields(SAMPLE_ECAT)
     assert len(fields) > 12
 
     # The ones that were simply unavailable before.
@@ -161,7 +182,7 @@ def test_the_sidecar_grows_well_past_what_we_parsed() -> None:
 @real_ecat
 def test_the_radionuclide_is_spelled_the_way_bids_spells_it() -> None:
     """They report the header's "F-18"; BIDS has a vocabulary and it says F18."""
-    assert ecat_sidecar_fields(ECAT_FILES["jhu"])["TracerRadionuclide"] == "F18"
+    assert ecat_sidecar_fields(SAMPLE_ECAT)["TracerRadionuclide"] == "F18"
 
 
 @real_ecat
@@ -174,43 +195,56 @@ def test_nothing_outside_the_schema_reaches_the_sidecar() -> None:
     from bidsmgr import schema as schema_mod
 
     declared = {f.name for f in schema_mod.sidecar_fields("pet", "pet")}
-    for name in ecat_sidecar_fields(ECAT_FILES["jhu"]):
+    for name in ecat_sidecar_fields(SAMPLE_ECAT):
         assert name in declared, f"{name} is not a field BIDS declares for PET"
 
 
 @real_ecat
-def test_each_file_gets_its_own_sidecar() -> None:
+def test_reading_one_file_twice_does_not_accumulate() -> None:
     """The regression this module's isolation exists for, and it is severe.
 
     ``Ecat.__init__`` assigns the module-level template by REFERENCE, so every
     Ecat object in a process shares one dict and populate_sidecar appends into
     it. Converting a folder of ECAT files therefore gave the second file two
-    frames, the third three, and so on, while TimeZero stuck at the first
-    file's value. Frame timing is what PET quantification is built on.
+    frames, the third three, and so on. Frame timing is what PET
+    quantification is built on.
 
-    This was found because three phantom scans from three sites, acquired years
-    apart, all reported the same second.
+    One file read twice reproduces that exactly, which is why this half needs
+    no phantom set: if the template were shared, the second read would report
+    two frames for a one-frame scan.
+    """
+    first = ecat_sidecar_fields(SAMPLE_ECAT)
+    second = ecat_sidecar_fields(SAMPLE_ECAT)
+
+    assert len(first["FrameTimesStart"]) == 1
+    assert len(second["FrameTimesStart"]) == 1, (
+        "the second read grew, so the sidecar template is shared again"
+    )
+    assert first == second
+
+
+@multi_vendor
+def test_three_files_in_one_process_keep_their_own_times() -> None:
+    """The other half, which needs more than one scan to state.
+
+    This was found because three phantom scans from three sites, acquired
+    years apart, all reported the same second.
     """
     read_in_one_process = {
         name: ecat_sidecar_fields(path) for name, path in ECAT_FILES.items()
     }
-
-    # Each file has one frame, and still has one after the others were read.
     for name, fields in read_in_one_process.items():
         assert len(fields.get("FrameTimesStart", [])) == 1, name
         assert len(fields.get("FrameDuration", [])) == 1, name
 
-    # Two scans years apart do not share a start time.
     assert (
         read_in_one_process["jhu"]["TimeZero"]
         != read_in_one_process["nru"]["TimeZero"]
     )
-
-    # Reading one alone agrees with reading it among others.
     assert ecat_sidecar_fields(ECAT_FILES["jhu"]) == read_in_one_process["jhu"]
 
 
-@real_ecat
+@multi_vendor
 def test_a_scan_that_started_before_the_epoch_yields_no_time() -> None:
     """One phantom file carries a negative SCAN_START_TIME.
 

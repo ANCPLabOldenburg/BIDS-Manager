@@ -26,3 +26,6 @@ preferences.json
 
 # Real-data fixtures (paths kept out of repo)
 tests/real_data/data/
+
+# nox virtualenvs (the local test matrix)
+.nox/

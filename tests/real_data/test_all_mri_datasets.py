@@ -27,10 +27,9 @@ import pytest
 from bidsmgr import schema as bids_schema
 from bidsmgr.cli.scan import BIDS_GUESS_COLUMNS, run_scan
 from bidsmgr.inventory.mri_dicom import TSV_COLUMNS
+from tests.fixtures.data_root import dataset
 
-REAL_MRI_ROOT = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/MRI"
-)
+REAL_MRI_ROOT = dataset("MRI")
 
 
 pytestmark = [

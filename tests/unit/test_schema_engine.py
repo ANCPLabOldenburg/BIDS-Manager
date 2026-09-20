@@ -66,7 +66,15 @@ def test_build_relative_path_includes_session():
         "bold",
         ".nii.gz",
     )
-    assert str(p) == "sub-001/ses-pre/func/sub-001_ses-pre_task-rest_bold.nii.gz"
+    # as_posix(), not str(). ``build_relative_path`` returns a Path, and a
+    # Path's str() is NATIVE by design: on Windows it is
+    # "sub-001\\ses-pre\\func\\...". Asserting str() made this a test that
+    # only held on POSIX, which is a defect in the test rather than in the
+    # function. What the test is actually about is the structure, and
+    # as_posix() states it the same way on every platform.
+    assert p.as_posix() == (
+        "sub-001/ses-pre/func/sub-001_ses-pre_task-rest_bold.nii.gz"
+    )
 
 
 def test_validate_entity_set_required():

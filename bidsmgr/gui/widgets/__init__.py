@@ -18,7 +18,14 @@ from .image_label import ImageLabel
 from .json_tree_view import JsonTreeView
 from .nifti_viewer_pane import NiftiViewerPane
 from .panel_frame import PanelFrame
-from .primitives import Chip, ElidedLabel, PaneHeader, PathBar, VSep
+from .primitives import (
+    Chip,
+    ElidedLabel,
+    ElidedPushButton,
+    PaneHeader,
+    PathBar,
+    VSep,
+)
 from .recording_viewer_pane import RecordingViewerPane, is_recording_path
 from .sidecar_form_pane import SidecarFormPane, find_peer_files
 from .sidecar_row import SidecarRow
@@ -39,6 +46,7 @@ __all__ = [
     "BusySpinner",
     "Chip",
     "ElidedLabel",
+    "ElidedPushButton",
     "ImageLabel",
     "JsonTreeView",
     "KIND_BG_TOKEN",

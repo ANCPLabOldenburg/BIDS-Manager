@@ -17,6 +17,9 @@ to get two affordances:
   ``QSplitter``, so two panes (inspection + properties) detach as one unit.
 
 The frame hides the pane's own ``PaneHeader`` so there is a single header.
+A pane that has buttons belonging NEXT to its title can name a child widget
+:data:`HEADER_EXTRAS` and the frame lifts it into that one header; it is
+handed back when the pane detaches, so the buttons travel with the pane.
 State is not persisted across restarts.
 """
 
@@ -42,6 +45,11 @@ from .primitives import PaneHeader
 _QWIDGETSIZE_MAX = (1 << 24) - 1
 _STRIP_PX = 24  # collapsed vertical-strip thickness
 _BAR_PX = 26    # horizontal title-bar height
+
+# Object name a pane gives a child widget to have it rendered beside the
+# frame's title instead of inside the pane. One name rather than a per-pane
+# argument, so a pane stays buildable on its own and the frame stays generic.
+HEADER_EXTRAS = "pane-header-extras"
 
 
 class PanelFrame(QFrame):
@@ -74,10 +82,19 @@ class PanelFrame(QFrame):
         self._grow_target: Optional[QWidget] = None
         self._saved_extent: Optional[int] = None
 
+        # Buttons the pane wants beside the title rather than under it. Kept
+        # with the layout they came from, so detaching can hand them back.
+        self._extras: Optional[QWidget] = None
+        self._extras_home = None
+
         if hide_inner_header:
             hdr = inner.findChild(PaneHeader)
             if hdr is not None:
                 hdr.setVisible(False)
+            extras = inner.findChild(QWidget, HEADER_EXTRAS)
+            if extras is not None:
+                self._extras = extras
+                self._extras_home = extras.parentWidget().layout()
 
         # Placeholder shown in place of the body while detached.
         self._placeholder = QLabel("Detached - close the window to dock it back.")
@@ -121,6 +138,8 @@ class PanelFrame(QFrame):
         if not self._vertical_fold:
             bl.addWidget(self._caret)
         bl.addWidget(self._title_lbl, 1)
+        if self._extras is not None:
+            bl.addWidget(self._extras)
         bl.addWidget(self._detach_btn)
 
         # Side strip (left/right only): a thin vertical bar with the caret
@@ -281,6 +300,10 @@ class PanelFrame(QFrame):
         )
         lay = QVBoxLayout(win)
         lay.setContentsMargins(0, 0, 0, 0)
+        # Give the pane its buttons back before it leaves, or the floating
+        # window arrives without the controls it owns while they sit uselessly
+        # on a title bar whose body is gone.
+        self._return_extras()
         self._inner.setParent(win)
         lay.addWidget(self._inner)
         self._inner.setVisible(True)
@@ -295,6 +318,25 @@ class PanelFrame(QFrame):
         win.show()
         self.state_changed.emit()
 
+    # ------------------------------------------------------------------
+    # Header extras: buttons a pane owns but that belong beside the title
+    # ------------------------------------------------------------------
+
+    def _return_extras(self) -> None:
+        """Put the pane's buttons back where the pane built them."""
+        if self._extras is None or self._extras_home is None:
+            return
+        self._extras_home.addWidget(self._extras)
+        self._extras.setVisible(True)
+
+    def _take_extras(self) -> None:
+        """Lift them back into the title bar."""
+        if self._extras is None:
+            return
+        layout = self._bar.layout()
+        layout.insertWidget(layout.count() - 1, self._extras)
+        self._extras.setVisible(True)
+
     def reattach(self) -> None:
         if not self.is_detached():
             return
@@ -305,6 +347,7 @@ class PanelFrame(QFrame):
         self._inner.setParent(self._body_row if self._vertical_fold else self)
         parent_layout.insertWidget(self._content_index, self._inner, 1)
         self._inner.setVisible(True)
+        self._take_extras()
         self._placeholder.setVisible(False)
         self._caret.setVisible(self._collapsible)
         self._detach_btn.setVisible(self._detachable)

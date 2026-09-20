@@ -761,6 +761,12 @@ class RaycastGLWidget(QOpenGLWidget):
     # shortcuts / Shift-drag / Shift-scroll), so the controls panel can mirror
     # its sliders. Not emitted for changes driven by the controls themselves.
     clip_changed = pyqtSignal()
+    # Emitted when the USER moves the camera (drag, pan, wheel). Lets a second
+    # render follow this one, which is what the defacing comparison view
+    # needs: rotating one head and not the other is not a comparison.
+    # `apply_camera_state` deliberately does not emit, or two linked views
+    # drive each other in a loop.
+    camera_changed = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -942,6 +948,64 @@ class RaycastGLWidget(QOpenGLWidget):
     def reset_view(self) -> None:
         self._az, self._el, self._dist = -0.6, 0.3, 1.9
         self._target = np.zeros(3, np.float32)
+        self.update()
+        self.camera_changed.emit()
+
+    # -- sharing a camera between two renders ------------------------------
+
+    def camera_state(self) -> dict:
+        """Where the camera is. Plain numbers, so it survives a round trip."""
+        return {
+            "az": float(self._az),
+            "el": float(self._el),
+            "dist": float(self._dist),
+            "target": [float(v) for v in self._target],
+        }
+
+    def clip_state(self) -> dict:
+        """The cut plane, as the GL widget holds it.
+
+        Separate from the control panel's sliders because not all of it has a
+        slider. ``clip_flip`` in particular is only ever set by Shift+X, so a
+        sync built from the widgets alone shared the plane's angle and depth
+        and quietly left the two renders cut from OPPOSITE sides.
+        """
+        return {
+            "active": int(self.clip_active),
+            "flip": bool(self.clip_flip),
+            "pos": float(self.clip_pos),
+            "az": float(self.clip_az),
+            "el": float(self.clip_el),
+            "thick": float(self.clip_thick_frac),
+        }
+
+    def apply_clip_state(self, state: dict) -> None:
+        """Adopt another render's cut plane. Silent: no ``clip_changed``."""
+        if not state:
+            return
+        try:
+            self.clip_active = int(state["active"])
+            self.clip_flip = bool(state["flip"])
+            self.clip_pos = float(state["pos"])
+            self.clip_az = float(state["az"])
+            self.clip_el = float(state["el"])
+            self.clip_thick_frac = float(state["thick"])
+        except (KeyError, TypeError, ValueError):
+            return
+        self._recompute_clip()
+        self.update()
+
+    def apply_camera_state(self, state: dict) -> None:
+        """Put the camera where ``state`` says. Silent: no `camera_changed`."""
+        if not state:
+            return
+        try:
+            self._az = float(state["az"])
+            self._el = float(state["el"])
+            self._dist = float(state["dist"])
+            self._target = np.asarray(state["target"], np.float32)
+        except (KeyError, TypeError, ValueError):
+            return
         self.update()
 
     # -- clip plane (logical state -> shader uniforms) ---------------------
@@ -1298,6 +1362,7 @@ class RaycastGLWidget(QOpenGLWidget):
             self._az += dx * 0.01
             self._el = float(np.clip(self._el + dy * 0.01, -1.55, 1.55))
         self.update()
+        self.camera_changed.emit()
 
     def mouseReleaseEvent(self, ev) -> None:
         self._last = None
@@ -1323,6 +1388,7 @@ class RaycastGLWidget(QOpenGLWidget):
             return
         self._dist = float(np.clip(self._dist * (0.9 ** steps), 0.5, 12.0))  # zoom
         self.update()
+        self.camera_changed.emit()
 
 
 # --------------------------------------------------------------------------
@@ -1338,6 +1404,10 @@ class Nifti3DControls(QWidget):
     Vertical column (used in a scroll area). Per-effect the irrelevant
     parameters grey out (:data:`EFFECT_PARAMS`), mirroring MRIcroGL.
     """
+
+    #: The user changed any control here. Carries nothing: the receiver asks
+    #: for :meth:`controls_state`.
+    controls_changed = pyqtSignal()
 
     def __init__(self, gl: RaycastGLWidget, *, vertical: bool = True, parent=None) -> None:
         super().__init__(parent)
@@ -1358,6 +1428,9 @@ class Nifti3DControls(QWidget):
         # one, so tweaks to one effect never leak into another.
         self._effect_values: dict[str, dict] = {}
         self._current_effect: Optional[str] = None
+        # Set while adopting another panel's values, so the mirroring does not
+        # bounce back at the panel it came from.
+        self._applying_state = False
         self._build_widgets()
         self._layout()
         self._apply_clip()
@@ -1365,6 +1438,9 @@ class Nifti3DControls(QWidget):
         # Keyboard / Shift-drag changes to the clip on the GL widget mirror back
         # into these sliders.
         self.gl.clip_changed.connect(self._sync_clip_from_gl)
+        # One signal for "the user changed something here", so a second render
+        # can be kept in step without every caller wiring twenty widgets.
+        self._wire_controls_changed()
 
     def _build_widgets(self) -> None:
         self._effect = QComboBox(); self._effect.addItems(EFFECTS)
@@ -1425,6 +1501,71 @@ class Nifti3DControls(QWidget):
             "Reset the parameters of EVERY effect back to their defaults / presets."
         )
         self._reset_view_btn = self._btn("Reset view", self.gl.reset_view)
+
+    # -- sharing a whole control panel with a second render ----------------
+
+    def _control_widgets(self) -> dict:
+        """Every control worth sharing, keyed by a stable name.
+
+        Walked from the widgets rather than listed by hand: a control added
+        to the panel and forgotten here would be one that silently stops
+        being synchronised, which is the kind of gap nobody notices until two
+        renders disagree and the comparison quietly stops meaning anything.
+        """
+        out: dict = {}
+        for name in dir(self):
+            if not name.startswith("_") or name.startswith("__"):
+                continue
+            widget = getattr(self, name, None)
+            if isinstance(widget, (QComboBox, QSlider, QCheckBox)):
+                out[name] = widget
+        return out
+
+    def _wire_controls_changed(self) -> None:
+        for widget in self._control_widgets().values():
+            if isinstance(widget, QComboBox):
+                widget.currentIndexChanged.connect(self._emit_controls_changed)
+            elif isinstance(widget, QSlider):
+                widget.valueChanged.connect(self._emit_controls_changed)
+            elif isinstance(widget, QCheckBox):
+                widget.toggled.connect(self._emit_controls_changed)
+
+    def _emit_controls_changed(self, *_a) -> None:
+        if not self._applying_state:
+            self.controls_changed.emit()
+
+    def controls_state(self) -> dict:
+        """Every control's value: effect, lighting, thresholds, clip, quality."""
+        state: dict = {}
+        for name, widget in self._control_widgets().items():
+            if isinstance(widget, QComboBox):
+                state[name] = widget.currentIndex()
+            elif isinstance(widget, QSlider):
+                state[name] = widget.value()
+            else:
+                state[name] = widget.isChecked()
+        return state
+
+    def apply_controls_state(self, state: dict) -> None:
+        """Adopt another panel's values. Silent, so two panels cannot loop."""
+        if not state:
+            return
+        widgets = self._control_widgets()
+        self._applying_state = True
+        try:
+            for name, value in state.items():
+                widget = widgets.get(name)
+                if widget is None:
+                    continue
+                if isinstance(widget, QComboBox):
+                    if 0 <= int(value) < widget.count():
+                        widget.setCurrentIndex(int(value))
+                elif isinstance(widget, QSlider):
+                    widget.setValue(int(value))
+                else:
+                    widget.setChecked(bool(value))
+        finally:
+            self._applying_state = False
 
     def _layout(self) -> None:
         outer = QVBoxLayout(self)

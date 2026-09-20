@@ -10,7 +10,8 @@ Pipeline per (dataset, subject, session)::
 
     Phase 2   sequential per-subject post-conv:
               - fixups.fieldmaps.apply_fieldmap_renames
-              - fixups.scans_tsv.update_scans_tsv (no-op today)
+              - fixups.scans_tsv.update_scans_tsv (mne-bids has
+                already written a scans table for any EEG/MEG)
               - fixups.intended_for.populate_intended_for
 
     Phase 3   sequential per-subject merge commit:
@@ -58,16 +59,20 @@ from ..converter import (
     dispatch,
     select_backend,
 )
+from ..metadata.preserve import is_mergeable, merge_file
 from ..fixups import (
     apply_fieldmap_renames,
     attach_companion_files,
     convert_blood_files,
+    deface_staged,
     enrich_pet_sidecars,
     enrich_recording_sidecars,
     populate_intended_for,
     repair_converter_output,
     update_scans_tsv,
 )
+from ..deface.engines import DEFAULT_ENGINE_ID as DEFACE_DEFAULT_ENGINE
+from ..deface.engines import engine_ids as deface_engine_ids
 from ..recording_meta import (
     RecordingMetaSpec,
     default_spec,
@@ -182,6 +187,9 @@ def run_convert(
     raw_root: Optional[Path] = None,
     skip_residuals: bool = True,
     force_edf: bool = False,
+    preserve_curation: bool = True,
+    deface: bool = False,
+    deface_engine: str = DEFACE_DEFAULT_ENGINE,
     cancel_check=None,
 ) -> int:
     """Convert every commit-ready row in ``tsv`` to BIDS under ``bids_parent``.
@@ -192,12 +200,20 @@ def run_convert(
     dataset defaults supply EEG/MEG ``line_freq`` / ``montage`` when the
     inventory cell is blank, and its richer fields (reference, ground,
     filters, device, institution, event maps, ...) are folded into the BIDS
-    sidecars after the write. When omitted, a default spec is used
-    (``PowerLineFrequency = 50``), preserving prior behaviour.
+    sidecars after the write. When omitted, an EMPTY default spec is used:
+    no power-line frequency is invented, and mne-bids writes
+    ``PowerLineFrequency: "n/a"`` unless the recording's own header, an
+    inventory cell or a template supplies one.
 
     ``skip_residuals`` (default True) drops the dcm2niix residual/secondary
     outputs -- derived single-volume duplicates split off one input series
     (e.g. ``..._bolda`` next to ``..._bold``). Pass False to keep them.
+
+    ``preserve_curation`` (default True) only matters when a subject already
+    exists and a file is being replaced. It merges JSON sidecars and
+    ``*_scans.tsv`` field by field instead of overwriting, so metadata somebody
+    curated in the Editor survives a re-conversion of the same subject. Pass
+    False to have the fresh conversion win outright.
     """
     tsv = Path(tsv)
     bids_parent = Path(bids_parent)
@@ -296,7 +312,7 @@ def run_convert(
 
     # Recording-metadata spec for EEG/MEG enrichment. Precedence: an explicit
     # --recording-meta path, else the scaffold the scan wrote next to the TSV
-    # (auto-discovered), else a default spec (keeps PowerLineFrequency=50).
+    # (auto-discovered), else an empty default spec, which supplies nothing.
     if recording_meta is not None:
         spec = load_spec(Path(recording_meta))
         log.info("loaded recording metadata from %s", recording_meta)
@@ -386,6 +402,9 @@ def run_convert(
                     dcm2niix_version=dcm2niix_version,
                     cancel_check=cancel_check,
                     spec=spec,
+                    preserve_curation=preserve_curation,
+                    deface=deface,
+                    deface_engine=deface_engine,
                 )
                 if existed:
                     n_merged += 1
@@ -434,6 +453,9 @@ def _convert_subject(
     dcm2niix_version: str,
     cancel_check=None,
     spec: Optional[RecordingMetaSpec] = None,
+    preserve_curation: bool = True,
+    deface: bool = False,
+    deface_engine: str = DEFACE_DEFAULT_ENGINE,
 ) -> None:
     """Run Phases 1–3 for a single (dataset, subject, session) group."""
     subject = tasks[0].subject
@@ -483,15 +505,47 @@ def _convert_subject(
         # What the USER stated is NOT applied here. That is the metadata step's
         # job, so this verb produces a faithful conversion and no opinions.
         n_enriched += repair_converter_output(staging)
+        # Remove faces LAST, and before the commit, which is the whole point of
+        # doing it here: the identifiable image exists only inside the staging
+        # directory, for a few seconds, and what lands in the dataset was never
+        # identifiable. Nothing is backed up because there is nothing to
+        # restore to. A failure is logged and does not fail the conversion.
+        if deface:
+            try:
+                n_defaced = deface_staged(
+                    staging, tasks, engine_id=deface_engine,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # A converted subject with a face on it is a problem the user
+                # can fix afterwards. A subject that failed to convert because
+                # the defacer threw is a problem they cannot. This happened for
+                # real: a stale engine id in QSettings raised a KeyError here
+                # and took the whole conversion with it.
+                n_defaced = 0
+                log.warning(
+                    "sub-%s: defacing failed (%s: %s); the subject is being "
+                    "converted WITHOUT it",
+                    subject, type(exc).__name__, exc,
+                )
+            # Said out loud rather than folded into the enrichment count. A
+            # user who asked for defacing needs to see whether it happened,
+            # and how many, because the answer 0 is the one that matters.
+            log.info(
+                "sub-%s: removed faces from %d image(s)", subject, n_defaced,
+            )
         _prune_empty_dirs(staging)
 
         # Phase 3: atomic commit. Use the same sanitised segment we
         # built for the staging dir so the commit target name is
         # consistent across OSes.
         target = bids_root / subj_segment
-        _merge_commit(staging, target, on_existing=on_existing)
+        _merge_commit(
+            staging, target, on_existing=on_existing,
+            preserve_curation=preserve_curation,
+        )
         _write_provenance(
-            target, results, rename_map, n_intended_for, n_scans_tsv,
+            bids_root, subj_segment, results, rename_map,
+            n_intended_for, n_scans_tsv,
             dcm2niix_version=dcm2niix_version, n_enriched=n_enriched,
         )
         log.info("committed sub-%s to %s", subject, target)
@@ -751,6 +805,7 @@ def _log_existing_subject_summary(bids_root: Path, dataset_df, on_existing: str)
 
 def _merge_commit(
     staging_subject: Path, target: Path, *, on_existing: str,
+    preserve_curation: bool = True,
 ) -> tuple[int, int, int]:
     """Commit a staged subject into the dataset, merging into an existing one.
 
@@ -770,6 +825,14 @@ def _merge_commit(
     A replaced file is first moved to
     ``<bids_root>/.bidsmgr/backup/<sub>_<utcstamp>/<relpath>``, so the merge path
     is reconstructable even though atomicity drops from subject- to file-level.
+
+    ``preserve_curation`` changes what "replace" means for the two file kinds a
+    person edits: a JSON sidecar and ``*_scans.tsv`` are merged FIELD by field
+    rather than overwritten, so an afternoon in the Editor survives a second
+    conversion of the same subject while the fresh pass still contributes
+    everything it newly knows. See :mod:`bidsmgr.metadata.preserve`. Every
+    other file is replaced exactly as before, and the backup is taken either
+    way, so the pre-merge state is always recoverable.
     """
     staged = [p for p in sorted(staging_subject.rglob("*")) if p.is_file()]
 
@@ -789,6 +852,7 @@ def _merge_commit(
 
     backup_dir = target.parent / ".bidsmgr" / "backup" / f"{target.name}_{_utc_stamp()}"
     added = replaced = kept = 0
+    preserved: list[str] = []
     for src in staged:
         rel = src.relative_to(staging_subject)
         dst = target / rel
@@ -806,10 +870,28 @@ def _merge_commit(
             continue
         bdst = backup_dir / rel
         bdst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(dst), str(bdst))
+        shutil.copy2(str(dst), str(bdst))
+        if preserve_curation and is_mergeable(dst):
+            outcome = merge_file(dst, src)
+            if outcome is not None:
+                src.unlink(missing_ok=True)
+                if isinstance(outcome, list) and outcome:
+                    preserved.extend(f"{rel}:{f}" for f in outcome)
+                replaced += 1
+                continue
+        # Not mergeable, or the merge could not be done correctly: the
+        # ordinary replace, with the original already backed up above.
+        dst.unlink()
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
         replaced += 1
+    if preserved:
+        shown = ", ".join(preserved[:6])
+        more = "" if len(preserved) <= 6 else f" (+{len(preserved) - 6} more)"
+        log.info(
+            "kept %d curated field(s) through the re-conversion: %s%s",
+            len(preserved), shown, more,
+        )
     if added or replaced or kept:
         tail = (
             " (use --on-existing replace to overwrite the kept files)"
@@ -1131,9 +1213,23 @@ def _row_to_task_file_based(
 
     # Resolve EEG/MEG line_freq + montage. Precedence: the inventory cell
     # wins; else the recording-metadata dataset default (resolved per row by
-    # source path); line_freq finally falls back to 50 Hz so
-    # PowerLineFrequency is always populated (preserves prior behaviour now
-    # that the dataset-wide --line-freq flag is gone).
+    # source path); else NOTHING.
+    #
+    # There used to be a final `line_freq = 50.0` here, so PowerLineFrequency
+    # was always populated. It was always populated and sometimes wrong: 50 Hz
+    # is Europe, and a recording made in the US, Canada, Japan or Brazil is 60.
+    # The sidecar said 50 in a BIDS-required field with nothing to distinguish
+    # it from a value somebody measured, and the recordings most likely to
+    # reach this line are exactly the ones nobody had thought about.
+    #
+    # Leaving it None is not a gap. mne-bids writes
+    # PowerLineFrequency: "n/a" when raw.info["line_freq"] is unset, which the
+    # schema allows (the field is anyOf number or the literal "n/a") and which
+    # is the true statement. A guess that validates is worse than an honest
+    # "not stated" that also validates.
+    #
+    # The recording's OWN header still wins over all of this: the mne_bids
+    # backend only writes our value when raw.info carries none.
     # The datatype selects the per-modality block: what a study says about its
     # EEG amplifier must not reach its MEG recordings.
     eff_acq = (
@@ -1148,8 +1244,6 @@ def _row_to_task_file_based(
         line_freq = None
     if line_freq is None and eff_acq is not None:
         line_freq = eff_acq.power_line_freq
-    if line_freq is None:
-        line_freq = 50.0
 
     montage = str(row.get("montage", "")).strip() or None
     if montage is None and eff_acq is not None:
@@ -1223,7 +1317,8 @@ def _load_files_by_uid_sidecar(
 
 
 def _write_provenance(
-    target: Path,
+    bids_root: Path,
+    subject_segment: str,
     results: list[ConvertResult],
     rename_map: dict[Path, Path],
     n_intended_for: int,
@@ -1232,8 +1327,17 @@ def _write_provenance(
     dcm2niix_version: str,
     n_enriched: int = 0,
 ) -> None:
-    """Per-subject provenance at ``<target>/.bidsmgr/provenance.json``."""
-    prov_dir = target / ".bidsmgr"
+    """Convert provenance at ``<root>/.bidsmgr/provenance/<subject>.json``.
+
+    One place, not one per subject. It used to live in the subject folder, and
+    a hidden directory inside every subject caused problems out of all
+    proportion to what it held: deleting a subject left the folder behind
+    because the tool's own state is excluded from a delete, renaming a subject
+    onto another had to invent somewhere for the loser's copy to go, and every
+    walker in the codebase had to know to skip it. The dataset already has
+    exactly one place for tool state, at its root, and this is tool state.
+    """
+    prov_dir = Path(bids_root) / ".bidsmgr" / "provenance"
     prov_dir.mkdir(parents=True, exist_ok=True)
     record = {
         "schema_version": 1,
@@ -1263,7 +1367,9 @@ def _write_provenance(
         "scans_tsv_rewritten": n_scans_tsv,
         "recording_sidecars_enriched": n_enriched,
     }
-    (prov_dir / "provenance.json").write_text(json.dumps(record, indent=2) + "\n")
+    record["subject_dir"] = subject_segment
+    name = safe_path_component(subject_segment) or "subject"
+    (prov_dir / f"{name}.json").write_text(json.dumps(record, indent=2) + "\n")
 
 
 def _write_error_log(
@@ -1445,9 +1551,11 @@ def _main(argv: Optional[list[str]] = None) -> int:
             "dataset defaults supply line_freq / montage for blank inventory "
             "cells, and its richer fields fill sidecar reference / ground / "
             "filters / device / institution, retype auxiliary channels, and "
-            "map event codes to labels. Optional; omitting it leaves "
-            "PowerLineFrequency=50 by default. Set per-row line_freq / montage "
-            "in the inventory TSV columns to override per recording."
+            "map event codes to labels. Optional; omitting it means no "
+            "power-line frequency is invented, so PowerLineFrequency is "
+            "\"n/a\" unless the recording header, an inventory cell or a "
+            "template states one. Set per-row line_freq / montage in the "
+            "inventory TSV columns to override per recording."
         ),
     )
     parser.add_argument(
@@ -1482,12 +1590,35 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--deface", action="store_true",
+        help=(
+            "Remove the face from anatomical and PET images before the "
+            "subject is committed, so the identifiable image never enters the "
+            "dataset at all."
+        ),
+    )
+    parser.add_argument(
+        "--deface-engine", default=DEFACE_DEFAULT_ENGINE,
+        choices=deface_engine_ids(),
+        help="which defacing engine to use (default: %(default)s)",
+    )
+    parser.add_argument(
         "--force-edf", action="store_true",
         help=(
             "Re-encode EEG / iEEG recordings to EDF on write instead of "
             "keeping the source format. Harmonises a study to one BIDS-native "
             "format, and makes a non-BIDS-native but mne-readable source "
             "(GDF, EGI, ...) convertible. MEG / NIRS are unaffected."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite-curation", action="store_true",
+        help=(
+            "When re-converting a subject that already exists, let the fresh "
+            "conversion win outright. By default a JSON sidecar and a "
+            "*_scans.tsv are merged field by field instead, so metadata "
+            "curated in the Editor survives the second pass. Only has an "
+            "effect together with --on-existing update / replace."
         ),
     )
     parser.add_argument(
@@ -1557,7 +1688,10 @@ def _main(argv: Optional[list[str]] = None) -> int:
             pet_spreadsheet=args.pet_spreadsheet,
             raw_root=Path(version.raw_root) if version.raw_root else args.raw_root,
             skip_residuals=not args.keep_residuals,
+            preserve_curation=not args.overwrite_curation,
             force_edf=args.force_edf,
+            deface=args.deface,
+            deface_engine=args.deface_engine,
         )
 
     if not args.tsv or not args.bids_parent:
@@ -1576,7 +1710,10 @@ def _main(argv: Optional[list[str]] = None) -> int:
         pet_spreadsheet=args.pet_spreadsheet,
         raw_root=args.raw_root,
         skip_residuals=not args.keep_residuals,
+        preserve_curation=not args.overwrite_curation,
         force_edf=args.force_edf,
+        deface=args.deface,
+        deface_engine=args.deface_engine,
     )
 
 

@@ -18,11 +18,10 @@ import pytest
 
 from bidsmgr.cli.convert import run_convert
 from bidsmgr.cli.scan import run_scan
+from tests.fixtures.data_root import dataset
 
 
-REAL_MRI_ROOT = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/MRI"
-)
+REAL_MRI_ROOT = dataset("MRI")
 
 
 pytestmark = [

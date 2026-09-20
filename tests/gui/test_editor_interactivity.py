@@ -276,15 +276,21 @@ def test_fix_request_focuses_field_in_sidecar_form(
     license_row = next((r for r in rows if r.key == "License"), None)
     assert license_row is not None
     editor = license_row.editor()
-    assert isinstance(editor, QLineEdit)
+    # NOT asserted to be a QLineEdit: License carries a curated vocabulary, so
+    # the Editor builds it as an editable combo, the same control the metadata
+    # templates use. What this test is about is where the focus goes, which is
+    # the same question whatever kind of box the field deserves.
+    assert editor is not None
     # ``hasFocus`` is unreliable under offscreen Qt (no active window).
     # ``focusWidget`` returns the widget that would be focused once
     # the toplevel window is activated — sufficient for the assertion
     # we care about: ``setFocus`` was routed to the License editor.
     assert panel._sidecar_form.focusWidget() is editor
-    # ``selectAll`` was called as part of focus_field — the editor
-    # shows the existing value pre-selected for easy overwrite.
-    assert editor.selectedText() == editor.text()
+    # ``selectAll`` was called as part of focus_field, so the existing value
+    # is pre-selected for easy overwrite. Read through the combo's line edit
+    # when the field is a vocabulary one.
+    line = editor.lineEdit() if hasattr(editor, "lineEdit") else editor
+    assert line.selectedText() == line.text()
 
 
 def test_editor_undo_redo_buttons_follow_active_pane(qapp, tmp_path: Path) -> None:

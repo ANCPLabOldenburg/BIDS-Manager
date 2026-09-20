@@ -22,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Mapping, Optional
 
-from bidsval import schema as bidsval_schema
+from ..vendor.bidsval import schema as bidsval_schema
 
 from .loader import active_version, get_schema, register_cache
 from .types import Datatype, Entity, EntityFormat, EntityInfo, FieldInfo, Suffix
@@ -76,6 +76,106 @@ def entity_order() -> list[Entity]:
 @lru_cache(maxsize=1)
 def _entity_index_lookup() -> dict[str, int]:
     return {e: i for i, e in enumerate(entity_order())}
+
+
+@lru_cache(maxsize=1)
+def entity_keys() -> tuple[str, ...]:
+    """Every entity's SHORT key, in canonical filename order.
+
+    The schema keys entities by their long name (``subject``) while filenames
+    carry the short one (``sub``). Anything that reads or writes a name needs
+    the short form, and needs it in this order, so it is derived here once
+    rather than re-listed by each caller.
+    """
+    schema = get_schema()
+    out: list[str] = []
+    for long_name in entity_order():
+        raw = schema.objects.entities.get(long_name) or {}
+        key = str(raw.get("name", long_name))
+        if key:
+            out.append(key)
+    return tuple(out)
+
+
+@lru_cache(maxsize=1)
+def _key_to_long() -> dict[str, str]:
+    schema = get_schema()
+    out: dict[str, str] = {}
+    for long_name in entity_order():
+        raw = schema.objects.entities.get(long_name) or {}
+        out[str(raw.get("name", long_name))] = long_name
+    return out
+
+
+def entity_key_info(key: str) -> EntityInfo:
+    """Schema metadata for an entity named by its SHORT key (``"sub"``).
+
+    :func:`entity_info` takes the long name. Callers that start from a
+    filename have the short one, and translating in each of them is how the
+    two drift apart.
+    """
+    long_name = _key_to_long().get(key)
+    if long_name is None:
+        raise KeyError(f"Unknown entity key: {key!r}")
+    return entity_info(long_name)
+
+
+@lru_cache(maxsize=1)
+def directory_entity_keys() -> tuple[str, ...]:
+    """The entities that name a DIRECTORY as well as appearing in filenames.
+
+    ``sub`` and ``ses`` today, read from ``rules.directories.raw`` rather than
+    assumed, because renaming one of these has to move a folder and renaming
+    any other must not.
+    """
+    schema = get_schema()
+    raw = schema.rules.directories.get("raw") or {}
+    out: list[str] = []
+    for name, spec in raw.items():
+        if name == "root" or not hasattr(spec, "get"):
+            continue
+        long_name = spec.get("entity")
+        if not long_name:
+            continue
+        info = schema.objects.entities.get(long_name) or {}
+        key = str(info.get("name", long_name))
+        if key not in out:
+            out.append(key)
+    # Canonical order, so a caller iterating them moves the outermost first.
+    order = {k: i for i, k in enumerate(entity_keys())}
+    return tuple(sorted(out, key=lambda k: order.get(k, len(order))))
+
+
+@lru_cache(maxsize=1)
+def opaque_directories() -> tuple[str, ...]:
+    """Top-level directories whose contents are not the raw dataset's.
+
+    ``derivatives``, ``sourcedata``, ``code`` and friends are marked
+    ``opaque`` in the schema, which is exactly the property a bulk operation
+    needs: what is inside was produced by something else and renaming into it
+    silently breaks provenance.
+    """
+    schema = get_schema()
+    raw = schema.rules.directories.get("raw") or {}
+    out = [
+        str(spec.get("name", name))
+        for name, spec in raw.items()
+        if name != "root" and hasattr(spec, "get") and spec.get("opaque")
+    ]
+    return tuple(sorted(out))
+
+
+def datatypes_with_suffix(suffix: Suffix) -> tuple[Datatype, ...]:
+    """Every datatype the standard allows ``suffix`` in.
+
+    Used instead of a hand-kept list of "datatypes that have events" or
+    "datatypes that have channels". Those lists were both wrong: they predated
+    ``emg`` and ``motion``, so two whole modalities were quietly skipped by
+    every check that consulted them.
+    """
+    return tuple(
+        dt for dt in list_datatypes() if suffix in list_suffixes(dt)
+    )
 
 
 def required_entities(datatype: Datatype, suffix: Suffix) -> list[Entity]:
@@ -200,6 +300,9 @@ def dataset_description_fields(bids_root: Optional[Path] = None) -> list[FieldIn
             type=spec.type,
             item_type=spec.item_type,
             enum=tuple(spec.enum),
+            accepts=tuple(getattr(spec, "accepts", ()) or ()),
+            accepts_free_text=bool(getattr(spec, "accepts_free_text", False)),
+            accepts_na=bool(getattr(spec, "accepts_na", False)),
             level=spec.level,
             unit=spec.unit,
             required=spec.is_required,
@@ -470,6 +573,9 @@ def _sidecar_fields(
             type=spec.type,
             item_type=spec.item_type,
             enum=tuple(spec.enum),
+            accepts=tuple(getattr(spec, "accepts", ()) or ()),
+            accepts_free_text=bool(getattr(spec, "accepts_free_text", False)),
+            accepts_na=bool(getattr(spec, "accepts_na", False)),
             level=spec.level,
             unit=spec.unit,
             required=spec.is_required,

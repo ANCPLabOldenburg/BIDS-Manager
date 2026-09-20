@@ -91,6 +91,14 @@ class MetadataReport(BaseModel):
     todo_fills: list[TodoFill] = Field(default_factory=list)
     missing_required: list[str] = Field(default_factory=list)
     missing_recommended: list[str] = Field(default_factory=list)
+    # Fields that are missing and can take NO placeholder, with the reason.
+    # A number, a boolean or a real vocabulary has no honest marker, and
+    # inventing one would write a value nobody stated. Recorded rather than
+    # skipped silently, so a fill that covers two thirds of what is missing
+    # cannot report itself as complete.
+    unmarkable: list[str] = Field(default_factory=list)
+    # How much of what the standard declares this run was asked to mark.
+    fill_scope: str = "none"
     warnings: list[str] = Field(default_factory=list)
 
 

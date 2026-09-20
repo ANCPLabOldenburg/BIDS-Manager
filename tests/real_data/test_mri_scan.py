@@ -2,7 +2,7 @@
 
 Gated on ``BIDS_MANAGER_REAL_MRI_DATA``. The test runs the full
 ``bidsmgr-scan`` pipeline against the Siemens MAGNETOM Prisma dataset at
-``/Users/karelo/Development/datasets/BIDS_Manager/raw_data/MRI/neuroimaging_unit_new/``
+``$BIDSMGR_TEST_DATA/MRI/neuroimaging_unit_new/``
 and asserts:
 
 * The TSV output preserves the v0.2.5 22-column contract.
@@ -29,10 +29,9 @@ import pytest
 
 from bidsmgr.cli.scan import BIDS_GUESS_COLUMNS, run_scan
 from bidsmgr.inventory.mri_dicom import TSV_COLUMNS
+from tests.fixtures.data_root import dataset
 
-REAL_MRI_ROOT = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/MRI/neuroimaging_unit_new"
-)
+REAL_MRI_ROOT = dataset("MRI", "neuroimaging_unit_new")
 
 
 pytestmark = [

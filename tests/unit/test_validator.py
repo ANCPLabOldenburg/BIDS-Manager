@@ -202,7 +202,9 @@ class TestSidecarBehaviour:
         )
 
         report = validate(root)
-        by_name = {str(f.path): f for f in report.files}
+        # Keyed by as_posix(): FileVerdict.path is a Path, so str() spells it
+        # natively and the POSIX literals below matched nothing on Windows.
+        by_name = {f.path.as_posix(): f for f in report.files}
 
         for rel in ("task-rest_bold.json", "sub-001/sub-001_task-rest_bold.json"):
             fields = by_name[rel].sidecar_fields

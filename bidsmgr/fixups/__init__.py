@@ -26,6 +26,7 @@ from .fieldmaps import apply_fieldmap_renames
 from .intended_for import populate_intended_for
 from .scans_tsv import update_scans_tsv
 from .blood import convert_blood_files
+from .deface import deface_staged
 from .sidecar_schema import apply_stated_metadata, repair_converter_output
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "apply_fieldmap_renames",
     "populate_intended_for",
     "apply_stated_metadata",
+    "deface_staged",
     "repair_converter_output",
     "update_scans_tsv",
     "enrich_pet_sidecars",

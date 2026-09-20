@@ -30,7 +30,7 @@ from bidsmgr.gui.widgets import Chip
 from bidsmgr.gui.widgets.val_message import ValMessage
 from bidsmgr.gui.widgets.validation_pane import (
     ValidationPane,
-    _count_chip_kind,
+    _count_chips,
     _folder_key_for,
 )
 
@@ -101,15 +101,23 @@ def _report_with_three_levels(bids_root: Path) -> ValidationReport:
 # ---------------------------------------------------------------------------
 
 
-def test_count_chip_picks_worst_severity() -> None:
-    assert _count_chip_kind([]) == ""  # neutral / default Chip
-    assert _count_chip_kind(
-        [_make_issue(Severity.WARN, "r", "m")]
-    ) == "warn"
-    assert _count_chip_kind([
+def test_count_chips_split_by_severity(qapp) -> None:
+    """Replaces ``_count_chip_kind``, which picked the WORST severity and
+    painted one chip with the total.
+
+    "5" in amber, for three warnings and two errors, hid that there were
+    errors at all and hid how many. The helper it replaces is gone rather than
+    kept as a shim, because nothing else called it.
+    """
+    def kinds(issues):
+        return [(c.text(), c.property("chipKind")) for c in _count_chips(issues)]
+
+    assert kinds([]) == [("0", "default")]
+    assert kinds([_make_issue(Severity.WARN, "r", "m")]) == [("1", "warn")]
+    assert kinds([
         _make_issue(Severity.WARN, "r", "m"),
         _make_issue(Severity.ERR, "r", "m"),
-    ]) == "err"
+    ]) == [("1", "err"), ("1", "warn")]
 
 
 def test_folder_key_relative_to_root(tmp_path: Path) -> None:

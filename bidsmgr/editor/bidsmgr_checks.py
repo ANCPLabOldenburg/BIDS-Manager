@@ -23,7 +23,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from bidsval import schema as bidsval_schema
+from ..vendor.bidsval import schema as bidsval_schema
 
 from .. import schema as schema_mod
 from .types import FieldLevel, Issue, Severity, SidecarField

@@ -32,6 +32,9 @@ KEYS = {
     "active_view":        "ui/active_view",          # "converter" | "editor"
     "editor_bids_root":   "editor/bids_root",        # last BIDS root opened in the Editor view
     "editor_sidecar_view": "editor/sidecar_view",    # "bids" | "tree"
+    "editor_field_scope": "editor/field_scope",      # "all"|"present"|"absent"
+    "editor_show_hidden": "editor/show_hidden",      # dotfiles in the tree
+    "editor_autosave": "editor/autosave",            # save as you go
     "editor_strict_validate": "editor/strict_validate",  # "deep checks": bidsval read_headers on/off
     # Validation engine (bidsval) knobs, controllable from Settings.
     "template_colour_levels": "ui/template_colour_levels",  # colour the level marks
@@ -39,6 +42,10 @@ KEYS = {
     "validate_max_rows": "validate/max_rows",              # TSV rows scanned per table
     "validate_show": "validate/show",                      # which severities the Editor lists
     "validate_flag_todos": "validate/flag_todos",          # flag literal TODO placeholders
+    # Which of the four viewer layouts to open a scan in. "" means the user
+    # has never chosen, so the GPU-dependent default applies.
+    "nifti_view_mode": "editor/nifti_view_mode",                # single|multi|3d|combo
+    "nifti_orientation": "editor/nifti_orientation",           # 0 sag | 1 cor | 2 ax
     "nifti_crosshair_color": "editor/nifti_crosshair_color",   # hex string e.g. "#4FC3F7"
     "nifti_crosshair_thickness": "editor/nifti_crosshair_thickness",  # px, 1..5
     # Scan defaults
@@ -51,7 +58,10 @@ KEYS = {
     "convert_overwrite":  "convert/overwrite",      # legacy; migrated to on_existing
     "convert_on_existing": "convert/on_existing",    # skip|update|replace|error
     "convert_skip_residuals": "convert/skip_residuals",
+    "convert_preserve_curation": "convert/preserve_curation",
     "convert_force_edf":  "convert/force_edf",       # re-encode EEG/iEEG to EDF
+    "convert_deface":     "convert/deface",          # remove faces before commit
+    "convert_deface_engine": "convert/deface_engine",
     # Scan rules (user-extensible classifier hints + series exclusions).
     # Stored as JSON-encoded lists - see ``bidsmgr.classifier.user_rules``.
     "user_hints":         "classifier/user_hints",
@@ -60,8 +70,11 @@ KEYS = {
     "post_run_metadata":  "post_convert/run_metadata",
     "post_run_validate":  "post_convert/run_validate",
     "post_metadata_fill_todos": "post_convert/metadata_fill_todos",
+    "metadata_fill_scope": "post_convert/metadata_fill_scope",
     "post_validate_strict": "post_convert/validate_strict",
     "post_validate_html": "post_convert/validate_html",
+    "post_fixup_companions": "post_convert/fixup_companions",
+    "post_fixup_citation": "post_convert/fixup_citation",
     # Self-update
     "skipped_update_version": "update/skipped_version",
     # UI font scale (1.0 = default size baseline; values <1 shrink,
@@ -95,6 +108,18 @@ class AppSettings:
     editor_bids_root: Optional[str] = None
     # Which sidecar pane layout is active for JSON files.
     editor_sidecar_view: str = "bids"  # "bids" | "tree"
+    # Which fields BOTH sidecar views show. "all" keeps the schema-declared
+    # fields the file does not carry; "present" makes the two views identical.
+    editor_field_scope: str = "all"   # "all" | "present" | "absent"
+    # Dotfiles and dot-folders in the BIDS tree. Off by default: a dataset
+    # has .bidsmgr/, .git/ and .bidsignore in it and none of them are the
+    # data. On, they are shown dimmed rather than mixed in.
+    editor_show_hidden: bool = False
+    # Write a sidecar edit as soon as the field commits, debounced. OFF by
+    # default: saving without being asked is a surprise, and the thing that
+    # was actually wanted was for the toolbar to SAY there are unsaved
+    # changes from the first keystroke, which it now does regardless of this.
+    editor_autosave: bool = False
     # "Deep checks" toggle for the Editor's "Validate dataset". When True the
     # validator (bidsval) reads NIfTI headers and file contents (slower, more
     # thorough); when False it runs the fast structural pass used for live
@@ -115,6 +140,13 @@ class AppSettings:
     validate_flag_todos: bool = True
     # NIfTI viewer crosshair style. Persisted so the user's chosen
     # colour + thickness survives across sessions.
+    # Empty on purpose: "no choice made yet" is a different thing from any
+    # particular layout, and it is what lets the first run pick the best
+    # default this machine can show rather than a stored one.
+    nifti_view_mode: str = ""
+    # Which plane a single-pane view opens on. Axial by convention when the
+    # user has never chosen.
+    nifti_orientation: int = 2
     nifti_crosshair_color: str = "#4FC3F7"
     nifti_crosshair_thickness: int = 1
     # Colour the requirement-level marks in the metadata template. Off, the
@@ -152,16 +184,36 @@ class AppSettings:
     # Drop dcm2niix residual/secondary outputs (e.g. ``..._bolda`` next to
     # ``..._bold``). Default on: they are derived duplicates, not real images.
     convert_skip_residuals: bool = True
+    # Re-converting a subject somebody already curated in the Editor:
+    # merge the sidecars field by field rather than overwrite them, so an
+    # afternoon of annotation survives the second pass. Only bites when a
+    # file would otherwise be replaced.
+    convert_preserve_curation: bool = True
     # Re-encode EEG / iEEG recordings to EDF on convert (mne-bids format="EDF").
     convert_force_edf: bool = False
+    # Off by default. Defacing is destructive and must be chosen, not
+    # discovered after the fact.
+    convert_deface: bool = False
+    convert_deface_engine: str = "allineate"
 
     # Post-convert chain. All steps on by default: run metadata + validation
     # with TODO placeholders, strict validation, and an HTML report.
     post_run_metadata: bool = True
     post_run_validate: bool = True
     post_metadata_fill_todos: bool = True
+    # How much of what the standard declares the placeholder fill marks.
+    # required | recommended | optional, nested. Used by the post-convert
+    # chain AND by the Editor's Fix ups, so the two cannot disagree about
+    # what the user asked for.
+    metadata_fill_scope: str = "recommended"
     post_validate_strict: bool = True
     post_validate_html: bool = True
+    # Dataset repairs, run after metadata and before validation. Both default
+    # OFF: one adds files to the dataset and the other moves fields between
+    # files, and a tool that does either without being asked is a tool whose
+    # output cannot be trusted.
+    post_fixup_companions: bool = False
+    post_fixup_citation: bool = False
 
     # PyPI version string the user picked "Skip this version" on, so the
     # startup update check doesn't nag them about the same release on
@@ -250,6 +302,17 @@ class AppSettings:
         )
         if out.editor_sidecar_view not in ("bids", "tree"):
             out.editor_sidecar_view = "bids"
+        out.editor_field_scope = _as_str(
+            s.value(KEYS["editor_field_scope"]), out.editor_field_scope,
+        )
+        if out.editor_field_scope not in ("all", "present", "absent"):
+            out.editor_field_scope = "all"
+        out.editor_show_hidden = _as_bool(
+            s.value(KEYS["editor_show_hidden"]), out.editor_show_hidden,
+        )
+        out.editor_autosave = _as_bool(
+            s.value(KEYS["editor_autosave"]), out.editor_autosave,
+        )
         out.editor_strict_validate = _as_bool(
             s.value(KEYS["editor_strict_validate"]),
             out.editor_strict_validate,
@@ -271,6 +334,19 @@ class AppSettings:
         out.validate_flag_todos = _as_bool(
             s.value(KEYS["validate_flag_todos"]), out.validate_flag_todos,
         )
+        out.nifti_view_mode = _as_str(
+            s.value(KEYS["nifti_view_mode"]), out.nifti_view_mode,
+        )
+        if out.nifti_view_mode not in ("", "single", "multi", "3d", "combo"):
+            out.nifti_view_mode = ""
+        try:
+            out.nifti_orientation = int(
+                s.value(KEYS["nifti_orientation"], out.nifti_orientation)
+            )
+        except (TypeError, ValueError):
+            pass
+        if out.nifti_orientation not in (0, 1, 2):
+            out.nifti_orientation = 2
         out.nifti_crosshair_color = _as_str(
             s.value(KEYS["nifti_crosshair_color"]),
             out.nifti_crosshair_color,
@@ -318,9 +394,27 @@ class AppSettings:
         out.convert_skip_residuals = _as_bool(
             s.value(KEYS["convert_skip_residuals"]), out.convert_skip_residuals,
         )
+        out.convert_preserve_curation = _as_bool(
+            s.value(KEYS["convert_preserve_curation"]),
+            out.convert_preserve_curation,
+        )
         out.convert_force_edf = _as_bool(
             s.value(KEYS["convert_force_edf"]), out.convert_force_edf,
         )
+        out.convert_deface = _as_bool(
+            s.value(KEYS["convert_deface"]), out.convert_deface,
+        )
+        out.convert_deface_engine = str(
+            s.value(KEYS["convert_deface_engine"]) or out.convert_deface_engine
+        )
+        # Self-heal a value that is not an engine. Settings written by an
+        # older build can be anything, and an id the converter cannot resolve
+        # used to raise inside the subject commit, which lost the whole
+        # conversion rather than just the defacing.
+        from ..deface.engines import engine_ids as _deface_engine_ids
+
+        if out.convert_deface_engine not in _deface_engine_ids():
+            out.convert_deface_engine = cls.convert_deface_engine
 
         out.post_run_metadata = _as_bool(s.value(KEYS["post_run_metadata"]),
                                          out.post_run_metadata)
@@ -328,10 +422,23 @@ class AppSettings:
                                          out.post_run_validate)
         out.post_metadata_fill_todos = _as_bool(s.value(KEYS["post_metadata_fill_todos"]),
                                                 out.post_metadata_fill_todos)
+        out.metadata_fill_scope = _as_str(
+            s.value(KEYS["metadata_fill_scope"]), out.metadata_fill_scope,
+        )
+        if out.metadata_fill_scope not in (
+            "required", "recommended", "optional",
+        ):
+            out.metadata_fill_scope = "recommended"
         out.post_validate_strict = _as_bool(s.value(KEYS["post_validate_strict"]),
                                             out.post_validate_strict)
         out.post_validate_html = _as_bool(s.value(KEYS["post_validate_html"]),
                                           out.post_validate_html)
+        out.post_fixup_companions = _as_bool(
+            s.value(KEYS["post_fixup_companions"]), out.post_fixup_companions,
+        )
+        out.post_fixup_citation = _as_bool(
+            s.value(KEYS["post_fixup_citation"]), out.post_fixup_citation,
+        )
         out.skipped_update_version = _as_str(
             s.value(KEYS["skipped_update_version"]),
             out.skipped_update_version,
@@ -357,6 +464,7 @@ class AppSettings:
         # Strings.
         s.setValue(KEYS["theme"], self.theme)
         s.setValue(KEYS["scan_tsv_filename"], self.scan_tsv_filename)
+        s.setValue(KEYS["editor_field_scope"], self.editor_field_scope)
         if self.raw_root is not None:
             s.setValue(KEYS["raw_root"], self.raw_root)
         if self.bids_parent is not None:
@@ -372,17 +480,32 @@ class AppSettings:
             ("scan_skip_bids_guess",     self.scan_skip_bids_guess),
             ("convert_overwrite",        self.convert_overwrite),
             ("convert_skip_residuals",   self.convert_skip_residuals),
+            ("convert_preserve_curation", self.convert_preserve_curation),
             ("convert_force_edf",        self.convert_force_edf),
+            ("convert_deface",           self.convert_deface),
             ("post_run_metadata",        self.post_run_metadata),
             ("post_run_validate",        self.post_run_validate),
             ("post_metadata_fill_todos", self.post_metadata_fill_todos),
+            ("metadata_fill_scope",      self.metadata_fill_scope),
             ("post_validate_strict",     self.post_validate_strict),
             ("post_validate_html",       self.post_validate_html),
+            ("post_fixup_companions",    self.post_fixup_companions),
+            ("post_fixup_citation",      self.post_fixup_citation),
             ("editor_strict_validate",   self.editor_strict_validate),
             ("validate_flag_todos",      self.validate_flag_todos),
+            ("editor_show_hidden",       self.editor_show_hidden),
+            ("editor_autosave",          self.editor_autosave),
         ):
             s.setValue(KEYS[key], "1" if val else "0")
+        # Strings. Keep them OUT of the loop above: it writes "1" for anything
+        # truthy, so a string setting put there is saved as "1" and read back
+        # as "1". That is not a hypothetical. `convert_deface_engine` was in
+        # that list, every conversion loaded the engine id "1", and the lookup
+        # raised inside the subject commit, so nothing converted at all.
         s.setValue(KEYS["convert_on_existing"], self.convert_on_existing)
+        s.setValue(KEYS["convert_deface_engine"], self.convert_deface_engine)
+        s.setValue(KEYS["nifti_view_mode"], self.nifti_view_mode)
+        s.setValue(KEYS["nifti_orientation"], int(self.nifti_orientation))
         s.setValue(KEYS["validate_schema_version"], self.validate_schema_version)
         s.setValue(KEYS["validate_max_rows"], int(self.validate_max_rows))
         s.setValue(KEYS["validate_show"], self.validate_show)
@@ -456,6 +579,14 @@ class AppSettings:
         cls._settings().setValue(KEYS["editor_sidecar_view"], view)
 
     @classmethod
+    def remember_editor_field_scope(cls, scope: str) -> None:
+        cls._settings().setValue(KEYS["editor_field_scope"], scope)
+
+    @classmethod
+    def remember_editor_show_hidden(cls, show: bool) -> None:
+        cls._settings().setValue(KEYS["editor_show_hidden"], bool(show))
+
+    @classmethod
     def remember_editor_strict_validate(cls, enabled: bool) -> None:
         cls._settings().setValue(
             KEYS["editor_strict_validate"], "1" if enabled else "0",
@@ -478,6 +609,25 @@ class AppSettings:
         from ..classifier import user_rules
         _, excl = user_rules.from_json({"scan_exclusions": self.scan_exclusions})
         return excl
+
+    @classmethod
+    def remember_nifti_view_mode(cls, mode: str) -> None:
+        """Store the layout the user is in, so the next scan opens in it.
+
+        Written as the user switches rather than at shut-down: the Editor is
+        not always closed cleanly, and a preference that only survives a
+        graceful exit is one that mostly does not survive.
+        """
+        if mode not in ("single", "multi", "3d", "combo"):
+            return
+        cls._settings().setValue(KEYS["nifti_view_mode"], str(mode))
+
+    @classmethod
+    def remember_nifti_orientation(cls, axis: int) -> None:
+        """Store the plane, so a single-pane view opens on the same one."""
+        if int(axis) not in (0, 1, 2):
+            return
+        cls._settings().setValue(KEYS["nifti_orientation"], int(axis))
 
     @classmethod
     def remember_nifti_crosshair(cls, color: str, thickness: int) -> None:

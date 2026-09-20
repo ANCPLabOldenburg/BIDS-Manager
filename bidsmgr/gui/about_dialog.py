@@ -102,7 +102,7 @@ class AboutDialog(QDialog):
             "data to the Brain Imaging Data Structure (BIDS), curating "
             "the resulting tree, and running pre-flight quality checks "
             "before sharing or analysis. Supports MRI (DICOM), EEG, "
-            "MEG, iEEG, and physio inputs through a unified inventory "
+            "MEG, and physio inputs through a unified inventory "
             "and a single conversion pipeline."
         )
         intro.setObjectName("about-intro")

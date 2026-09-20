@@ -46,7 +46,10 @@ def run_metadata_cli(
     references_and_links: Optional[list[str]] = None,
     dataset_doi: Optional[str] = None,
     fill_todos: bool = False,
+    fill_scope: str = "",
     write_report: bool = True,
+    generate_companions: bool = False,
+    write_citation_file: bool = False,
     participants_file: Optional[Path] = None,
     phenotype_files: Optional[list[Path]] = None,
     datasets: Optional[Sequence[str]] = None,
@@ -102,6 +105,7 @@ def run_metadata_cli(
                 inventory_tsv=inventory_tsv,
                 dataset_meta=meta,
                 fill_todos=fill_todos,
+                fill_scope=fill_scope or None,
                 write_report=write_report,
                 participants_file=participants_file,
                 phenotype_files=phenotype_files,
@@ -111,6 +115,20 @@ def run_metadata_cli(
             n_failed += 1
             continue
         _print_report(bids_root, report)
+
+        # Dataset repairs run AFTER the metadata engine, because the citation
+        # file is written from the dataset description the engine just filled
+        # in. Both are off unless asked for.
+        if generate_companions or write_citation_file:
+            from ..fixups.dataset_fixups import run_dataset_fixups
+
+            fixups = run_dataset_fixups(
+                bids_root,
+                generate_companions=generate_companions,
+                write_citation_file=write_citation_file,
+            )
+            for line in fixups.lines():
+                print(line)
 
     return 0 if n_failed == 0 else 1
 
@@ -290,15 +308,49 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--references-and-links", action="append", default=None)
     parser.add_argument("--dataset-doi", default=None)
     parser.add_argument(
+        "--generate-companions",
+        action="store_true",
+        help=(
+            "Create the companion files recordings are missing (events.tsv, "
+            "channels.tsv, JSON sidecars). What can be read from a recording "
+            "is read from it; the rest is a stub whose TODO rows validation "
+            "keeps reporting."
+        ),
+    )
+    parser.add_argument(
+        "--write-citation",
+        action="store_true",
+        help=(
+            "Write CITATION.cff from dataset_description.json. BIDS treats "
+            "the citation file as the single source for Authors, License, "
+            "HowToAcknowledge and ReferencesAndLinks, so those move out of "
+            "the description."
+        ),
+    )
+    parser.add_argument(
         "--fill-todos",
         action="store_true",
         help=(
-            "For every sidecar with a missing required or recommended "
-            "field (and for missing recommended fields of "
-            "dataset_description.json), write the literal string "
-            "\"TODO\" as the value. Existing values are never "
-            "overwritten. Lets you sweep through the BIDS root and fill "
-            "the placeholders by hand later."
+            "Mark the gaps. For every sidecar field the standard declares "
+            "and the file does not carry, write a placeholder the field can "
+            "legally hold, so the gap is visible in the file and reported by "
+            "validation instead of being an absence nobody notices. Existing "
+            "values are NEVER overwritten. Same as --fill-scope recommended."
+        ),
+    )
+    parser.add_argument(
+        "--fill-scope",
+        choices=("required", "recommended", "optional"),
+        default="",
+        metavar="LEVEL",
+        help=(
+            "How much of what the standard declares to mark. The scopes "
+            "nest: 'required' is the floor, 'recommended' (the default) adds "
+            "what analyses usually need, 'optional' adds everything else. "
+            "Deprecated fields are never marked. A field whose type admits "
+            "no honest marker (a number, a boolean, a real vocabulary) is "
+            "left absent and reported, rather than given a value nobody "
+            "stated."
         ),
     )
     parser.add_argument(
@@ -375,7 +427,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         ethics_approvals=args.ethics_approvals,
         references_and_links=args.references_and_links,
         dataset_doi=args.dataset_doi,
-        fill_todos=args.fill_todos,
+        fill_todos=args.fill_todos or bool(args.fill_scope),
+        fill_scope=args.fill_scope,
+        generate_companions=args.generate_companions,
+        write_citation_file=args.write_citation,
         write_report=args.write_report,
         participants_file=args.participants_file,
         phenotype_files=args.phenotype_files,

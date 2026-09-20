@@ -23,8 +23,11 @@ from typing import Optional
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QMenu,
+    QDialog,
     QFileDialog,
     QFrame,
+    QMessageBox,
     QHBoxLayout,
     QPushButton,
     QSplitter,
@@ -33,9 +36,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..deface import run as deface_run
 from ..editor.types import FileVerdict, Severity, ValidationReport
 from ..workers import FileReportWorker, FolderReportWorker, ReportWorker
 from . import icons
+from .combo_popup import round_menu
+from .widgets.bidsignore_pane import BidsIgnorePane
+from .widgets.citation_pane import CitationPane
 from .widgets import (
     BidsTreePane,
     BusySpinner,
@@ -92,6 +99,16 @@ class EditorPanel(QWidget):
 
         self._tree_pane = BidsTreePane()
         self._tree_pane.file_selected.connect(self._on_file_selected)
+        self._tree_pane.rename_requested.connect(self._on_rename)
+        self._tree_pane.entities_requested.connect(self._on_edit_entities)
+        self._tree_pane.delete_requested.connect(self._on_delete)
+        self._tree_pane.deface_requested.connect(self._on_deface)
+        self._tree_pane.deface_compare_requested.connect(
+            self._on_deface_compare
+        )
+        self._tree_pane.deface_revert_requested.connect(self._on_deface_revert)
+        self._tree_pane.strip_requested.connect(self._on_strip)
+        self._tree_pane.compare_requested.connect(self._on_compare_images)
         # Drive the Validate file/folder button enable-state from the
         # tree selection — file → file button, folder → folder button.
         self._tree_pane.file_selected.connect(
@@ -106,10 +123,18 @@ class EditorPanel(QWidget):
         self._nifti_viewer = NiftiViewerPane()
         self._recording_viewer = RecordingViewerPane()
         self._center_stack = QStackedWidget()
+        self._sidecar_form.apply_to_others_requested.connect(
+            self._on_apply_field_to_others
+        )
+        self._sidecar_form.explain_requested.connect(self._on_explain_field)
         self._center_stack.addWidget(self._sidecar_form)
         self._center_stack.addWidget(self._tsv_viewer)
         self._center_stack.addWidget(self._nifti_viewer)
         self._center_stack.addWidget(self._recording_viewer)
+        self._bidsignore_pane = BidsIgnorePane()
+        self._center_stack.addWidget(self._bidsignore_pane)
+        self._citation_pane = CitationPane()
+        self._center_stack.addWidget(self._citation_pane)
         # Threaded panes drive the toolbar busy spinner + status bar.
         self._tsv_viewer.loading_changed.connect(self._on_pane_loading)
         self._recording_viewer.loading_changed.connect(self._on_pane_loading)
@@ -120,6 +145,12 @@ class EditorPanel(QWidget):
         self._center_stack.currentChanged.connect(self._sync_undo_redo)
         self._validation_pane = ValidationPane()
         self._validation_pane.fix_requested.connect(self._on_fix_requested)
+        self._validation_pane.fix_group_requested.connect(
+            self._on_fix_group_requested
+        )
+        self._validation_pane.accept_requested.connect(
+            self._on_accept_finding
+        )
         self._validation_pane.highlight_all_requested.connect(
             self._on_highlight_all_requested
         )
@@ -349,6 +380,144 @@ class EditorPanel(QWidget):
         self._strict_btn.toggled.connect(self._on_strict_toggled)
         lay.addWidget(self._strict_btn)
 
+        # Everything that acts on the dataset as a whole, behind one menu.
+        # Four separate toolbar buttons for four rarely-used actions crowded
+        # out the ones people press constantly, and the list is going to grow.
+        # The validation buttons deliberately stay outside: they are the
+        # Editor's main verb, not a tool.
+        self._tools_btn = QPushButton("  Tools")
+        self._tools_btn.setObjectName("tb-btn")
+        icons.apply_button(self._tools_btn, "tools")
+        self._tools_btn.setToolTip(
+            "Things that act on the whole dataset: repairs, renaming, and "
+            "the dashboard. Nothing here writes until you choose it, and "
+            "everything can be undone."
+        )
+        self._tools_btn.setEnabled(False)
+        self._tools_menu = QMenu(self._tools_btn)
+        round_menu(self._tools_menu)
+        self._tools_btn.setMenu(self._tools_menu)
+
+        self._dashboard_action = self._tools_menu.addAction("Dashboard")
+        self._dashboard_action.setToolTip(
+            "What is actually in this dataset: subjects, sessions, "
+            "modalities, how much of the metadata is answered, and where "
+            "the findings are."
+        )
+        self._dashboard_action.triggered.connect(self._on_dashboard)
+
+        self._compare_action = self._tools_menu.addAction("Compare images...")
+        self._compare_action.setToolTip(
+            "Put two NIfTI images side by side with one set of controls: "
+            "crosshair, slice, plane, 3-D camera, effects and cut plane all "
+            "stay together. Any two images, not just a defacing pair."
+        )
+        self._compare_action.triggered.connect(self._on_compare_images)
+
+        self._tools_menu.addSeparator()
+
+        self._fixups_action = self._tools_menu.addAction("Fix ups...")
+        self._fixups_action.setToolTip(
+            "Generate the companion files recordings are missing, write "
+            "CITATION.cff, move repeated metadata up, and mark what is "
+            "unanswered."
+        )
+        self._fixups_action.triggered.connect(self._on_fixups)
+
+        self._deface_action = self._tools_menu.addAction("Deface...")
+        self._deface_action.setToolTip(
+            "Remove the face from anatomical images, so the dataset can be "
+            "shared without the participants being identifiable. One "
+            "undoable step; you see exactly which images, and which were "
+            "skipped, before anything is written."
+        )
+        self._deface_action.triggered.connect(self._on_deface)
+
+        self._strip_action = self._tools_menu.addAction("Remove the skull...")
+        self._strip_action.setToolTip(
+            "Keep only the brain. Removes the face and everything else "
+            "outside it, so the result is a derivative rather than raw data "
+            "and is written to derivatives/. One undoable step."
+        )
+        self._strip_action.triggered.connect(self._on_strip)
+
+        self._deface_compare_action = self._tools_menu.addAction(
+            "Compare with the original..."
+        )
+        self._deface_compare_action.setToolTip(
+            "Show a selected image before defacing and after it, side by "
+            "side, with one crosshair between them. Every defacing tool tells "
+            "you to check the result; this is how you do it."
+        )
+        self._deface_compare_action.triggered.connect(self._on_deface_compare)
+
+        self._deface_revert_action = self._tools_menu.addAction(
+            "Put the face back..."
+        )
+        self._deface_revert_action.setToolTip(
+            "Restore defaced images from the undefaced copies kept in "
+            "sourcedata/ or in the edit history. Undo only reaches the last "
+            "operation; this works however many edits came afterwards."
+        )
+        self._deface_revert_action.triggered.connect(self._on_deface_revert)
+
+        self._rename_action = self._tools_menu.addAction("Rename entity...")
+        self._rename_action.setToolTip(
+            "Rename a subject, session, task or any other entity across "
+            "the whole dataset, including the references to it inside "
+            "IntendedFor, the scans tables and participants.tsv. You see "
+            "the full plan before anything moves."
+        )
+        self._rename_action.triggered.connect(self._on_rename)
+
+        self._entities_action = self._tools_menu.addAction(
+            "Add or remove an entity..."
+        )
+        self._entities_action.setToolTip(
+            "Give a recording an entity the schema allows it, or take an "
+            "optional one away. Only what the standard permits for those "
+            "files is offered, and the entity lands in the position the "
+            "standard puts it in. Acts on the tree selection."
+        )
+        self._entities_action.triggered.connect(
+            lambda: self._on_edit_entities(session_mode=False)
+        )
+
+        self._sessions_action = self._tools_menu.addAction("Sessions...")
+        self._sessions_action.setToolTip(
+            "Create a session for the selected recordings, or take them back "
+            "out of the one they are in. The scans table travels to the level "
+            "BIDS puts it at and every reference follows. Acts on the tree "
+            "selection."
+        )
+        self._sessions_action.triggered.connect(
+            lambda: self._on_edit_entities(session_mode=True)
+        )
+
+        self._delete_action = self._tools_menu.addAction("Delete...")
+        self._delete_action.setToolTip(
+            "Delete the selected recordings, datatypes or sessions. The "
+            "*_scans.tsv rows, the IntendedFor entries, a participants row "
+            "left describing nothing and any emptied folder go with them, as "
+            "one undoable step. Acts on the tree selection."
+        )
+        self._delete_action.triggered.connect(self._on_delete)
+
+        # Only meaningful for a dataset this tool did not convert, so it
+        # hides itself once the dataset carries a project bundle.
+        self._tools_menu.addSeparator()
+        self._adopt_action = self._tools_menu.addAction("Track changes")
+        self._adopt_action.setToolTip(
+            "This dataset was not converted here, so there is no record "
+            "of what it looked like before you started editing. Tracking "
+            "writes that baseline into .bidsmgr/ and changes nothing "
+            "else, so edits become reversible."
+        )
+        self._adopt_action.setVisible(False)
+        self._adopt_action.triggered.connect(self._on_adopt)
+
+        lay.addWidget(self._tools_btn)
+
         lay.addWidget(VSep())
 
         # Status chips — kept hidden until a report lands. Each chip
@@ -450,6 +619,9 @@ class EditorPanel(QWidget):
         self._hide_chips()
         # Enable dataset-level validation now that we have a root.
         self._validate_dataset_btn.setEnabled(True)
+        self._tools_btn.setEnabled(True)
+        self._refresh_deface_action()
+        self._refresh_adopt_button()
         if persist:
             from .app_settings import AppSettings
             AppSettings.remember_editor_bids_root(path)
@@ -632,11 +804,20 @@ class EditorPanel(QWidget):
             return
         allowed = self._allowed_severities()
         severities: dict[Path, str] = {}
+        counts: dict[Path, tuple[int, int]] = {}
         for fv in report.files:
             # Badge = worst ALLOWED issue on the file; clean / filtered-out
             # files get the green "ok" dot. So "errors only" leaves only error
             # files red and everything else green.
             issues = [i for i in fv.issues if i.severity in allowed]
+            # Mirrored findings are the same finding shown on the editable
+            # sidecar as well as on the data file. Counting both would double
+            # every number in the tree.
+            countable = [
+                i for i in issues if not getattr(i, "mirrored", False)
+            ]
+            n_err = sum(1 for i in countable if i.severity is Severity.ERR)
+            n_warn = sum(1 for i in countable if i.severity is Severity.WARN)
             if any(i.severity is Severity.ERR for i in issues):
                 value = "err"
             elif any(i.severity is Severity.WARN for i in issues):
@@ -646,7 +827,9 @@ class EditorPanel(QWidget):
             absolute = (root / fv.path).resolve() if not fv.path.is_absolute() \
                 else fv.path
             severities[absolute] = value
-        self._tree_pane.set_badges(severities)
+            if n_err or n_warn:
+                counts[absolute] = (n_err, n_warn)
+        self._tree_pane.set_badges(severities, counts)
 
     def _update_chips(self, report: ValidationReport) -> None:
         counts = report.counts
@@ -709,6 +892,23 @@ class EditorPanel(QWidget):
             return
         name = path.name.lower()
         root = self.current_root()
+        if name == "citation.cff":
+            # YAML rather than JSON, so the sidecar form cannot render it.
+            # It was the one dataset-level file that sent the user to a text
+            # editor.
+            self._citation_pane.set_file(path, root)
+            self._center_stack.setCurrentWidget(self._citation_pane)
+            self._validation_pane.set_current_file(path, root)
+            return
+        if name == ".bidsignore":
+            # Not a text file as far as a user is concerned: what matters is
+            # which files each pattern is hiding, which a text editor cannot
+            # say.
+            self._bidsignore_pane.set_root(root)
+            self._bidsignore_pane.set_report(self._report)
+            self._center_stack.setCurrentWidget(self._bidsignore_pane)
+            self._validation_pane.set_current_file(path, root)
+            return
         if name.endswith(".tsv") or name.endswith(".tsv.gz"):
             self._tsv_viewer.set_file(path, root)
             # Other panes get cleared so a future toggle back doesn't
@@ -775,7 +975,20 @@ class EditorPanel(QWidget):
             self._report, severity, self.current_root(), parent=self,
         )
         dlg.file_selected.connect(self.select_file_in_tree)
+        # The Fix buttons inside the listing go to the same place the
+        # validation pane's do. They used to be drawn and connected to
+        # nothing, so pressing one did nothing at all.
+        dlg.fix_requested.connect(self._on_fix_from_dialog)
         dlg.show()
+
+    def _on_fix_from_dialog(self, path: Path, field: str) -> None:
+        """Select the file, then route to the field, in that order.
+
+        The dialog lists files other than the one on screen, so the panes have
+        to be showing the right file before the field can be focused in it.
+        """
+        self.select_file_in_tree(path)
+        self._on_fix_requested(path, field)
 
     def select_file_in_tree(self, path: Path) -> None:
         """Select ``path`` in the BIDS tree (cascades to all panes).
@@ -805,6 +1018,639 @@ class EditorPanel(QWidget):
         # between validation and the click), fall back to loading
         # the sidecar / TSV viewer directly so the click still works.
         self._on_file_selected(path)
+
+    def _refresh_adopt_button(self) -> None:
+        """Offer tracking only while the open dataset lacks a project bundle."""
+        from ..project.adopt import is_managed
+
+        root = self.current_root()
+        self._adopt_action.setVisible(
+            root is not None and not is_managed(root)
+        )
+
+    def _on_adopt(self) -> None:
+        """Write the baseline that makes editing this dataset reversible."""
+        from ..project.adopt import NotABidsDataset, adopt
+
+        root = self.current_root()
+        if root is None:
+            return
+        answer = QMessageBox.question(
+            self, "Track changes to this dataset",
+            f"This will create a .bidsmgr folder inside\n{root}\n\n"
+            "and record what every file looks like right now, so edits made "
+            "from here can be undone. Nothing else in the dataset is touched, "
+            "and every BIDS tool ignores dot-folders, so validation is "
+            "unaffected.\n\nOn a large dataset this reads every file once.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
+            QMessageBox.StandardButton.Ok,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return
+        try:
+            result = adopt(root)
+        except NotABidsDataset as exc:
+            QMessageBox.warning(self, "Not a BIDS dataset", str(exc))
+            return
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Could not write",
+                f"{root} could not be written to, so the baseline was not "
+                f"recorded:\n\n{exc}",
+            )
+            return
+        self.log_message.emit(
+            f"tracking {result.files} file(s) in {result.root}"
+        )
+        self._refresh_adopt_button()
+        self._tree_pane.set_root(root)
+
+    def _on_rename(
+        self, entity: str = "", value: str = "", focus: str = "",
+    ) -> None:
+        """Rename an entity across the dataset, after showing the plan.
+
+        Called both from the toolbar with nothing preselected, and from the
+        tree's right-click menu with the entity the user clicked, which is
+        where the action is actually reached for: you notice a wrong subject
+        label while looking at the subject.
+
+        ``focus`` is that clicked path. It decides what starts TICKED, not
+        what the plan contains: the plan is still the whole dataset, so
+        widening the selection is a click rather than a restart.
+        """
+        from .rename_entity_dialog import RenameEntityDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dlg = RenameEntityDialog(
+            root, parent=self, entity=entity, value=value,
+            focus=Path(focus) if focus else None,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # Paths the panes are holding may no longer exist.
+        self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_edit_entities(
+        self,
+        targets: Optional[list] = None,
+        mode: str = "add",
+        session_mode: bool = False,
+    ) -> None:
+        """Add or remove an entity, or create or remove a session.
+
+        One dialog for both, because underneath they are one operation: a
+        session is an entity that happens to name a folder. Reached from the
+        Tools menu, where it acts on the tree selection, and from the tree's
+        right-click menu, which passes what was clicked.
+
+        The refresh afterwards is the same one a rename needs, and for the
+        same reason: files have moved, so every path a pane is holding may
+        name something that is no longer there.
+        """
+        from .edit_entities_dialog import EditEntitiesDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        if not chosen:
+            # Nothing picked means the dataset, which for Add is almost never
+            # what was meant. Say so rather than planning a rename of
+            # everything.
+            QMessageBox.information(
+                self, "Nothing selected",
+                "Select a subject, a session, a datatype folder or a "
+                "recording in the tree first. The change applies to what you "
+                "pick, and its sidecars and companion files travel with it.",
+            )
+            return
+        dlg = EditEntitiesDialog(
+            root, chosen, parent=self, mode=mode, session_mode=session_mode,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_delete(self, targets: Optional[list] = None) -> None:
+        """Delete recordings, datatypes or sessions, after showing the plan.
+
+        Reached from the Tools menu, where it acts on the tree selection, and
+        from the tree's right-click, which passes what was clicked. The
+        refresh afterwards is the one a rename needs, for a stronger reason:
+        every path a pane is holding may name a file that is now gone.
+        """
+        from .delete_dialog import DeleteDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        if not chosen:
+            QMessageBox.information(
+                self, "Nothing selected",
+                "Select a session, a datatype folder or a recording in the "
+                "tree first. Deleting acts on what you pick, and its "
+                "companion files go with it.",
+            )
+            return
+        dlg = DeleteDialog(root, chosen, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # Deliberately clears the centre pane before refreshing: the file it
+        # was showing is one of the things that may have just been deleted.
+        self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _refresh_deface_action(self) -> None:
+        """Grey the Deface entry out when it cannot run, and say why.
+
+        Disabled rather than hidden on purpose. A missing menu item reads as
+        "this tool cannot do that"; a greyed one whose tooltip names the
+        install command reads as what it is, which is the difference between a
+        user installing an extra and a user shipping a dataset with faces in
+        it because they assumed the feature did not exist.
+        """
+        reason = deface_run.unavailable_reason()
+        self._deface_action.setEnabled(reason is None)
+        if reason:
+            self._deface_action.setToolTip(reason)
+
+    def _on_deface(self, targets: Optional[list] = None) -> None:
+        """Remove faces from anatomical images, after showing which ones.
+
+        Reached from the Tools menu, where it acts on the whole dataset unless
+        the tree has a selection, and from the tree's right-click, which passes
+        what was clicked.
+
+        The images are rewritten in place, so the panes are cleared before the
+        refresh: whatever the viewer is holding may be one of the files that
+        just changed underneath it.
+        """
+        from .deface_dialog import DefaceDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+
+        reason = deface_run.unavailable_reason()
+        if reason:
+            QMessageBox.information(self, "Defacing is not available", reason)
+            return
+
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        dlg = DefaceDialog(root, chosen or None, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _reload_open_image(self) -> None:
+        """Re-read whatever the viewer is showing, if it changed underneath.
+
+        Defacing, stripping and restoring all rewrite files in place. The
+        viewer holds a decoded array, not the file, so it went on showing the
+        face until the user clicked away and back. Clearing first is what
+        forces the re-read: `set_file` with the path it already has is a
+        no-op as far as the pane is concerned.
+        """
+        current = self._nifti_viewer.current_file()
+        if current is None:
+            return
+        root = self.current_root()
+        if not Path(current).is_file():
+            # It was deleted or moved out from under the viewer.
+            self._nifti_viewer.set_file(None, None)
+            return
+        self._nifti_viewer.set_file(None, None)
+        self._nifti_viewer.set_file(Path(current), root)
+
+    def _on_compare_images(self, targets: Optional[list] = None) -> None:
+        """Two images side by side, whatever they are.
+
+        Takes the tree selection when there is one: two picked images open
+        straight away, one opens on the left with the right still to choose.
+        Needs no dataset, because comparing two files is not a dataset
+        operation, but passes the root when there is one so the captions can
+        show dataset-relative paths instead of bare names.
+        """
+        from .compare_dialog import open_compare
+
+        picked = targets or self._tree_pane.selected_paths()
+        dlg = open_compare(self, picked, root=self.current_root())
+        dlg.exec()
+
+    def _on_strip(self, targets: Optional[list] = None) -> None:
+        """Keep only the brain, writing a derivative rather than editing raw.
+
+        The same dialog as Deface, in its other mode: the two operations have
+        the same shape (preview, pick an engine, one undoable run) and differ
+        in what they keep and where the output goes.
+        """
+        from ..deface import engines as deface_engines
+        from .deface_dialog import DefaceDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        dlg = DefaceDialog(
+            root, chosen or None, parent=self,
+            kind=deface_engines.KIND_STRIP,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # A strip writes new files under derivatives/; an in-place one changes
+        # what the viewer is holding. Refresh either way.
+        self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_deface_compare(self, target=None) -> None:
+        """Show one image before and after defacing.
+
+        Reached from the Tools menu, where it takes whatever image the tree has
+        selected, and from the tree's right-click on a ``.nii``, which passes
+        the file. It deliberately opens even when there is no undefaced copy:
+        the dialog explains WHY there is none, and "defaced during conversion,
+        so one never existed" is the answer a user most needs to hear.
+        """
+        from .deface_compare import DefaceCompareDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+
+        picked = [Path(target)] if target else self._tree_pane.selected_paths()
+        images = [
+            Path(p) for p in picked
+            if Path(p).is_file() and Path(p).name.endswith((".nii", ".nii.gz"))
+        ]
+        if not images:
+            QMessageBox.information(
+                self, "Pick an image",
+                "Select a .nii or .nii.gz file in the tree first. Comparing "
+                "is per image, because defacing is.",
+            )
+            return
+
+        try:
+            rel = images[0].resolve().relative_to(Path(root).resolve()).as_posix()
+        except ValueError:
+            QMessageBox.information(
+                self, "Not in this dataset",
+                f"{images[0]} is outside {root}.",
+            )
+            return
+        DefaceCompareDialog(root, rel, parent=self).exec()
+
+    def _on_deface_revert(self, targets: Optional[list] = None) -> None:
+        """Restore defaced images from the copies that still have a face.
+
+        Acts on the tree selection when there is one, the whole dataset
+        otherwise, which is the same rule Deface uses. The dialog opens even
+        when nothing can be restored, because "these were defaced during
+        conversion, so no undefaced copy ever existed" is the answer the user
+        needs and an absent menu item does not give it.
+        """
+        from .deface_revert_dialog import DefaceRevertDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
+        dlg = DefaceRevertDialog(root, chosen or None, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # The images changed under whatever the viewer is holding.
+        self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_dashboard(self) -> None:
+        """What is in this dataset, counted.
+
+        Uses the report already in hand rather than revalidating: drawing a
+        summary is not a reason to re-run the validator over a whole dataset.
+        """
+        from .dashboard_dialog import DashboardDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dialog = DashboardDialog(root, report=self._report, parent=self)
+        dialog.file_selected.connect(self.select_file_in_tree)
+        dialog.show()
+
+    def _on_fixups(self) -> None:
+        """Open the dataset-wide repairs, then revalidate what changed."""
+        from .fixups_dialog import FixupsDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dlg = FixupsDialog(root, parent=self, report=self._report)
+        dlg.exec()
+        # Generating a file or moving citation fields changes what the
+        # validator would say, so the board must not keep showing the old
+        # answer.
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_accept_finding(self, path, rule_id: str, field: str) -> None:
+        """Record that a reviewer looked at a warning and kept it."""
+        from PyQt6.QtWidgets import QInputDialog
+
+        from ..editor.review import accept
+
+        root = self.current_root()
+        if root is None or path is None:
+            return
+        note, ok = QInputDialog.getText(
+            self, "Accept this warning",
+            f"Why is {rule_id} acceptable here?\n\nThe note is stored in the "
+            "dataset, so whoever reviews it next sees your reasoning.",
+        )
+        if not ok:
+            return
+        try:
+            # The acceptance is keyed by this string and looked up again on
+            # the next validation run, so it has to be spelled the same way
+            # everywhere. POSIX, as BIDS does. See editor/rename.py::_rel.
+            rel = Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
+        except (ValueError, OSError):
+            rel = Path(path).as_posix()
+        accept(root, file=rel, rule_id=rule_id, field=field, note=note)
+        self._validation_pane.reload_acceptances()
+        self.log_message.emit(f"accepted {rule_id} in {rel}")
+
+    def _on_explain_field(self, field: str) -> None:
+        """Say which file the value in front of the user is actually in."""
+        from ..editor import inheritance as inh
+
+        root = self.current_root()
+        current = self._sidecar_form.current_file()
+        if root is None or current is None:
+            return
+        sources = inh.explain(root, current, field)
+        if not sources:
+            QMessageBox.information(
+                self, field,
+                f"No sidecar that applies to this file states {field}. What "
+                "you see is the form offering the field, not a value.",
+            )
+            return
+        lines = []
+        for s in sources:
+            where = "this file" if s.level == 0 else f"{s.level} level(s) up"
+            mark = "  <- used" if s.winner else ""
+            lines.append(f"{s.rel}\n    {where}: {s.value!r}{mark}")
+        extra = ""
+        if len(sources) > 1:
+            extra = (
+                "\n\nThe nearest one wins. The others are shadowed, which "
+                "is legal but usually not what anyone intended."
+            )
+        elif sources[0].level > 0:
+            extra = (
+                "\n\nThis value is inherited. Editing it here writes a "
+                "second copy into this file, and the two can then disagree."
+            )
+        QMessageBox.information(
+            self, f"Where {field} comes from", "\n\n".join(lines) + extra,
+        )
+
+    def _on_apply_field_to_others(self, field: str) -> None:
+        """State the field the user is editing across other files too."""
+        from ..editor import bulk_edit as be
+        from .bulk_field_dialog import BulkFieldDialog
+
+        root = self.current_root()
+        current = self._sidecar_form.current_file()
+        if root is None or current is None:
+            return
+        # Offer the value the user has in front of them as the starting point.
+        cache = getattr(self._sidecar_form, "_json_cache", None) or {}
+        dlg = BulkFieldDialog(
+            root, field,
+            anchor=current,
+            initial_value=cache.get(field),
+            title=f"Apply {field} to other files",
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dlg.selected()
+        if not chosen:
+            return
+        result = be.apply_value(
+            root, chosen, field, dlg.value(),
+            label=f"Set {field} in {len(chosen)} file(s)",
+        )
+        self._report_bulk_result(result)
+
+    def _offer_type_fix(self, root, group, paths) -> bool:
+        """A value of the wrong shape is repaired, not re-asked for."""
+        from ..editor import bulk_edit as be
+
+        plan = be.plan_coercions(root, group.field, paths=paths)
+        if not plan:
+            return False
+        lines = "\n".join(
+            f"  {c.rel}\n      {c.current_text()}" for c in plan[:12]
+        )
+        more = f"\n  and {len(plan) - 12} more" if len(plan) > 12 else ""
+        answer = QMessageBox.question(
+            self, f"Fix the type of {group.field}",
+            f"{len(plan)} file(s) state {group.field} in a shape the standard "
+            f"does not declare. Each value below would be converted, keeping "
+            f"what it says:\n\n{lines}{more}\n\nA value that cannot be "
+            "converted is left exactly as it is.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
+            QMessageBox.StandardButton.Ok,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            return True
+        self._report_bulk_result(be.apply_coercions(root, plan, group.field))
+        return True
+
+    def _offer_tabular_fix(self, root, group, paths) -> bool:
+        """Missing column, wrong column type, wrong column order."""
+        from ..editor import tsv_edit as te
+
+        tsvs = [p for p in paths if p.name.endswith(".tsv")]
+        if not tsvs or not group.field:
+            return False
+        rule = (group.rule_id or "").upper()
+
+        if "COLUMN_MISSING" in rule:
+            plan = te.plan_add_column(root, tsvs, group.field)
+            actionable = [c for c in plan if c.applicable]
+            if not actionable:
+                return False
+            answer = QMessageBox.question(
+                self, f"Add the {group.field} column",
+                f"{len(actionable)} table(s) would gain a {group.field!r} "
+                f"column filled with {te.NA!r}, which is what BIDS uses for a "
+                "value that is not available.",
+                QMessageBox.StandardButton.Cancel
+                | QMessageBox.StandardButton.Ok,
+                QMessageBox.StandardButton.Ok,
+            )
+            if answer == QMessageBox.StandardButton.Ok:
+                written, failed = te.apply_add_column(
+                    root, actionable, group.field,
+                )
+                self._report_tabular(written, failed)
+            return True
+
+        if "ORDER" in rule:
+            plan = te.plan_reorder(root, tsvs)
+            actionable = [c for c in plan if c.applicable]
+            if not actionable:
+                return False
+            answer = QMessageBox.question(
+                self, "Reorder columns",
+                f"{len(actionable)} table(s) would have their known columns "
+                "put into the standard's order. No cell changes value; "
+                "columns the standard does not know keep their order at the "
+                "end.",
+                QMessageBox.StandardButton.Cancel
+                | QMessageBox.StandardButton.Ok,
+                QMessageBox.StandardButton.Ok,
+            )
+            if answer == QMessageBox.StandardButton.Ok:
+                self._report_tabular(*te.apply_reorder(root, actionable))
+            return True
+
+        if "TYPE" in rule or "VALUE" in rule:
+            plan = te.plan_coerce_column(root, tsvs, group.field)
+            actionable = [c for c in plan if c.applicable]
+            if not actionable:
+                return False
+            detail = "\n".join(f"  {c.rel}: {c.detail}" for c in actionable[:12])
+            answer = QMessageBox.question(
+                self, f"Fix the {group.field} column",
+                f"Only the cells that do not match the declared type are "
+                f"touched:\n\n{detail}",
+                QMessageBox.StandardButton.Cancel
+                | QMessageBox.StandardButton.Ok,
+                QMessageBox.StandardButton.Ok,
+            )
+            if answer == QMessageBox.StandardButton.Ok:
+                self._report_tabular(
+                    *te.apply_coerce_column(root, actionable, group.field)
+                )
+            return True
+        return False
+
+    def _report_tabular(self, written, failed) -> None:
+        if failed:
+            QMessageBox.warning(
+                self, "Some tables were not written",
+                "\n".join(f"{p}: {why}" for p, why in failed[:6]),
+            )
+        else:
+            self.log_message.emit(f"{len(written)} table(s) written")
+        if written and self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_fix_group_requested(self, group) -> None:
+        """Fix one finding in every file it fired on.
+
+        The grouped view knows exactly which files produced the finding, so
+        they are passed straight through as the candidate list rather than
+        re-derived from a scope: the question is not "where else could this
+        apply" but "which of these do you want changed".
+        """
+        from ..editor import bulk_edit as be
+        from .bulk_field_dialog import BulkFieldDialog
+
+        root = self.current_root()
+        if root is None or not group.field:
+            return
+        # A finding is recorded against the data file; the field is edited in
+        # its sidecar. ``candidates`` follows that hop for us.
+        paths = [root / p for p in group.files]
+
+        # The repair depends on what is wrong, not just on which field. A
+        # value of the wrong TYPE is repaired from the value already there; a
+        # missing column is added; a value nobody has stated has to be asked
+        # for. Offering "type a value" for all three would invite a user to
+        # overwrite a number that was only badly formatted.
+        if self._offer_tabular_fix(root, group, paths):
+            return
+        if self._offer_type_fix(root, group, paths):
+            return
+
+        cands = be.candidates(root, group.field, paths=paths)
+        if not cands:
+            QMessageBox.information(
+                self, "Nothing to fix",
+                "No editable sidecar was found for those files.",
+            )
+            return
+        dlg = BulkFieldDialog(
+            root, group.field,
+            candidates=cands,
+            title=f"Fix {group.field} in {len(cands)} file(s)",
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dlg.selected()
+        if not chosen:
+            return
+        result = be.apply_value(
+            root, chosen, group.field, dlg.value(),
+            label=f"Fix {group.field} in {len(chosen)} file(s)",
+        )
+        self._report_bulk_result(result)
+
+    def _report_bulk_result(self, result) -> None:
+        """Tell the user what was written, and revalidate so it shows."""
+        parts = [f"{len(result.written)} file(s) written"]
+        if result.skipped:
+            parts.append(f"{len(result.skipped)} already correct")
+        if result.failed:
+            parts.append(f"{len(result.failed)} failed")
+        msg = ", ".join(parts) + "."
+        if result.failed:
+            msg += "\n\n" + "\n".join(
+                f"{p}: {why}" for p, why in result.failed[:5]
+            )
+            QMessageBox.warning(self, "Some files were not written", msg)
+        else:
+            self.log_message.emit(msg)
+        if result.written:
+            # The sidecar on screen may be one of the files just changed.
+            current = self._sidecar_form.current_file()
+            if current is not None and current in result.written:
+                self._sidecar_form.set_file(
+                    current, self.current_root(), self._report,
+                )
+            self.start_dataset_validation()
 
     def _on_fix_requested(self, path: Path, field: str) -> None:
         """A user clicked a ValMessage's fix button.
@@ -980,6 +1826,8 @@ class EditorPanel(QWidget):
         self._sidecar_form.repaint_for_palette(pal)
         self._tsv_viewer.repaint_for_palette(pal)
         self._nifti_viewer.repaint_for_palette(pal)
+        self._bidsignore_pane.repaint_for_palette(pal)
+        self._citation_pane.repaint_for_palette(pal)
         self._recording_viewer.repaint_for_palette(pal)
         self._validation_pane.repaint_for_palette(pal)
         for frame in getattr(self, "_panel_frames", []):
@@ -991,6 +1839,7 @@ class EditorPanel(QWidget):
         icons.apply_button(self._redo_btn, "redo")
         icons.apply_button(self._validate_dataset_btn, "dataset")
         icons.apply_button(self._strict_btn, "strict")
+        icons.apply_button(self._tools_btn, "tools")
         # The two partial-validate buttons get their tint from the
         # current tree selection (green when their kind is selected,
         # accent blue otherwise) — defer to the sync helper so the

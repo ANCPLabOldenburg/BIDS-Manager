@@ -75,6 +75,9 @@ NAMES: dict[str, tuple[str, str]] = {
     # ---- Converter toolbar ----
     "scan":         ("mdi6.magnify-scan",             "accent"),
     "settings":     ("mdi6.cog-outline",              "text"),
+    # A toolbox, not the settings cog: they are different things and
+    # sharing a glyph made the Tools menu read as a second Settings.
+    "tools":        ("mdi6.toolbox-outline",          "accent"),
     "run":          ("mdi6.play",                     "success"),
     "stop":         ("mdi6.stop-circle-outline",      "error"),
     "bulk_edit":    ("mdi6.pencil-outline",           "text"),
@@ -126,6 +129,12 @@ NAMES: dict[str, tuple[str, str]] = {
     "check":        ("mdi6.check",                    "success"),
 
     # ---- Collapsible / detachable panel frame ----
+    # Folding a whole tree, as opposed to one panel. Double chevrons, because
+    # at 15 px they are the only pair that stays legible and keeps its
+    # direction: the "unfold" glyphs shrink to a smudge and the "collapse-all
+    # / expand-all" pair is nearly the same drawing twice.
+    "tree_collapse":  ("mdi6.chevron-double-up",      "dim"),
+    "tree_expand":    ("mdi6.chevron-double-down",    "dim"),
     "panel_collapse": ("mdi6.chevron-down",           "text"),
     "panel_expand":   ("mdi6.chevron-right",          "text"),
     "chevron_left":   ("mdi6.chevron-left",           "text"),

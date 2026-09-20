@@ -2,9 +2,20 @@
 
 The spec is a plain JSON document (our own layout, not tied to any external
 tool). The convert and metadata verbs read it via ``--recording-meta``; when no
-spec is supplied they fall back to :func:`default_spec`, which preserves the
-historical behaviour of writing ``PowerLineFrequency = 50`` by default while
-keeping that value visible and overridable instead of buried in a CLI flag.
+spec is supplied they fall back to :func:`default_spec`, which is EMPTY.
+
+It did not used to be. It carried ``PowerLineFrequency = 50``, inherited from
+the old ``--line-freq`` flag, and that number reached the sidecar of every
+recording whose header did not state one. Fifty hertz is Europe. A recording
+made in the US, Canada, Japan or Brazil is sixty, and the tool asserted
+otherwise in a BIDS-REQUIRED field, in a way indistinguishable from a
+measurement somebody took. Notch-filtering at 50 on 60 Hz data leaves the
+artefact exactly where it was.
+
+Nothing replaces it, because nothing needs to: mne-bids writes
+``PowerLineFrequency: "n/a"`` of its own accord when ``raw.info["line_freq"]``
+is unset, which is valid BIDS (the schema types the field ``anyOf`` number or
+the literal ``"n/a"``) and is the true statement.
 """
 
 from __future__ import annotations
@@ -14,11 +25,6 @@ from pathlib import Path
 from typing import Optional
 
 from .models import AcquisitionSpec, RecordingMetaSpec
-
-# Historical default written when nothing else specifies a power-line
-# frequency, preserved so removing the old --line-freq flag does not silently
-# change the default output.
-DEFAULT_POWER_LINE_FREQ = 50.0
 
 # Suffix for the scaffold the scan verb writes next to an inventory TSV
 # (``<inventory>.tsv.recording_meta.json``). The convert/metadata verbs
@@ -33,8 +39,14 @@ def scaffold_sidecar_path(tsv_path) -> Path:
     return p.with_name(p.name + RECORDING_META_SIDECAR)
 
 
-def default_spec(power_line_freq: Optional[float] = DEFAULT_POWER_LINE_FREQ) -> RecordingMetaSpec:
-    """A spec with no enrichment beyond the default power-line frequency."""
+def default_spec(power_line_freq: Optional[float] = None) -> RecordingMetaSpec:
+    """An EMPTY spec: no enrichment, and no power-line frequency.
+
+    ``power_line_freq`` stays a parameter because a caller that genuinely
+    knows the answer should be able to say so. What changed is the DEFAULT:
+    it is ``None``, so a value reaches the sidecar only when a header, an
+    inventory cell or a template supplied one.
+    """
     return RecordingMetaSpec(defaults=AcquisitionSpec(power_line_freq=power_line_freq))
 
 
@@ -54,4 +66,4 @@ def dump_spec(spec: RecordingMetaSpec) -> str:
     return json.dumps(spec.model_dump(exclude_none=True), indent=2) + "\n"
 
 
-__all__ = ["DEFAULT_POWER_LINE_FREQ", "default_spec", "load_spec", "dump_spec"]
+__all__ = ["default_spec", "load_spec", "dump_spec"]

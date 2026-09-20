@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import bidsval
+from ..vendor import bidsval
 
 import bidsmgr
 
@@ -142,7 +142,7 @@ def validate_file(
     if file_path.exists() and any(
         i.code == "FILE_NOT_FOUND" for i in bv_verdict.issues
     ):
-        from bidsval import FileVerdict as _BvFileVerdict
+        from ..vendor.bidsval import FileVerdict as _BvFileVerdict
         bv_verdict = _BvFileVerdict(path=rel)
 
     return adapter.to_bm_file_verdict(bv_verdict, bids_root, flag_todos=flag_todos)

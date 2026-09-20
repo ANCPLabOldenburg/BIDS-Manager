@@ -73,6 +73,45 @@ QToolTip {
     font-size: 11px;
 }
 
+/* ---------- Checkboxes and radio buttons (global) ----------
+ * Unstyled, these fall back to the platform control, which does not follow
+ * the palette: on macOS a plain unchecked QCheckBox paints a light grey
+ * block that reads as disabled, or as already ticked, against the dark
+ * background. The two checkable TREES were already styled by object name,
+ * so the ones that were missed stood out beside them.
+ *
+ * Filled accent for checked, matching the trees, rather than a tick glyph:
+ * QSS cannot draw one without shipping an image, and the flat filled square
+ * is the convention the rest of this stylesheet already uses. */
+QCheckBox::indicator,
+QRadioButton::indicator {
+    width: 13px; height: 13px;
+    border: 1px solid $border;
+    background: $bg;
+    border-radius: 3px;
+}
+QRadioButton::indicator { border-radius: 7px; }
+
+QCheckBox::indicator:hover,
+QRadioButton::indicator:hover { border: 1px solid $accent; }
+
+QCheckBox::indicator:checked,
+QRadioButton::indicator:checked {
+    background: $accent;
+    border: 1px solid $accent;
+}
+QCheckBox::indicator:indeterminate {
+    background: $accent_bg;
+    border: 1px solid $accent;
+}
+QCheckBox::indicator:disabled,
+QRadioButton::indicator:disabled {
+    background: $surface2;
+    border: 1px solid $surface2;
+}
+QCheckBox:disabled,
+QRadioButton:disabled { color: $muted; }
+
 /* ---------- Dropdowns (global, rounded + stylish) ----------
  * Every plain QComboBox gets a rounded, themed box + a rounded popup list
  * with rounded item selection (mirroring the project dropdown look).
@@ -434,10 +473,22 @@ QLabel#pane-h5 {
 }
 
 /* Placeholder / hint labels used in empty panes and stub tabs. They
- * follow the dim palette token so dark↔light toggle refreshes them. */
+ * follow the dim palette token so dark↔light toggle refreshes them.
+ *
+ * The generous padding is deliberate and belongs to the EMPTY-PANE case:
+ * a "nothing selected" message centred in a large blank area. It is wrong
+ * for a status line inside a dialog, where 24px top and bottom pushes the
+ * sections apart; that is what #dlg-hint below is for. */
 QLabel#pane-hint {
     color: $dim;
     padding: 24px;
+    font-size: 11px;
+}
+
+/* The same quiet voice, sized for a line of running text: an explanation
+ * under a section heading, or a status line in a dialog footer. */
+QLabel#dlg-hint {
+    color: $dim;
     font-size: 11px;
 }
 
@@ -1267,3 +1318,136 @@ QWidget#nifti-3d-controls {
     background: $surface2;
     border: none;
 }
+
+/* ---------- Editor automation: fix-ups, bulk edit, citation, ignore ----------
+   Same QSS-only pattern as the sidecar rows above: every colour is a palette
+   token, so a dark/light swap is the app-wide re-apply and no widget needs a
+   repaint listener. Anything that cannot be reached this way (an item view's
+   per-row foreground) is set in code and re-rendered by the pane's
+   ``repaint_for_palette``. */
+
+/* A scroll surface and its content widget need their own background rule:
+   a plain QWidget does not inherit the parent's QSS background, and on a
+   theme swap it keeps the brush it was first polished with. Same treatment
+   as #issue-dialog-scroll / #issue-dialog-body above. */
+QScrollArea#cff-scroll, QWidget#cff-body { background: $surface; border: none; }
+QPlainTextEdit#ent-input {
+    background: $bg; color: $text;
+    border: 1px solid $input_border; border-radius: 4px; padding: 3px 6px;
+}
+QPlainTextEdit#ent-input:focus { border: 1px solid $accent; }
+
+/* The plain-language note under a finding: quieter than the message it
+   explains, louder than the schema path below it. */
+QLabel#val-explanation { color: $muted; font-size: 11px; }
+
+/* Section heading inside a dialog (Fix ups). */
+QLabel#dlg-section-title { color: $text; font-weight: 600; }
+
+/* A row the action does not apply to, in the bulk-edit candidate list. */
+QCheckBox#candidate-off { color: $muted; }
+
+/* CITATION.cff form: the field name, coloured by what the format asks of it,
+   and the note saying which BIDS field it was derived from. */
+QLabel#cff-key-required    { color: $error;   font-weight: 600; }
+QLabel#cff-key-recommended { color: $warning; font-weight: 600; }
+QLabel#cff-key-optional    { color: $muted;   font-weight: 600; }
+QLabel#cff-source          { color: $muted; }
+
+/* The rename dry run: every file the rename would move, tickable, grouped by
+   the folder it lives in. Monospace because a plan is a list of names, and
+   lining "sub-02_ses-post_T2w" up under "sub-01_ses-post_T2w" is what makes
+   the difference visible at a glance. The checkbox styling matches the filter
+   tree's so the two read as the same control. */
+QTreeWidget#check-tree {
+    background: $bg;
+    color: $text;
+    border: 1px solid $input_border;
+    border-radius: 6px;
+    font-family: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
+    font-size: 11px;
+}
+QTreeWidget#check-tree::item { padding: 2px 0; }
+QTreeWidget#check-tree::indicator {
+    width: 13px; height: 13px;
+    border: 1px solid $border;
+    background: $bg;
+    border-radius: 3px;
+}
+QTreeWidget#check-tree::indicator:checked {
+    background: $accent;
+    border: 1px solid $accent;
+}
+QTreeWidget#check-tree::indicator:indeterminate {
+    background: $accent_bg;
+    border: 1px solid $accent;
+}
+
+/* ---------------------------------------------------------------------------
+ * Dashboard
+ *
+ * A headline number and its caption, and the chips saying which of the files
+ * that describe a dataset are present. Sizes in px so they follow the font
+ * scale, like everything else painted rather than laid out.
+ * ------------------------------------------------------------------------ */
+QLabel#stat-value-text { color: $text;    font-size: 20px; font-weight: 600; }
+QLabel#stat-value-err  { color: $error;   font-size: 20px; font-weight: 600; }
+QLabel#stat-value-warn { color: $warning; font-size: 20px; font-weight: 600; }
+QLabel#stat-caption {
+    color: $dim;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+QLabel#dash-have {
+    color: $success;
+    background: $success_bg;
+    border: 1px solid $success_border;
+    border-radius: 8px;
+    padding: 2px 8px;
+    font-size: 10px;
+}
+
+/* The small word that says what the next line of a finding IS. The parts used
+   to run together: a rule id, a message and a schema path stacked with nothing
+   telling them apart. */
+QLabel#val-caption {
+    color: $dim;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+}
+
+/* The fold / unfold pair in the dataset tree header. One control, so one
+   rounded outline with a divider between the halves rather than two separate
+   buttons that happen to sit next to each other. */
+QWidget[navGroup="true"] { background: transparent; }
+QPushButton#tree-nav-left, QPushButton#tree-nav-right {
+    background: $surface2;
+    border: 1px solid $input_border;
+    padding: 0px;
+    min-width: 0;
+}
+QPushButton#tree-nav-left {
+    border-top-left-radius: 5px;
+    border-bottom-left-radius: 5px;
+    border-right: none;
+}
+QPushButton#tree-nav-right {
+    border-top-right-radius: 5px;
+    border-bottom-right-radius: 5px;
+}
+QPushButton#tree-nav-left:hover, QPushButton#tree-nav-right:hover {
+    background: $surface3;
+    border-color: $accent_border;
+}
+QPushButton#tree-nav-left:pressed, QPushButton#tree-nav-right:pressed {
+    background: $accent_bg;
+}
+QPushButton#tree-nav-right:disabled {
+    background: $surface;
+    border-color: $border;
+}
+
+/* The validation pane's own severity filter row. */
+QFrame#val-filter-row { background: transparent; border: none; }

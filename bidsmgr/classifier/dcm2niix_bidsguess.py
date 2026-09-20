@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -86,14 +87,27 @@ def find_dcm2niix() -> Path:
 
     Prefers the binary shipped with the ``dcm2niix`` Python package (a pinned
     pip dependency), falling back to ``$PATH``.
+
+    The package's own ``bin_path`` is built as ``<pkgdir>/dcm2niix`` with no
+    extension on every platform, but its Windows wheel ships ``dcm2niix.exe``.
+    So on Windows the packaged-binary branch never matches and the lookup
+    depends entirely on the ``$PATH`` fallback finding the console-script shim
+    the wheel drops in ``Scripts/``. That works from an activated venv and fails
+    without one — a bundled or embedded interpreter, a desktop shortcut, or
+    plain ``<venv>/Scripts/python.exe -m bidsmgr...`` — and the failure is a
+    hard ``FileNotFoundError`` that skips the BidsGuess classifier and the probe
+    conversion both. Hence the suffix sweep: find the binary the wheel actually
+    shipped, rather than depending on how the process was launched.
     """
 
     try:
         import dcm2niix as _pkg  # type: ignore
 
         bin_path = Path(getattr(_pkg, "bin_path", "") or "")
-        if bin_path.exists():
-            return bin_path
+        if bin_path.name:
+            for candidate in _binary_candidates(bin_path):
+                if candidate.is_file():
+                    return candidate
     except ImportError:
         pass
 
@@ -104,6 +118,31 @@ def find_dcm2niix() -> Path:
         "dcm2niix executable not found. Install the ``dcm2niix`` pip package "
         "or place the binary on PATH."
     )
+
+
+def _binary_candidates(bin_path: Path) -> list[Path]:
+    """``bin_path`` and the executable suffixes Windows spells it with.
+
+    ``PATHEXT`` is what ``shutil.which`` consults, so honouring it here keeps
+    the packaged-binary branch and the ``$PATH`` branch looking for the same
+    set of names.
+    """
+    if os.name != "nt":
+        return [bin_path]
+    suffixes = [
+        ext
+        for ext in os.environ.get("PATHEXT", ".EXE;.BAT;.CMD;.COM").split(os.pathsep)
+        if ext.strip()
+    ]
+    if ".EXE" not in {s.upper() for s in suffixes}:
+        suffixes.insert(0, ".EXE")
+    # The wheel ships a lowercase ``dcm2niix.exe`` and PATHEXT is conventionally
+    # uppercase. Windows and macOS both match case-insensitively, so ``.EXE``
+    # would resolve and we would return a path naming a file that exists under
+    # no such spelling: right binary, wrong name in every log and error after
+    # it. Try the spelling the wheel actually ships first.
+    suffixes = [".exe"] + [s for s in suffixes if s.lower() != ".exe"]
+    return [bin_path] + [bin_path.with_name(bin_path.name + s) for s in suffixes]
 
 
 def _run_dcm2niix_sidecars(

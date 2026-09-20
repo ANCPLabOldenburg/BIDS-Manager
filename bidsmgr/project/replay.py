@@ -46,7 +46,6 @@ def replay(events: Iterable[Event]) -> ProjectState:
     or split into time-windowed slices) should still be replayable.
     """
 
-    state = ProjectState()
     count = 0
 
     entity_overrides: dict[str, dict[str, "str | None"]] = {}

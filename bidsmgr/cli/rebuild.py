@@ -96,7 +96,7 @@ def _print_summary(
     if dry_run:
         print("  (dry-run — no file written)")
     if report.diffs:
-        print(f"\n  Per-row diff (first 30):")
+        print("\n  Per-row diff (first 30):")
         for d in report.diffs[:30]:
             before = d["before"][:80] + ("…" if len(d["before"]) > 80 else "")
             after = d["after"][:80] + ("…" if len(d["after"]) > 80 else "")

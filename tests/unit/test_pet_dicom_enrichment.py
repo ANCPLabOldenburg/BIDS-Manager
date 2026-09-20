@@ -22,14 +22,33 @@ from bidsmgr.inventory.pet_dicom_meta import (
     dicom_sidecar_fields,
     enrich_pet_sidecar,
 )
+from tests.fixtures import sample_data
+from tests.fixtures.data_root import dataset
 
-PHANTOMS = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/PET_DICOMS"
-    "/PN000001/OpenNeuroPET-Phantoms/sourcedata"
-)
+# The PUBLISHED sample carries real PET DICOM from one scanner, and any
+# machine with a network can fetch it. What most of these tests assert is that
+# enrichment reads A real header correctly, not that it handles a particular
+# vendor, so they now run everywhere rather than on the one laptop holding the
+# phantom set.
+SAMPLE_DICOMS = sample_data.pet_dicom_dir()
+
+# The lab's multi-vendor phantom set, needed for exactly one thing here: the
+# Philips Gemini series that makes pet2bids crash. There is no published
+# example of a file that breaks them.
+PHANTOMS = dataset("PET_DICOMS", "PN000001", "OpenNeuroPET-Phantoms", "sourcedata")
+
 real_pet = pytest.mark.skipif(
-    os.environ.get("BIDS_MANAGER_REAL_PET_DATA") != "1" or not PHANTOMS.is_dir(),
-    reason="needs BIDS_MANAGER_REAL_PET_DATA=1 and the OpenNeuroPET phantom set",
+    SAMPLE_DICOMS is None,
+    reason="the published PET sample could not be fetched (offline, empty cache)",
+)
+
+vendor_specific = pytest.mark.skipif(
+    os.environ.get("BIDS_MANAGER_REAL_PET_DATA") != "1"
+    or PHANTOMS is None or not PHANTOMS.is_dir(),
+    reason=(
+        "needs the multi-vendor OpenNeuroPET phantom set: the Philips Gemini "
+        "series that crashes pet2bids has no published example"
+    ),
 )
 
 
@@ -201,7 +220,7 @@ def test_timezero_is_read_from_the_header(tmp_path: Path) -> None:
     sidecar = tmp_path / "sub-001_pet.json"
     sidecar.write_text(json.dumps({"Manufacturer": "GE"}), encoding="utf-8")
 
-    added = enrich_pet_sidecar(sidecar, _first_dicom(PHANTOMS / "GeneralElectricAdvance-NIMH"))
+    added = enrich_pet_sidecar(sidecar, _first_dicom(SAMPLE_DICOMS))
     assert "TimeZero" in added
     assert json.loads(sidecar.read_text(encoding="utf-8"))["TimeZero"]
 
@@ -218,7 +237,7 @@ def test_what_we_already_wrote_is_never_overwritten(tmp_path: Path) -> None:
         json.dumps({"TracerRadionuclide": "F18", "Units": "Bq/mL"}),
         encoding="utf-8",
     )
-    enrich_pet_sidecar(sidecar, _first_dicom(PHANTOMS / "GeneralElectricAdvance-NIMH"))
+    enrich_pet_sidecar(sidecar, _first_dicom(SAMPLE_DICOMS))
 
     written = json.loads(sidecar.read_text(encoding="utf-8"))
     assert written["TracerRadionuclide"] == "F18"
@@ -234,11 +253,11 @@ def test_nothing_outside_the_schema_is_added(tmp_path: Path) -> None:
     sidecar = tmp_path / "sub-001_pet.json"
     sidecar.write_text("{}", encoding="utf-8")
 
-    for name in enrich_pet_sidecar(sidecar, _first_dicom(PHANTOMS / "GeneralElectricAdvance-NIMH")):
+    for name in enrich_pet_sidecar(sidecar, _first_dicom(SAMPLE_DICOMS)):
         assert name in declared, f"{name} is not a field BIDS declares for PET"
 
 
-@real_pet
+@vendor_specific
 def test_a_series_that_crashes_them_still_enriches_quietly(tmp_path: Path) -> None:
     """Their DICOM path dies on the Philips Gemini phantom, a published file.
 

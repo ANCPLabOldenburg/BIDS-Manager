@@ -33,9 +33,24 @@ def test_empty_spec_is_valid_and_additive():
     assert spec.overrides == {}
 
 
-def test_default_spec_preserves_50hz_default():
-    spec = default_spec()
-    assert spec.defaults.power_line_freq == 50.0
+def test_default_spec_invents_no_power_line_frequency():
+    """It used to return 50 Hz, and that was a guess dressed as a measurement.
+
+    Fifty is Europe. A recording made in the US, Canada, Japan or Brazil is
+    sixty, and the old default reached the sidecar of every recording whose
+    header did not state one, in a BIDS-REQUIRED field, indistinguishable from
+    a number somebody had actually checked.
+
+    Nothing replaces it: mne-bids writes ``PowerLineFrequency: "n/a"`` when
+    ``raw.info["line_freq"]`` is unset, which the schema permits and which is
+    true.
+    """
+    assert default_spec().defaults.power_line_freq is None
+
+
+def test_a_caller_that_knows_can_still_say_so():
+    """The parameter stays; only the default changed."""
+    assert default_spec(60.0).defaults.power_line_freq == 60.0
 
 
 def test_common_manufacturers_exported_pure_data():

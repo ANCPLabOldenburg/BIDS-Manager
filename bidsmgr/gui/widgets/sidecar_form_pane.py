@@ -38,15 +38,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
 import copy
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -67,6 +69,16 @@ log = logging.getLogger(__name__)
 # Sentinel used to distinguish "not present in JSON" from "present with
 # value None" when checking whether a commit is a no-op.
 _UNSET: Any = object()
+
+# Which fields both views render. The BIDS form and the Tree view used to
+# answer two different questions without saying so: the form offered every
+# field the schema declares for the datatype and the tree rendered the file,
+# so the same sidecar showed 130 rows in one and 90 in the other. Both now
+# render the same set and this names it.
+SCOPE_ALL = "all"          # what the file states + what the standard declares
+SCOPE_PRESENT = "present"  # only what the file states
+SCOPE_ABSENT = "absent"    # only what is declared and missing
+FIELD_SCOPES = (SCOPE_ALL, SCOPE_PRESENT, SCOPE_ABSENT)
 
 
 # --------------------------------------------------------------------------
@@ -103,6 +115,34 @@ def _python_value_kind(val: Any) -> str:
     if isinstance(val, dict):
         return "object"
     return "string"
+
+
+def _schema_specs(verdict, current_file) -> dict:
+    """What the standard declares about each field of this kind of file.
+
+    Keyed by field name, so a row can be given a control that matches the
+    field's actual type, vocabulary and unit. Returns an empty mapping rather
+    than raising when the file is not a kind the schema knows: a user is
+    still entitled to keep a key the standard has never heard of, and it gets
+    the plain text box.
+    """
+    from ...metadata.template_plan import as_template_field
+    from ...schema import dataset_description_fields, sidecar_fields
+
+    try:
+        if current_file is not None and \
+                current_file.name == "dataset_description.json":
+            specs = dataset_description_fields()
+        elif verdict is not None and verdict.datatype and verdict.suffix:
+            specs = sidecar_fields(verdict.datatype, verdict.suffix)
+        else:
+            return {}
+    except Exception as exc:  # noqa: BLE001 - a form must still render
+        log.debug("no schema specs available: %s", exc)
+        return {}
+    # Converted to the shape the shared control builder takes, which is
+    # also the shape the metadata templates use.
+    return {spec.name: as_template_field(spec) for spec in specs}
 
 
 def _format_value(field: SidecarField) -> tuple[str, str]:
@@ -285,6 +325,11 @@ class SidecarFormPane(QWidget):
     dirty_changed = pyqtSignal(int)  # number of fields changed since load
     # Emitted when undo/redo availability changes (Editor toolbar syncs).
     history_changed = pyqtSignal()
+    # A row asked to state its field across more than one file. Carries
+    # the field name; the host owns the dataset root and the picker.
+    apply_to_others_requested = pyqtSignal(str)
+    # A row asked where its value is actually stated.
+    explain_requested = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -311,7 +356,25 @@ class SidecarFormPane(QWidget):
         # Which view is currently shown — restored from AppSettings so
         # the user's pick survives launches.
         from ..app_settings import AppSettings
-        self._view_mode: str = AppSettings.load().editor_sidecar_view
+        _s = AppSettings.load()
+        self._view_mode: str = _s.editor_sidecar_view
+        # Which fields both views show. See ``SCOPE_*`` below.
+        self._field_scope: str = _s.editor_field_scope
+
+        # Save as you go. A field commits on focus-out or Enter, and the
+        # commits are coalesced so a burst of typing is one write rather than
+        # one per keystroke: a half-typed value should never reach the file,
+        # and revalidation should not run on every character. The write is
+        # reversible (see ``_write_json_cache``), which is what makes saving
+        # without being asked acceptable in the first place.
+        self._autosave: bool = _s.editor_autosave
+        # True between the first keystroke in a field and its commit.
+        # Only affects what the toolbar SAYS; the cache is not touched.
+        self._typing: bool = False
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(400)
+        self._autosave_timer.timeout.connect(self._on_autosave)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -347,6 +410,36 @@ class SidecarFormPane(QWidget):
         self._view_group.idClicked.connect(self._on_view_pill_clicked)
         et.addWidget(self._bids_view_btn)
         et.addWidget(self._tree_view_btn)
+
+        # Which fields either view shows. The two views used to disagree
+        # silently: the BIDS form offers every field the schema declares for
+        # the datatype (130 rows on a typical BOLD sidecar) and the Tree view
+        # renders the file (90). Both now render the SAME set and this says
+        # which set it is.
+        self._scope_combo = QComboBox()
+        self._scope_combo.setObjectName("ent-input")
+        self._scope_combo.addItem("In file + declared", SCOPE_ALL)
+        self._scope_combo.addItem("Only what is in the file", SCOPE_PRESENT)
+        self._scope_combo.addItem("Only what is missing", SCOPE_ABSENT)
+        self._scope_combo.setToolTip(
+            "Which fields this form OFFERS. It changes what you see, never "
+            "what is in the file.\n\n"
+            "In file + declared: everything the file states, plus every field "
+            "the standard declares for this kind of file, so you can fill one "
+            "in without knowing its name. A declared field you do not type "
+            "into is never written.\n"
+            "Only what is in the file: exactly the keys the file holds.\n"
+            "Only what is missing: the declared fields the file does not "
+            "carry, which is the list of work.\n\n"
+            "If fields seem to appear after validating, this is why: a "
+            "validated file knows its datatype, so the form can offer what "
+            "the standard declares for it. Nothing was added to the file."
+        )
+        idx = self._scope_combo.findData(self._field_scope)
+        if idx >= 0:
+            self._scope_combo.setCurrentIndex(idx)
+        self._scope_combo.currentIndexChanged.connect(self._on_scope_changed)
+        et.addWidget(self._scope_combo)
 
         # Add / Delete field — tree-only. Both are visible in tree mode
         # and hidden in BIDS mode (the BIDS form's notion of "add field"
@@ -494,6 +587,14 @@ class SidecarFormPane(QWidget):
                      disk; the report only contributes level
                      colour-coding and surfaces missing required fields.
         """
+        # A debounced write must land on the file it belongs to, not on the
+        # next one the user clicks.
+        if self._autosave_timer.isActive():
+            self._autosave_timer.stop()
+            if self._current_file is not None and self.is_dirty():
+                self.save()
+
+        self._typing = False
         self._current_file = path
         self._current_root = root
         self._current_report = report
@@ -532,15 +633,15 @@ class SidecarFormPane(QWidget):
             else None
         )
 
-        fields = self._fields_for(path, verdict)
-        self._rebuild_form_with_fields(fields, verdict)
-        # Tree view stays in sync regardless of which view is visible —
-        # set_data is cheap and avoids any drift if the user toggles
-        # the pill mid-session. We pass the level map so the tree
-        # delegate can paint matching colour bars on top-level rows.
-        self._tree_view.set_data(
-            self._json_cache, levels=self._levels_from_fields(fields),
-        )
+        # One render path for both views, so the field scope cannot apply to
+        # one of them and not the other. This used to render each view
+        # separately here, which is how the two drifted apart.
+        if self._json_cache is not None:
+            self._sync_active_view()
+        else:
+            fields = self._fields_for(path, verdict)
+            self._rebuild_form_with_fields(fields, verdict)
+            self._tree_view.set_data(None)
         self._update_footer(path, root, verdict)
         self._refresh_dirty_ui()
         self._history.clear()
@@ -685,6 +786,9 @@ class SidecarFormPane(QWidget):
             and self._json_cache is not None
         )
         insert_idx = self._body_layout.count() - 1  # before the stretch
+        # What the standard says about each field, so the editor for it can be
+        # the one the standard implies rather than a text box for everything.
+        specs = _schema_specs(verdict, self._current_file)
         for field in fields_sorted:
             level_code = _LEVEL_CODE.get(field.level, "opt")
             text, kind = _format_value(field)
@@ -695,11 +799,17 @@ class SidecarFormPane(QWidget):
                 kind,
                 editable=editable,
                 raw_value=field.value,
+                schema_field=specs.get(field.name),
             )
             if field.description:
                 row.setToolTip(field.description)
             if editable:
                 row.value_committed.connect(self._on_field_committed)
+                row.apply_to_others_requested.connect(
+                    self.apply_to_others_requested
+                )
+                row.editing_started.connect(self._on_editing_started)
+                row.explain_requested.connect(self.explain_requested)
             self._body_layout.insertWidget(insert_idx, row)
             insert_idx += 1
             self._rows.append(row)
@@ -712,7 +822,18 @@ class SidecarFormPane(QWidget):
     ) -> None:
         """Mutate the in-memory cache. Disk write happens on :meth:`save`."""
         del value_kind  # parsing already handled by SidecarRow
+        self._typing = False
         if self._current_file is None or self._json_cache is None:
+            return
+        from ...editor.field_values import REMOVE
+
+        if parsed_value is REMOVE:
+            # The field was cleared and its type has no empty form: a number
+            # and a boolean have none, and ``null`` is a validation error.
+            # Deleting the key is the only reading of "empty" that stays
+            # valid, and an absent field is reported honestly as missing.
+            if self._json_cache.pop(key, REMOVE) is not REMOVE:
+                self._after_edit()
             return
         # No-ops don't touch the cache — keeps the dirty count honest.
         current = self._json_cache.get(key, _UNSET)
@@ -725,8 +846,47 @@ class SidecarFormPane(QWidget):
     # Undo / redo (snapshot-based, in-memory; disk write still via Save)
     # ----------------------------------------------------------------------
 
+    def _on_autosave(self) -> None:
+        """The debounce elapsed: write, quietly."""
+        if not self._autosave or self._current_file is None:
+            return
+        if not self.is_dirty():
+            return
+        self.save()
+
+    def set_autosave(self, enabled: bool) -> None:
+        """Turn save-as-you-go on or off for this pane."""
+        self._autosave = bool(enabled)
+        if not enabled:
+            self._autosave_timer.stop()
+
+    def flush_pending_save(self) -> bool:
+        """Write now if a debounced save is still waiting.
+
+        Called before the pane moves to another file, so switching selection
+        cannot drop an edit the timer had not reached yet.
+        """
+        if not self._autosave_timer.isActive():
+            return True
+        self._autosave_timer.stop()
+        return self.save()
+
     def _snapshot(self) -> Optional[OrderedDict]:
         return copy.deepcopy(self._json_cache) if self._json_cache is not None else None
+
+    def _on_editing_started(self, key: str) -> None:
+        """A field is being typed into: say so now, not on focus-out.
+
+        The value is not committed yet, so the cache is untouched and there is
+        nothing to save. What changes is only what the user is told: the
+        toolbar says there are unsaved changes from the first keystroke
+        instead of staying silent until they click somewhere else.
+        """
+        del key
+        if self._typing:
+            return
+        self._typing = True
+        self._refresh_dirty_ui()
 
     def _after_edit(self) -> None:
         """Record the pre-edit cache for undo, then refresh the dirty UI.
@@ -739,6 +899,8 @@ class SidecarFormPane(QWidget):
         self._pre_edit = self._snapshot()
         self._refresh_dirty_ui()
         self.history_changed.emit()
+        if self._autosave and self._current_file is not None:
+            self._autosave_timer.start()
 
     def _restore(self, snap: Optional[OrderedDict]) -> None:
         self._json_cache = copy.deepcopy(snap) if snap is not None else None
@@ -756,16 +918,45 @@ class SidecarFormPane(QWidget):
     def undo(self) -> None:
         if self._json_cache is None:
             return
+        was_saved = not self.is_dirty()
         snap = self._history.undo(self._snapshot())
         if snap is not None:
             self._restore(snap)
+            self._persist_if_it_was_saved(was_saved)
 
     def redo(self) -> None:
         if self._json_cache is None:
             return
+        was_saved = not self.is_dirty()
         snap = self._history.redo(self._snapshot())
         if snap is not None:
             self._restore(snap)
+            self._persist_if_it_was_saved(was_saved)
+
+    def _persist_if_it_was_saved(self, was_saved: bool) -> None:
+        """Write the file back when the step being undone had been saved.
+
+        Without this, undoing after a save changed only the in-memory cache:
+        the file kept the value that had been written, the pane went dirty
+        again, and the user saw a button that did nothing. Half an undo is
+        worse than none, because it leaves the screen and the disk disagreeing.
+
+        The rule is the one a user already holds: what you see is what is on
+        disk, unless you have unsaved changes. So an undo from a CLEAN state
+        writes, and an undo from a dirty one does not, because in that case
+        nothing had reached the disk to revert.
+        """
+        if not was_saved or self._current_file is None:
+            return
+        try:
+            self._write_json_cache(self._current_file)
+        except OSError as exc:
+            log.warning("undo could not write %s: %s", self._current_file, exc)
+            self.save_failed.emit(self._current_file, str(exc))
+            return
+        self._original_json = copy.deepcopy(self._json_cache)
+        self._refresh_dirty_ui()
+        self.file_saved.emit(self._current_file)
 
     # ----------------------------------------------------------------------
     # View-mode toggle + tree handlers
@@ -825,11 +1016,19 @@ class SidecarFormPane(QWidget):
                 if editor is not None:
                     self._scroll_widget_visible(editor)
                     editor.setFocus(Qt.FocusReason.OtherFocusReason)
-                    # ``QLineEdit`` highlights its content on focus when
-                    # ``setFocus`` is called this way - a clear visual cue +
-                    # lets the user type to overwrite.
-                    if hasattr(editor, "selectAll"):
-                        editor.selectAll()
+                    # Highlight what is there, so the field reads as ready to
+                    # be typed over. A combo has no ``selectAll`` of its own;
+                    # its text lives in the line edit underneath, and a field
+                    # with a curated vocabulary is a combo, so asking the
+                    # outer widget silently did nothing for exactly the
+                    # fields most likely to be jumped to.
+                    target = (
+                        editor.lineEdit()
+                        if hasattr(editor, "lineEdit") and editor.lineEdit()
+                        else editor
+                    )
+                    if hasattr(target, "selectAll"):
+                        target.selectAll()
                 else:
                     # Read-only mode: still scroll so the user sees it.
                     self._scroll_widget_visible(row)
@@ -921,13 +1120,76 @@ class SidecarFormPane(QWidget):
             if self._current_file is not None else []
         )
         fields = self._patch_fields_from_cache(fields)
+        fields = self._apply_field_scope(fields)
         if self._view_mode == "tree":
+            # The tree renders the file, so the fields the scope keeps that
+            # the file does not carry are passed as placeholders: shown,
+            # dimmed, and not written unless the user types into them. That
+            # is what makes the two views hold the same rows.
+            shown = {f.name for f in fields}
+            data = OrderedDict(
+                (k, v) for k, v in self._json_cache.items() if k in shown
+            )
+            # The same schema facts the BIDS view puts on each row, so the
+            # two views explain a field identically rather than one of them
+            # showing a bare key and a value.
+            specs = _schema_specs(verdict, self._current_file)
             self._tree_view.set_data(
-                self._json_cache,
+                data,
                 levels=self._levels_from_fields(fields),
+                placeholders=[
+                    f.name for f in fields if f.name not in self._json_cache
+                ],
+                describe={
+                    name: spec.description
+                    for name, spec in specs.items() if spec.description
+                },
+                units={
+                    name: spec.unit
+                    for name, spec in specs.items() if spec.unit
+                },
             )
         else:
             self._rebuild_form_with_fields(fields, verdict)
+
+    def _apply_field_scope(
+        self, fields: list[SidecarField],
+    ) -> list[SidecarField]:
+        """Keep the fields the current scope asks for.
+
+        Presence is decided against the live cache, not against the
+        ``present`` flag the verdict was built with, so a field the user has
+        just typed counts as present without a revalidation.
+        """
+        if self._field_scope == SCOPE_ALL or self._json_cache is None:
+            return fields
+        in_file = set(self._json_cache.keys())
+        if self._field_scope == SCOPE_PRESENT:
+            return [f for f in fields if f.name in in_file]
+        return [f for f in fields if f.name not in in_file]
+
+    def field_scope(self) -> str:
+        """Which fields both views are showing (one of :data:`FIELD_SCOPES`)."""
+        return self._field_scope
+
+    def set_field_scope(self, scope: str) -> None:
+        """Set the field scope from code, keeping the combo in step."""
+        if scope not in FIELD_SCOPES:
+            return
+        idx = self._scope_combo.findData(scope)
+        if idx >= 0:
+            # Drives ``_on_scope_changed``, which stores and re-renders.
+            self._scope_combo.setCurrentIndex(idx)
+
+    def _on_scope_changed(self, idx: int) -> None:
+        """Field scope changed: remember it and re-render the active view."""
+        scope = self._scope_combo.itemData(idx)
+        if scope not in FIELD_SCOPES or scope == self._field_scope:
+            return
+        self._field_scope = scope
+        from ..app_settings import AppSettings
+        AppSettings.remember_editor_field_scope(scope)
+        self._sync_active_view()
 
     def _patch_fields_from_cache(
         self, fields: list[SidecarField],
@@ -1115,12 +1377,10 @@ class SidecarFormPane(QWidget):
                     )
                 patched.append(f)
             fields = patched
-        self._rebuild_form_with_fields(fields, verdict)
-        # Keep the tree view in sync too. Pass the level map so the
-        # delegate paints colour bars matching the BIDS form.
-        self._tree_view.set_data(
-            self._json_cache, levels=self._levels_from_fields(fields),
-        )
+        # Same single render path as ``set_file``: the cache is already back
+        # to the disk snapshot, so this re-renders whichever view is showing
+        # with the current field scope applied.
+        self._sync_active_view()
         self._refresh_dirty_ui()
         # Revert discards unsaved edits, so the undo history of those edits is
         # no longer meaningful: reset it to the just-restored state.
@@ -1156,6 +1416,11 @@ class SidecarFormPane(QWidget):
                 f"{n} unsaved change" + ("s" if n != 1 else "")
             )
             self._dirty_chip.setVisible(True)
+        elif editable and self._typing:
+            # Typed into but not committed yet. There is nothing to count and
+            # nothing to save, so say what is true: an edit is in progress.
+            self._dirty_chip.setText("editing")
+            self._dirty_chip.setVisible(True)
         else:
             self._dirty_chip.setVisible(False)
         self._save_btn.setEnabled(editable and n > 0)
@@ -1163,12 +1428,36 @@ class SidecarFormPane(QWidget):
         self.dirty_changed.emit(n)
 
     def _write_json_cache(self, path: Path) -> None:
-        """Serialise ``self._json_cache`` to ``path`` (overwrite)."""
+        """Write ``self._json_cache`` to ``path``, reversibly where possible.
+
+        Inside a dataset the write goes through the operation log, so it is
+        atomic, the previous bytes are kept, and it can be undone after the
+        pane has moved on. That matters more now that saving can happen by
+        itself: a user who did not press anything should still be able to get
+        back what they had.
+
+        Outside a dataset, or when the root is unwritable, fall back to a
+        plain atomic write rather than refusing to save at all.
+        """
         assert self._json_cache is not None
-        path.write_text(
-            json.dumps(self._json_cache, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        text = json.dumps(self._json_cache, indent=2, ensure_ascii=False) + "\n"
+        root = self._current_root
+        if root is not None:
+            try:
+                from ...project.operations import begin_operation
+
+                with begin_operation(root, f"Edit {path.name}") as op:
+                    op.write_text(path, text)
+                return
+            except Exception as exc:  # noqa: BLE001 - fall back, never block
+                log.debug("operation log unavailable for %s: %s", path, exc)
+        tmp = path.with_name(f".{path.name}.tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def _update_footer(
         self,

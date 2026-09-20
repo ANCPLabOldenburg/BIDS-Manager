@@ -50,38 +50,109 @@ from ..recording_meta import load_spec, scaffold_sidecar_path
 # they can grep for, fill, and remove.
 _TODO_VALUE = "TODO"
 
+# What BIDS itself writes when a field was asked and has no answer. Valid
+# wherever the schema declares it, unlike the TODO marker.
+_NA_VALUE = "n/a"
+
 # Sentinel: this field gets no placeholder at all.
 _NO_TODO = object()
 
+# How much of what the standard declares a fill should mark. Nested: each
+# includes the ones before it.
+FILL_NONE = "none"
+FILL_REQUIRED = "required"
+FILL_RECOMMENDED = "recommended"
+FILL_OPTIONAL = "optional"
+FILL_SCOPES = (FILL_NONE, FILL_REQUIRED, FILL_RECOMMENDED, FILL_OPTIONAL)
+FILL_SCOPE_LABELS = {
+    FILL_NONE: "None: leave every gap absent",
+    FILL_REQUIRED: "Required fields only",
+    FILL_RECOMMENDED: "Required and recommended (default)",
+    FILL_OPTIONAL: "Everything the standard declares, including optional",
+}
 
-def _todo_value_for(
-    field_type: str, item_type: str = "", enum: tuple = (),
-) -> object:
-    """The placeholder to write for a field, or ``_NO_TODO`` to write none.
 
-    A placeholder must not itself be invalid. Writing the string ``"TODO"``
-    into a numeric field produces a schema type error, so the dataset gains a
-    violation for a field that was merely absent, which is worse than the gap
-    it marks. Three things disqualify a field:
+def _todo_value_for(field) -> object:
+    """The placeholder to write for a field, or ``_NO_TODO`` for none.
 
-    * a type the marker does not fit (number, boolean, object, array of those);
-    * NO declared type at all, which the schema uses for fields that accept
-      more than one (``EchoTime`` and ``FlipAngle`` are number-or-array), and
-      where a string is the one thing they never accept;
-    * a controlled vocabulary, since ``MRAcquisitionType`` admits only 1D, 2D
-      or 3D and ``PhaseEncodingDirection`` only the six axis codes.
+    A placeholder marks a gap. It must not itself BE a violation, or the
+    dataset gains an error for a field that was merely absent, which is worse
+    than the gap it marks. So the marker is chosen from what the schema says
+    the field accepts, and there is more than one:
 
-    What is left is a plain string field, and an array of plain strings. Those
-    take the marker; everything else is left absent and stays in the
-    missing-field report until a real value arrives.
+    * a free-text string field takes ``"TODO"``, which is greppable and
+      obviously not a value;
+    * an array of strings takes ``["TODO"]``;
+    * a field that accepts the literal ``"n/a"`` takes ``"n/a"``, which is how
+      BIDS itself spells "this was asked and there is no answer". That covers
+      a large class the old rule skipped outright, because the schema writes
+      those as ``anyOf`` (number or ``"n/a"``) and the plain ``type`` is
+      empty;
+    * a controlled vocabulary that INCLUDES ``"n/a"`` takes it, for the same
+      reason.
+
+    What is left is a field where no honest marker exists: a number, a
+    boolean, an enum of real choices. Inventing one would be writing a value
+    nobody stated. Those stay absent and stay in the missing-field report,
+    and :func:`unmarkable_fields` explains which and why, so the gap is
+    visible rather than silent.
+
+    ``field`` is a :class:`~bidsmgr.schema.FieldInfo`.
     """
+    accepts = tuple(getattr(field, "accepts", ()) or ())
+    enum = tuple(getattr(field, "enum", ()) or ())
+    item_type = getattr(field, "item_type", "")
+    declared = getattr(field, "type", "")
+
+    if getattr(field, "accepts_na", False) or "n/a" in enum:
+        return _NA_VALUE
     if enum:
+        # A real vocabulary. Nothing in it means "unanswered".
         return _NO_TODO
-    if field_type == "string":
+    if getattr(field, "accepts_free_text", False) or declared == "string":
         return _TODO_VALUE
-    if field_type == "array" and item_type == "string":
+    if "array" in accepts and item_type == "string":
         return [_TODO_VALUE]
+    # An array whose item type the schema does not state is NOT assumed to
+    # hold strings. That assumption is what wrote ``["TODO"]`` into EchoTime,
+    # a number-or-array-of-numbers field, turning a gap into a type error.
     return _NO_TODO
+
+
+def unmarkable_reason(field) -> str:
+    """Why this field can take no placeholder, for the report. Empty if it can.
+
+    Said out loud because the alternative is a fill that quietly covers two
+    thirds of what is missing and reports itself as complete.
+    """
+    if _todo_value_for(field) is not _NO_TODO:
+        return ""
+    enum = tuple(getattr(field, "enum", ()) or ())
+    if enum:
+        shown = ", ".join(str(v) for v in enum[:4])
+        more = " ..." if len(enum) > 4 else ""
+        return f"only accepts {shown}{more}"
+    accepts = tuple(getattr(field, "accepts", ()) or ())
+    if accepts:
+        return f"accepts only {' or '.join(accepts)}, which has no marker"
+    return "the schema declares no type for it"
+
+
+def scope_levels(scope: str) -> frozenset[str]:
+    """Which requirement levels a fill scope covers.
+
+    The scopes nest, because that is how a user thinks about it: required is
+    the floor, recommended adds what analyses usually need, optional adds
+    everything else the standard declares. Deprecated is in none of them: a
+    placeholder in a field BIDS is retiring is work nobody should do.
+    """
+    if scope == FILL_REQUIRED:
+        return frozenset({"required"})
+    if scope == FILL_RECOMMENDED:
+        return frozenset({"required", "recommended"})
+    if scope == FILL_OPTIONAL:
+        return frozenset({"required", "recommended", "optional"})
+    return frozenset()
 
 
 log = logging.getLogger(__name__)
@@ -138,6 +209,7 @@ def run_metadata(
     inventory_tsv: Optional[Path] = None,
     dataset_meta: Optional[DatasetMetadata] = None,
     fill_todos: bool = False,
+    fill_scope: Optional[str] = None,
     write_report: bool = True,
     generator_label: str = "bidsmgr",
     participants_file: Optional[Path] = None,
@@ -158,11 +230,16 @@ def run_metadata(
         Caller-supplied fields for ``dataset_description.json``. The
         ``Name`` defaults to ``bids_root.name`` if not provided.
     fill_todos
-        When ``True``, every missing required + recommended field across
-        every sidecar (and the recommended fields of
-        ``dataset_description.json``) gets the literal string ``"TODO"``
-        written. Existing values are never overwritten. The fill is
-        recorded in ``report.todo_fills`` and in the JSON report.
+        Turn the placeholder fill on. What it covers is ``fill_scope``.
+        Existing values are NEVER overwritten, at any scope. The fill is
+        recorded in ``report.todo_fills`` and in the JSON report, and every
+        field that could take no placeholder is recorded in
+        ``report.unmarkable`` with the reason.
+    fill_scope
+        How much of what the standard declares to mark:
+        ``"required"``, ``"recommended"`` (the default, and what
+        ``fill_todos=True`` meant before this existed) or ``"optional"``.
+        The scopes nest. ``"none"`` is the same as ``fill_todos=False``.
     write_report
         When ``True`` (default), write the full ``MetadataReport`` to
         ``<bids_root>/.bidsmgr/metadata_report.json`` after every run.
@@ -232,8 +309,20 @@ def run_metadata(
     _write_readme(bids_root, meta.name, report)
     _write_changes(bids_root, report)
     _refresh_scans_tsv(bids_root, report)
-    _fill_and_audit_sidecars(bids_root, report, fill_todos=fill_todos)
-    _audit_dataset_description(bids_root, report, fill_todos=fill_todos)
+    # One resolved scope for the whole run, so the two passes below cannot
+    # disagree about what was asked for.
+    scope = fill_scope or (FILL_RECOMMENDED if fill_todos else FILL_NONE)
+    if scope not in FILL_SCOPES:
+        raise ValueError(
+            f"invalid fill_scope {scope!r}; expected one of {FILL_SCOPES}"
+        )
+    if not fill_todos and fill_scope is None:
+        scope = FILL_NONE
+    levels = scope_levels(scope)
+    report.fill_scope = scope
+
+    _fill_and_audit_sidecars(bids_root, report, levels=levels)
+    _audit_dataset_description(bids_root, report, levels=levels)
 
     if write_report:
         _write_metadata_report(bids_root, report)
@@ -667,6 +756,12 @@ def _merge_participants(
     was no existing file to merge with. Merge rule: keep the existing
     file's columns and values verbatim; only fill cells that are blank
     or ``"n/a"`` with new data.
+
+    Columns are added before rows, which is not cosmetic: a dataset with no
+    demographics gets a ``participants.tsv`` holding nothing but
+    ``participant_id``, and adding a row to a frame with no columns raises. In
+    other words, doing it the other way round made the SECOND conversion into
+    the plainest possible dataset fail outright.
     """
     if df_existing is None or "participant_id" not in df_existing.columns:
         return df_new, False
@@ -674,12 +769,19 @@ def _merge_participants(
     merged = df_existing.set_index("participant_id")
     new_indexed = df_new.set_index("participant_id")
 
-    for sid in new_indexed.index:
-        if sid not in merged.index:
-            merged.loc[sid] = "n/a"
     for col in new_indexed.columns:
         if col not in merged.columns:
             merged[col] = "n/a"
+    incoming_subjects = [s for s in new_indexed.index if s not in merged.index]
+    if incoming_subjects:
+        merged = pd.concat([
+            merged,
+            pd.DataFrame(
+                "n/a", index=pd.Index(incoming_subjects, name=merged.index.name),
+                columns=merged.columns,
+            ),
+        ])
+    for col in new_indexed.columns:
         for sid in new_indexed.index:
             incoming = new_indexed.at[sid, col]
             if incoming and incoming != "n/a":
@@ -725,41 +827,162 @@ def _write_changes(bids_root: Path, report: MetadataReport) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Files that live in a datatype folder but are NOT the recording. BIDS is
+# explicit that the scans file describes "each neural recording file", so the
+# tables and sidecars that accompany one do not get a row.
+_SCANS_COMPANION_SUFFIXES: frozenset[str] = frozenset({
+    "events", "channels", "electrodes", "coordsystem", "headshape", "markers",
+    "photo", "physio", "stim", "blood", "scans", "sessions", "participants",
+})
+
+# Extensions that are part of a recording rather than a recording themselves.
+# A BrainVision recording is a .vhdr header plus a .eeg binary and a .vmrk
+# marker file, and an EEGLAB one is a .set plus a .fdt: the header is the
+# recording and gets the row, the rest would be duplicates of it. ``.eeg``
+# here is always the BrainVision binary, because the other format that uses
+# the extension (Nihon Kohden) is not BIDS-native and cannot appear in a
+# converted dataset. ``.dat``, ``.mrk`` and ``.pos`` are the MEG calibration,
+# marker and headshape side files.
+_SCANS_COMPANION_EXTS: frozenset[str] = frozenset({
+    ".json", ".tsv", ".gz", ".vmrk", ".eeg", ".fdt", ".dat", ".mrk", ".pos",
+})
+
+# MEG system files mne-bids writes beside the data, named by entity rather
+# than by suffix: acq-calibration_meg.dat and acq-crosstalk_meg.fif. The
+# second carries a .fif extension, which is a real recording extension, so
+# only the entity tells them apart.
+_SCANS_SYSTEM_ENTITIES: tuple[str, ...] = ("acq-calibration", "acq-crosstalk")
+
+# Recordings that are a DIRECTORY: CTF and EGI. One row each, and the walk
+# must not descend into them or every internal file would get a row.
+_SCANS_DIR_EXTS: frozenset[str] = frozenset({".ds", ".mff"})
+
+
+def _is_recording_file(path: Path) -> bool:
+    """Does this path get a row in ``*_scans.tsv``?
+
+    True for the data files themselves, of every modality, and false for the
+    sidecars, tables and format side files that accompany them.
+    """
+    name = path.name
+    if name.endswith(".tsv.gz") or name.endswith(".nii.gz"):
+        ext = ".tsv.gz" if name.endswith(".tsv.gz") else ".nii.gz"
+    else:
+        ext = path.suffix.lower()
+    if ext == ".nii.gz":
+        return True
+    if ext in _SCANS_COMPANION_EXTS or ext == ".tsv.gz":
+        return False
+    if any(token in name for token in _SCANS_SYSTEM_ENTITIES):
+        return False
+    # The BIDS suffix is the last underscore-delimited token that carries no
+    # hyphen; entity tokens all do.
+    stem = name.split(".")[0]
+    for token in reversed(stem.split("_")):
+        if "-" not in token:
+            return token not in _SCANS_COMPANION_SUFFIXES
+    return False
+
+
+def _scans_rows_for(root: Path) -> list[dict[str, str]]:
+    """One row per recording under ``root``, in path order.
+
+    Walks by hand rather than with ``rglob`` so a folder-shaped recording
+    (CTF ``.ds``, EGI ``.mff``) is taken as a single entry and not descended
+    into.
+    """
+    rows: list[dict[str, str]] = []
+
+    def walk(folder: Path) -> None:
+        for entry in sorted(folder.iterdir(), key=lambda p: p.name):
+            if entry.is_dir():
+                if entry.suffix.lower() in _SCANS_DIR_EXTS:
+                    rows.append({
+                        "filename": entry.relative_to(root).as_posix(),
+                        "acq_time": _acq_time_for(entry),
+                    })
+                else:
+                    walk(entry)
+            elif entry.is_file() and _is_recording_file(entry):
+                rows.append({
+                    "filename": entry.relative_to(root).as_posix(),
+                    "acq_time": _acq_time_for(entry),
+                })
+
+    walk(root)
+    return rows
+
+
+def _acq_time_for(recording: Path) -> str:
+    """``acq_time`` from the recording's own sidecar, or ``"n/a"``.
+
+    Only the MRI sidecars carry an acquisition time we can read this way.
+    EEG and MEG get theirs from mne-bids, which reads ``meas_date`` off the
+    recording at conversion and writes it into the scans table; that value is
+    preserved by the merge rather than recomputed here, because the sidecar
+    does not hold it.
+    """
+    json_path = _matching_json(recording)
+    if not json_path.exists():
+        return _NA_VALUE
+    try:
+        meta = json.loads(json_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return _NA_VALUE
+    adt = meta.get("AcquisitionDateTime") or meta.get("AcquisitionTime")
+    return adt if isinstance(adt, str) and adt else _NA_VALUE
+
+
 def _refresh_scans_tsv(bids_root: Path, report: MetadataReport) -> None:
     """Generate one ``*_scans.tsv`` per subject (or subject/session).
 
-    Lists every NIfTI under the subject's tree with its ``acq_time``
-    parsed from the JSON sidecar's ``AcquisitionDateTime`` /
-    ``AcquisitionTime``. Missing acq times are recorded as ``"n/a"`` per
-    BIDS convention. Regenerated on every run (no merge).
+    Lists EVERY recording, of every modality, not just the NIfTIs. The
+    previous version globbed ``*.nii*``, which had two consequences on any
+    dataset holding EEG, MEG, iEEG or ECAT PET. A subject with no NIfTI at all
+    produced no scans table, and a mixed session produced one that listed the
+    images and silently omitted the recordings beside them.
+
+    Worse, mne-bids WRITES this table during conversion, with a real
+    ``acq_time`` taken from the recording's ``meas_date``. Regenerating it
+    from the NIfTIs deleted those rows and the only acquisition times the
+    dataset had for its recordings. So the fresh rows are MERGED into what is
+    already there rather than replacing it: existing rows keep their values
+    and their extra columns (mne-bids adds ``source`` when asked), rows for
+    recordings that are new get appended, and nothing that was measured at
+    conversion time is thrown away.
     """
+    from .preserve import merge_scans_table
+
     for subj_dir in sorted(bids_root.glob("sub-*")):
         if not subj_dir.is_dir():
             continue
         ses_dirs = [s for s in sorted(subj_dir.glob("ses-*")) if s.is_dir()]
         roots = ses_dirs or [subj_dir]
         for root in roots:
-            rows: list[dict[str, str]] = []
-            for nii in sorted(root.rglob("*.nii*")):
-                if not nii.is_file():
-                    continue
-                rel = nii.relative_to(root).as_posix()
-                json_path = _matching_json(nii)
-                acq_time = "n/a"
-                if json_path.exists():
-                    try:
-                        meta = json.loads(json_path.read_text())
-                        adt = meta.get("AcquisitionDateTime") or meta.get("AcquisitionTime")
-                        if isinstance(adt, str) and adt:
-                            acq_time = adt
-                    except (OSError, json.JSONDecodeError):
-                        pass
-                rows.append({"filename": rel, "acq_time": acq_time})
+            rows = _scans_rows_for(root)
             if not rows:
                 continue
             ses_part = f"_{root.name}" if root.name.startswith("ses-") else ""
             out = root / f"{subj_dir.name}{ses_part}_scans.tsv"
-            pd.DataFrame(rows).to_csv(out, sep="\t", index=False)
+
+            existing: list[dict[str, str]] = []
+            if out.is_file():
+                try:
+                    existing = pd.read_csv(
+                        out, sep="\t", dtype=str, keep_default_na=False,
+                    ).to_dict("records")
+                except (OSError, ValueError) as exc:
+                    log.warning("could not read %s: %s", out, exc)
+            # Rows whose file is gone are dropped: a stale filename is an
+            # error the validator reports (SCANS_FILENAME_NOT_MATCH_DATASET),
+            # and after a rename the old name is exactly that.
+            present = {row["filename"] for row in rows}
+            existing = [r for r in existing if r.get("filename", "") in present]
+
+            fields, merged = merge_scans_table(existing, rows)
+            pd.DataFrame(merged, columns=fields).to_csv(
+                out, sep="\t", index=False,
+            )
             report.files_written.append(out)
 
 
@@ -772,7 +995,7 @@ def _fill_and_audit_sidecars(
     bids_root: Path,
     report: MetadataReport,
     *,
-    fill_todos: bool = False,
+    levels: frozenset[str] = frozenset(),
 ) -> None:
     """Walk every sidecar JSON, fill derivable fields, audit required ones.
 
@@ -781,8 +1004,8 @@ def _fill_and_audit_sidecars(
     filled when missing. The audit then checks required + recommended
     fields per the schema engine and records anything still missing.
 
-    When ``fill_todos=True``, every still-missing required + recommended
-    field gets the literal string ``"TODO"`` written into the file. The
+    ``levels`` says which requirement levels get a placeholder written into
+    the file for fields that are still missing. Empty means none. The
     audit messages still report what *was* missing (the report shows
     what got TODO'd in ``report.todo_fills``), but the file ends the
     run with no field absent.
@@ -861,21 +1084,48 @@ def _fill_and_audit_sidecars(
                 f"{rel}: missing recommended {name!r}"
             )
 
-        # Apply --fill-todos for everything still missing.
+        # Apply the placeholder fill, as far as the caller asked for.
         todo_added: list[str] = []
-        if fill_todos:
-            types = {
-                _canonical_field_name(f.name): (
-                    f.type, getattr(f, "item_type", ""), getattr(f, "enum", ()),
-                )
-                for f in list(required) + list(recommended)
-            }
-            for name in missing_req + missing_rec:
+        if levels:
+            # Optional is only looked up when it is actually wanted: it is the
+            # biggest group by far and reading it costs on every sidecar.
+            optional = []
+            if "optional" in levels:
+                try:
+                    optional = schema_mod.optional_sidecar_fields(
+                        datatype, suffix,
+                    )
+                except (KeyError, ValueError, AttributeError):
+                    optional = []
+            by_name: dict[str, object] = {}
+            for spec in list(required) + list(recommended) + list(optional):
+                by_name.setdefault(_canonical_field_name(spec.name), spec)
+
+            wanted: list[str] = []
+            if "required" in levels:
+                wanted += missing_req
+            if "recommended" in levels:
+                wanted += missing_rec
+            if "optional" in levels:
+                wanted += [
+                    _canonical_field_name(f.name) for f in optional
+                    if _canonical_field_name(f.name) not in data
+                ]
+
+            for name in wanted:
                 if name in data or name in fills:
                     continue
-                field_type, item_type, enum = types.get(name, ("", "", ()))
-                value = _todo_value_for(field_type, item_type, enum)
+                spec = by_name.get(name)
+                if spec is None:
+                    continue
+                value = _todo_value_for(spec)
                 if value is _NO_TODO:
+                    # Not a silent skip: say which field and why, so a fill
+                    # that covers two thirds does not report itself complete.
+                    report.unmarkable.append(
+                        f"{rel}: {name!r} takes no placeholder "
+                        f"({unmarkable_reason(spec)})"
+                    )
                     continue
                 fills[name] = value
                 todo_added.append(name)
@@ -910,15 +1160,15 @@ def _audit_dataset_description(
     bids_root: Path,
     report: MetadataReport,
     *,
-    fill_todos: bool = False,
+    levels: frozenset[str] = frozenset(),
 ) -> None:
     """Audit ``dataset_description.json`` recommended fields.
 
     The schema engine doesn't expose dataset-level recommended fields
     (its API is keyed by ``(datatype, suffix)``), so we use the small
     BIDS 1.10 list in ``_DATASET_DESCRIPTION_RECOMMENDED``. With
-    ``fill_todos=True``, missing recommended fields get the literal
-    ``"TODO"`` string written.
+    ``levels`` says which requirement levels get a placeholder written for
+    fields that are still missing. Empty means none.
     """
     path = bids_root / "dataset_description.json"
     if not path.exists():
@@ -931,31 +1181,46 @@ def _audit_dataset_description(
         return
 
     rel = path.name
+    # What the STANDARD declares for this file, at the levels asked for,
+    # rather than the hand-kept recommended list this used to consult. The
+    # list was right about the recommended ones and silent about everything
+    # else, so an "optional" scope could never have reached them.
+    try:
+        specs = {
+            f.name: f for f in schema_mod.dataset_description_fields(bids_root)
+        }
+    except Exception:  # noqa: BLE001 - the audit must still run
+        specs = {}
+
     missing: list[str] = [
         f for f in _DATASET_DESCRIPTION_RECOMMENDED if f not in data
     ]
     for name in missing:
         report.missing_recommended.append(f"{rel}: missing recommended {name!r}")
 
-    if not (fill_todos and missing):
+    if not levels:
         return
 
-    # Types come from the schema: Authors is an array of strings and takes
-    # ``["TODO"]``, DatasetDOI is a string and takes ``"TODO"``, SourceDatasets
-    # is an array of objects and takes no placeholder at all.
-    try:
-        types = {
-            f.name: (f.type, f.item_type, f.enum)
-            for f in schema_mod.dataset_description_fields()
-        }
-    except Exception:
-        types = {}
+    wanted = [
+        name for name, spec in specs.items()
+        if name not in data and getattr(spec, "level", "") in levels
+    ]
+    # The hand-kept recommended names stay in play even if the schema places
+    # them elsewhere, so nothing this file used to fill stops being filled.
+    if "recommended" in levels:
+        wanted += [n for n in missing if n not in wanted]
 
     filled: list[str] = []
-    for name in missing:
-        field_type, item_type, enum = types.get(name, ("", "", ()))
-        value = _todo_value_for(field_type, item_type, enum)
+    for name in sorted(set(wanted)):
+        spec = specs.get(name)
+        if spec is None:
+            continue
+        value = _todo_value_for(spec)
         if value is _NO_TODO:
+            report.unmarkable.append(
+                f"{rel}: {name!r} takes no placeholder "
+                f"({unmarkable_reason(spec)})"
+            )
             continue
         data[name] = value
         filled.append(name)

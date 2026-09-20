@@ -189,10 +189,16 @@ def test_set_file_with_verdict_uses_schema_levels(
 
     pane.set_file(json_path, bids_root, report)
 
-    # Four rows from the verdict, in level order.
-    assert len(pane._rows) == 4
+    # Four rows from the verdict, in level order, PLUS any key the file
+    # carries that the verdict did not mention. The fixture's JSON has
+    # ``Manufacturer`` and the verdict does not list it: the form used to
+    # drop it silently, which is one half of why the BIDS form and the Tree
+    # view disagreed. A key that is in the file is always shown.
+    assert len(pane._rows) == 5
+    keys = [row.key for row in pane._rows]
+    assert "Manufacturer" in keys
     levels = [row._level for row in pane._rows]
-    assert levels == ["req", "rec", "opt", "dep"]
+    assert levels == ["req", "rec", "opt", "opt", "dep"]
 
 
 def test_set_file_non_json_shows_hint(qapp, bids_root: Path) -> None:

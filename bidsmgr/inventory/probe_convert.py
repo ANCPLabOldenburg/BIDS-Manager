@@ -11,9 +11,9 @@ to commit to the BIDS root we:
 1. Build a per-series staging directory of symlinks (one per source
    DICOM file belonging to that ``SeriesInstanceUID``).
 2. Invoke dcm2niix against the staging directory.
-3. Walk the output and group every produced file by SeriesInstanceUID
-   (read from the JSON sidecar, since the filename token ``%j`` may be
-   suffixed with multi-echo / phase markers).
+3. Walk the output and attribute every produced file to the series that
+   was staged into that directory (a multi-echo or phase acquisition
+   splits into several outputs, all of them from the one series).
 
 The work directory uses a hidden ``.tmp`` convention by default
 (architecture.md §7) — the staging trees are scratch, the user shouldn't
@@ -24,13 +24,37 @@ Outputs lay out as::
 
     <work_root>/
       <bids_id>/
-        <series_uid>/
-          <series_uid>.nii.gz
-          <series_uid>.json
-          ... etc.
+        <short hash of series_uid>/
+          out/
+            probe.nii.gz
+            probe.json
+            ... etc.
 
 so a researcher can inspect per-subject per-series outputs side by side
 with the originating row in the inventory TSV.
+
+Neither the directory nor the file is named for the SeriesInstanceUID, for the
+reason ``dcm2niix_direct`` gives at :func:`~bidsmgr.converter.backends.
+dcm2niix_direct._safe_dicoms_dirname`: a UID is ~60 characters, and spending it
+twice on one path (once on the staging directory, once on ``-f %j``) pushed the
+probe past the 260-char Windows ``MAX_PATH`` ceiling. dcm2niix does not fail
+gracefully there — it dies with a stack buffer overrun (``0xC0000409``) and an
+empty stderr. The series is identified by what was staged into the directory,
+not by what the output is called.
+
+This is the bug behind "Already answered by the conversion" being empty on
+Windows and full on macOS and Linux, and it is worth being precise about how it
+presented, because it did not look like a crash. A project at
+``…/BIDS_manager_workshop/Data/ConvertedData/ds_multi/.bidsmgr/project`` gives a
+152-char scan-staging root; add ``.tmp/sub-001/<uid>/out/<uid>_e1.nii.gz`` and
+dcm2niix is asked for a ~290-char path. It dies, the probe logs an ``INFO`` and
+returns ``None`` for that series, and every layer above treats a missing probe
+as "nothing to say" because a probe is advisory. So the scan reported success,
+the inventory looked fine, and only the MRI kinds went missing from the
+template — EEG/MEG/PET fill theirs from the scanner and were unaffected, which
+is what made it look like a rendering fault rather than a missing measurement.
+Measured on the reporter's own dataset: 1 of 5 MRI rows survived before, 5 of 5
+after. POSIX has no such ceiling, hence macOS and Linux never saw it.
 
 Reference: architecture.md §7 (converter backends), improvement_plan.md
 § post-conversion auditing.
@@ -38,12 +62,12 @@ Reference: architecture.md §7 (converter backends), improvement_plan.md
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import shutil
 import subprocess
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
@@ -76,6 +100,13 @@ class ProbeFileStats:
     sidecar_fields: dict = field(default_factory=dict)
 
 
+# What dcm2niix names the probe's outputs. Short and fixed, not ``%j``: the
+# directory already holds exactly one staged series, so the name carries no
+# information, and spending ~60 characters of the path budget on it is what
+# broke the probe on Windows (see the module docstring).
+PROBE_BASENAME = "probe"
+
+
 def _run_dcm2niix_full(
     dicom_dir: Path,
     output_dir: Path,
@@ -90,8 +121,8 @@ def _run_dcm2niix_full(
     * ``-b y``  : write JSON sidecars
     * ``-ba n`` : do not anonymize sidecars (keeps SeriesInstanceUID)
     * ``-z y``  : gzip the NIfTIs
-    * ``-f %j`` : filename = SeriesInstanceUID (with multi-echo / phase
-                  splits dcm2niix appends ``_e1``, ``_e2``, ``_ph`` etc.)
+    * ``-f probe`` : a short fixed basename we control (with multi-echo /
+                  phase splits dcm2niix appends ``_e1``, ``_e2``, ``_ph`` etc.)
     """
 
     binary = str(dcm2niix_bin or find_dcm2niix())
@@ -101,7 +132,7 @@ def _run_dcm2niix_full(
         "-ba", "n",
         "-z", "y",
         "-o", str(output_dir),
-        "-f", "%j",
+        "-f", PROBE_BASENAME,
         str(dicom_dir),
     ]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -136,11 +167,28 @@ def _read_dim4(path: Path) -> int:
         return 0
 
 
-def collect_probe_stats(directory: Path) -> dict[str, ProbeFileStats]:
+def collect_probe_stats(
+    directory: Path, expected_uid: Optional[str] = None,
+) -> dict[str, ProbeFileStats]:
     """Walk ``directory``, group all dcm2niix outputs by SeriesInstanceUID.
 
     Returns ``{series_uid: ProbeFileStats}``. Files whose JSON sidecar
     doesn't carry a SeriesInstanceUID are skipped.
+
+    ``expected_uid`` says the directory holds the output of one staged series,
+    so everything found belongs to it whatever the sidecar calls itself. The
+    probe stages exactly one series per directory, which makes that true by
+    construction, and taking the sidecar's word for it is fragile: dcm2niix does
+    not always echo the UID back. On a Siemens XA30 localizer (enhanced MR, SOP
+    class 1.2.840.10008.5.1.4.1.1.4.1) it writes SeriesTime there instead —
+    ``"110927.522000"`` for a series the inventory knows as
+    ``1.3.12.2.1107...403977.0.0.0`` — and a series filed under an id no row
+    carries is dropped on the floor.
+
+    Platform-neutral, and not the Windows bug this module's docstring describes:
+    the mislabelled series here were localizers, which ``_should_probe_row``
+    skips anyway. It is a latent hole that would swallow a real series the day
+    dcm2niix does this to one.
     """
 
     by_uid: dict[str, ProbeFileStats] = {}
@@ -151,7 +199,7 @@ def collect_probe_stats(directory: Path) -> dict[str, ProbeFileStats]:
         except (OSError, json.JSONDecodeError) as exc:
             log.debug("could not read sidecar %s: %s", json_path, exc)
             continue
-        uid = data.get("SeriesInstanceUID")
+        uid = expected_uid or data.get("SeriesInstanceUID")
         if not uid:
             continue
 
@@ -266,6 +314,36 @@ def _should_probe_row(row: InventoryRow) -> bool:
     return True
 
 
+def _returncode_hint(returncode: int, output_dir: Path) -> str:
+    """Say what an unhelpful Windows exit code means, when we can tell.
+
+    ``0xC0000409`` is STATUS_STACK_BUFFER_OVERRUN: dcm2niix wrote past a
+    fixed-size path buffer and Windows killed it, with nothing on stderr. It is
+    what a path over the 260-char ``MAX_PATH`` ceiling looks like from here, and
+    the difference between "your DICOMs are odd" and "your scratch directory is
+    too deep" is worth spelling out rather than leaving as a raw number.
+    """
+    if (returncode & 0xFFFFFFFF) != 0xC0000409:
+        return ""
+    return (
+        f" (0xC0000409 stack buffer overrun — dcm2niix was killed by Windows; "
+        f"the output path is {len(str(output_dir))} chars and the MAX_PATH "
+        f"ceiling is 260, so try a shallower scan output directory)"
+    )
+
+
+def _series_dirname(uid: str) -> str:
+    """A short, stable directory name for one series.
+
+    A SeriesInstanceUID is ~60 characters and the probe puts two more levels
+    under it, so naming the directory after the UID spends a quarter of the
+    Windows path budget on something nothing reads. A 12-hex SHA-1 prefix is the
+    same trade the converter backend already makes, and unique in practice for
+    the ~10² series of one subject.
+    """
+    return hashlib.sha1((uid or "").encode("utf-8")).hexdigest()[:12]
+
+
 def _probe_one_series(
     uid: str,
     files: list[str],
@@ -291,10 +369,11 @@ def _probe_one_series(
     proc = _run_dcm2niix_full(staging_dir, output_dir, dcm2niix_bin=Path(dcm2niix_bin))
     if proc.returncode != 0:
         log.info(
-            "probe: dcm2niix returncode=%s for UID %s; stderr tail=%s",
-            proc.returncode, uid, proc.stderr[-500:],
+            "probe: dcm2niix returncode=%s%s for UID %s; stderr tail=%s",
+            proc.returncode, _returncode_hint(proc.returncode, output_dir),
+            uid, proc.stderr[-500:],
         )
-    stats = collect_probe_stats(output_dir)
+    stats = collect_probe_stats(output_dir, expected_uid=uid)
 
     if uid not in stats:
         log.info(
@@ -390,7 +469,7 @@ def probe_rows(
             log.debug("probe: no source files recorded for UID %s", uid)
             continue
         subject_dir = (row.subject_hint or "unknown")
-        series_workdir = work_root / f"sub-{subject_dir}" / uid
+        series_workdir = work_root / f"sub-{subject_dir}" / _series_dirname(uid)
         tasks.append((uid, files, series_workdir))
 
     if not tasks:

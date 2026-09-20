@@ -612,15 +612,6 @@ class ConverterPanel(QWidget):
         pre-generated TSV from disk).
         """
         self._model = InventoryTableModel(df, project=self._project, parent=self)
-
-    def load_inventory(self, df: pd.DataFrame, output_tsv: Optional[Path] = None) -> None:
-        """Swap in a fresh DataFrame as the table's data source.
-
-        Called by :meth:`_on_scan_finished` and by tests / controllers
-        that want to skip the scan worker (e.g. by loading a
-        pre-generated TSV from disk).
-        """
-        self._model = InventoryTableModel(df, project=self._project, parent=self)
         # Apply the user's "Highlight aborts" preference to the fresh model.
         self._model.set_highlight_aborts(self._aborts_btn.isChecked())
         self._table.setModel(self._model)
@@ -1673,7 +1664,10 @@ class ConverterPanel(QWidget):
             on_existing=self._app_settings.convert_on_existing,
             raw_root=self._raw_root,
             skip_residuals=self._app_settings.convert_skip_residuals,
+            preserve_curation=self._app_settings.convert_preserve_curation,
             force_edf=self._app_settings.convert_force_edf,
+            deface=self._app_settings.convert_deface,
+            deface_engine=self._app_settings.convert_deface_engine,
             parent=self,
         )
         worker.progress.connect(self._on_progress)
@@ -1803,6 +1797,9 @@ class ConverterPanel(QWidget):
             # name (i.e. the dataset slug) when ``name`` is None.
             name=None,
             fill_todos=s.post_metadata_fill_todos,
+            fill_scope=s.metadata_fill_scope,
+            generate_companions=s.post_fixup_companions,
+            write_citation_file=s.post_fixup_citation,
             parent=self,
         )
         worker.progress.connect(self._on_progress)

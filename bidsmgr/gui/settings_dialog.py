@@ -39,6 +39,8 @@ from PyQt6.QtWidgets import (
 
 from .. import schema
 from ..classifier import sequence_dict
+from ..deface import engines as deface_engines
+from ..deface import run as deface_run
 from ..classifier import user_rules
 from ..util.system_info import SystemInfo, get_system_info
 from .app_settings import AppSettings
@@ -155,6 +157,35 @@ class SettingsDialog(QDialog):
         for label, _value in self._HEADER_LOGO_PRESETS:
             self._header_logo_combo.addItem(label)
         form.addRow("Header logo:", self._header_logo_combo)
+
+        # Editor tree: dotfiles and the machinery folders. Off by default,
+        # because a dataset carries .bidsmgr/, .git/ and .bidsignore and none
+        # of them are the data. On, they are shown dimmed.
+        self._editor_show_hidden = QCheckBox(
+            "Show hidden files and folders in the Editor tree"
+        )
+        self._editor_show_hidden.setToolTip(
+            "Dotfiles and dot-folders (.bidsignore, .bidsmgr, .git) are "
+            "hidden by default. Shown, they are dimmed so they do not "
+            "compete with the dataset. Needed to open .bidsignore."
+        )
+        form.addRow("Editor tree:", self._editor_show_hidden)
+
+        # Save as you go. Safe because every editor write goes through the
+        # operation log, so an edit made without being asked for can still be
+        # undone after the pane has moved on.
+        self._editor_autosave = QCheckBox(
+            "Save a sidecar edit as soon as the field is committed"
+        )
+        self._editor_autosave.setToolTip(
+            "Off by default: edits wait for the Save button, and the toolbar "
+            "says there are unsaved changes from the first keystroke either "
+            "way.\n\nOn, a field commits when it loses focus or you press "
+            "Enter and is written after a short pause, so a burst of typing "
+            "is one write. Every write is reversible, so this cannot lose "
+            "what was there before."
+        )
+        form.addRow("Editor saving:", self._editor_autosave)
 
         hint = QLabel(
             "Theme can also be toggled live via the sun / moon button "
@@ -539,6 +570,24 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Existing subjects:", self._convert_on_existing)
 
+        # Somebody curates a sidecar in the Editor, then re-converts that
+        # subject. Deciding at file level throws the curation away; deciding at
+        # field level keeps what a person stated and still takes what the fresh
+        # pass newly knows.
+        self._convert_preserve_curation = QCheckBox(
+            "Keep curated metadata (merge sidecars field by field instead of "
+            "overwriting them)"
+        )
+        self._convert_preserve_curation.setToolTip(
+            "When a subject you already curated in the Editor is converted "
+            "again, merge its JSON sidecars and _scans.tsv field by field: a "
+            "value you stated is kept, a TODO placeholder is replaced, and "
+            "anything the fresh conversion newly knows is added. Turn it off "
+            "to let the fresh conversion win outright. Only has an effect "
+            "with Update or Replace above. Recommended: on."
+        )
+        form.addRow("Curated metadata:", self._convert_preserve_curation)
+
         self._convert_skip_residuals = QCheckBox(
             "Skip residual volumes (drop dcm2niix secondary duplicates such "
             "as ..._bolda / _Eq_ / _ROI that are not real images)"
@@ -551,15 +600,54 @@ class SettingsDialog(QDialog):
         form.addRow("Residuals:", self._convert_skip_residuals)
 
         self._convert_force_edf = QCheckBox(
-            "Force EDF for EEG / iEEG (re-encode recordings to EDF on convert)"
+            "Force EDF for EEG (re-encode recordings to EDF on convert)"
         )
         self._convert_force_edf.setToolTip(
-            "Re-encode EEG / iEEG recordings to EDF instead of keeping the "
+            "Re-encode EEG recordings to EDF instead of keeping the "
             "source format. Harmonises a study to one BIDS-native format, and "
             "makes a non-BIDS-native but mne-readable source (GDF, EGI, ...) "
             "convertible. MEG / NIRS are unaffected."
         )
         form.addRow("Force EDF:", self._convert_force_edf)
+
+        # Defacing, with its engine beside it. Off by default: it is
+        # destructive, so it has to be chosen rather than discovered.
+        self._convert_deface = QCheckBox(
+            "Remove faces from anatomical and PET images"
+        )
+        self._convert_deface.setToolTip(
+            "Blank the face before the subject is committed, so the "
+            "identifiable image never enters the dataset at all. Off by "
+            "default because it cannot be undone from the conversion: the "
+            "original stays in your raw data, not in the BIDS tree. Needs "
+            "niimath, which ships with BIDS Manager."
+        )
+        form.addRow("Deface:", self._convert_deface)
+
+        self._convert_deface_engine = QComboBox()
+        self._convert_deface_engine.setObjectName("ent-input")
+        for eng in deface_engines.ENGINES:
+            self._convert_deface_engine.addItem(eng.label, eng.id)
+        self._convert_deface_engine.setToolTip(
+            "\n\n".join(f"{e.label}: {e.description}" for e in deface_engines.ENGINES)
+        )
+        form.addRow("Deface engine:", self._convert_deface_engine)
+
+        reason = deface_run.unavailable_reason()
+        if reason:
+            self._convert_deface.setEnabled(False)
+            self._convert_deface.setChecked(False)
+            self._convert_deface_engine.setEnabled(False)
+            # Shown, not hidden: a missing row reads as "this tool cannot do
+            # that", which is how somebody ships a dataset with faces in it.
+            self._convert_deface.setToolTip(reason)
+        else:
+            self._convert_deface.toggled.connect(
+                self._convert_deface_engine.setEnabled
+            )
+            self._convert_deface_engine.setEnabled(
+                self._convert_deface.isChecked()
+            )
 
         v.addWidget(convert)
 
@@ -576,9 +664,98 @@ class SettingsDialog(QDialog):
         )
         pv.addWidget(self._post_run_metadata)
         self._post_metadata_fill_todos = QCheckBox(
-            "Insert 'TODO' placeholders for missing recommended fields"
+            "Mark missing metadata with a placeholder"
+        )
+        self._post_metadata_fill_todos.setToolTip(
+            "Writes a placeholder into every declared field the file does "
+            "not carry, so the gap is visible in the file and reported by "
+            "validation instead of being an absence nobody notices. Existing "
+            "values are never overwritten."
         )
         pv.addWidget(_indented(self._post_metadata_fill_todos))
+
+        # How much to mark. Separate from whether, because "mark the required
+        # fields" and "mark everything the standard declares" are different
+        # amounts of work and different amounts of noise.
+        scope_row = QHBoxLayout()
+        scope_row.setSpacing(8)
+        scope_label = QLabel("Mark which fields:")
+        self._metadata_fill_scope = QComboBox()
+        for value, label in (
+            ("required", "Required only"),
+            ("recommended", "Required and recommended (default)"),
+            ("optional", "Everything declared, including optional"),
+        ):
+            self._metadata_fill_scope.addItem(label, userData=value)
+        self._metadata_fill_scope.setToolTip(
+            "The scopes nest. A field whose type admits no honest marker (a "
+            "number, a boolean, a controlled vocabulary) is left absent and "
+            "reported rather than given a value nobody stated, so a wider "
+            "scope never introduces a validation error.\n\n"
+            "Used by the post-convert chain and by the Editor's Fix ups, so "
+            "both do the same thing."
+        )
+        scope_row.addWidget(scope_label)
+        scope_row.addWidget(self._metadata_fill_scope, 1)
+        scope_holder = QWidget()
+        scope_holder.setLayout(scope_row)
+        pv.addWidget(_indented(scope_holder, indent=40))
+        self._post_metadata_fill_todos.toggled.connect(
+            self._metadata_fill_scope.setEnabled
+        )
+
+        # Dataset repairs. They run between metadata and validation, and they
+        # are the same code the Editor's Fix ups button runs, so a dataset
+        # gets the same result whichever moment the user chooses. Both are off
+        # by default: one adds files and the other moves fields between them.
+        self._post_fixup_companions = QCheckBox(
+            "Generate missing companion files (events.tsv, channels.tsv, "
+            "JSON sidecars)"
+        )
+        self._post_fixup_companions.setToolTip(
+            "What can be read from a recording is read from it, so a "
+            "channels table is real content. The rest is a stub carrying "
+            "TODO rows.\n\nA generated events table is deliberately INVALID "
+            "until you fill it in: TODO is not a valid onset, so validation "
+            "reports an error for each one. That is the point. An empty but "
+            "valid events table would be indistinguishable from a recording "
+            "that genuinely had no events, and would pass quietly forever."
+        )
+        pv.addWidget(_indented(self._post_fixup_companions))
+        self._post_fixup_citation = QCheckBox(
+            "Write CITATION.cff from the dataset description"
+        )
+        self._post_fixup_citation.setToolTip(
+            "Writes CITATION.cff from what dataset_description.json already "
+            "says. This runs without asking, so here is exactly what it "
+            "changes.\n\n"
+            "MOVED: Authors. It is taken OUT of dataset_description.json, "
+            "because stating authorship in both files is an error "
+            "(AUTHORS_AND_CITATION_FILE_MUTUALLY_EXCLUSIVE).\n\n"
+            "COPIED and KEPT: License, HowToAcknowledge and "
+            "ReferencesAndLinks. They are written into the citation file and "
+            "left where they are, so a value you typed does not disappear "
+            "from the file you typed it into. The validator would rather "
+            "each lived in one place only and says so as a warning "
+            "(SINGLE_SOURCE_CITATION_FIELDS). That warning is the cost of "
+            "not deleting your answer.\n\n"
+            "An existing CITATION.cff is never overwritten."
+        )
+        # Said on the face of the setting too, not only on hover. This one
+        # runs unattended at the end of a conversion, and a fix up that
+        # removes a field a user typed cannot announce itself in a tooltip.
+        pv.addWidget(_indented(self._post_fixup_citation))
+        citation_note = QLabel(
+            "Moves <b>Authors</b> out of dataset_description.json (stating it "
+            "in both is an error). License, HowToAcknowledge and "
+            "ReferencesAndLinks are copied and kept."
+        )
+        citation_note.setObjectName("dlg-hint")
+        citation_note.setWordWrap(True)
+        # Indented by margin rather than by ``_indented``, whose trailing
+        # stretch would stop a wrapping label from using the width.
+        citation_note.setContentsMargins(44, 0, 0, 4)
+        pv.addWidget(citation_note)
 
         self._post_run_validate = QCheckBox(
             "Validate dataset (bidsval schema-driven validation)"
@@ -598,7 +775,12 @@ class SettingsDialog(QDialog):
         pv.addWidget(_indented(self._post_validate_strict))
         pv.addWidget(_indented(self._post_validate_html))
 
-        _bind_children(self._post_run_metadata, self._post_metadata_fill_todos)
+        _bind_children(
+            self._post_run_metadata,
+            self._post_metadata_fill_todos,
+            self._post_fixup_companions,
+            self._post_fixup_citation,
+        )
         _bind_children(
             self._post_run_validate,
             self._post_validate_strict,
@@ -772,6 +954,8 @@ class SettingsDialog(QDialog):
         cap = self._sys.logical_threads
 
         self._theme_combo.setCurrentText(s.theme)
+        self._editor_show_hidden.setChecked(s.editor_show_hidden)
+        self._editor_autosave.setChecked(s.editor_autosave)
         self._font_scale_combo.setCurrentIndex(
             self._closest_font_scale_index(s.font_scale)
         )
@@ -788,10 +972,27 @@ class SettingsDialog(QDialog):
         idx = self._convert_on_existing.findData(s.convert_on_existing)
         self._convert_on_existing.setCurrentIndex(idx if idx >= 0 else 0)
         self._convert_skip_residuals.setChecked(s.convert_skip_residuals)
+        self._convert_preserve_curation.setChecked(
+            s.convert_preserve_curation
+        )
         self._convert_force_edf.setChecked(s.convert_force_edf)
+        if self._convert_deface.isEnabled():
+            self._convert_deface.setChecked(s.convert_deface)
+        idx = self._convert_deface_engine.findData(s.convert_deface_engine)
+        if idx >= 0:
+            self._convert_deface_engine.setCurrentIndex(idx)
+        self._convert_deface_engine.setEnabled(
+            self._convert_deface.isChecked()
+            and self._convert_deface.isEnabled()
+        )
 
         self._post_run_metadata.setChecked(s.post_run_metadata)
         self._post_metadata_fill_todos.setChecked(s.post_metadata_fill_todos)
+        idx = self._metadata_fill_scope.findData(s.metadata_fill_scope)
+        self._metadata_fill_scope.setCurrentIndex(idx if idx >= 0 else 1)
+        self._metadata_fill_scope.setEnabled(s.post_metadata_fill_todos)
+        self._post_fixup_companions.setChecked(s.post_fixup_companions)
+        self._post_fixup_citation.setChecked(s.post_fixup_citation)
         self._post_run_validate.setChecked(s.post_run_validate)
         self._post_validate_strict.setChecked(s.post_validate_strict)
         self._post_validate_html.setChecked(s.post_validate_html)
@@ -845,6 +1046,8 @@ class SettingsDialog(QDialog):
         s.user_hints = hints
         s.scan_exclusions = exclusions
         s.theme = self._theme_combo.currentText()
+        s.editor_show_hidden = self._editor_show_hidden.isChecked()
+        s.editor_autosave = self._editor_autosave.isChecked()
         s.font_scale = self._FONT_SCALE_PRESETS[
             self._font_scale_combo.currentIndex()
         ][1]
@@ -862,10 +1065,23 @@ class SettingsDialog(QDialog):
         # Keep the legacy flag in sync for any old reader.
         s.convert_overwrite = (s.convert_on_existing == "replace")
         s.convert_skip_residuals = self._convert_skip_residuals.isChecked()
+        s.convert_preserve_curation = (
+            self._convert_preserve_curation.isChecked()
+        )
         s.convert_force_edf = self._convert_force_edf.isChecked()
+        s.convert_deface = self._convert_deface.isChecked()
+        s.convert_deface_engine = (
+            self._convert_deface_engine.currentData()
+            or s.convert_deface_engine
+        )
 
         s.post_run_metadata = self._post_run_metadata.isChecked()
         s.post_metadata_fill_todos = self._post_metadata_fill_todos.isChecked()
+        s.metadata_fill_scope = (
+            self._metadata_fill_scope.currentData() or "recommended"
+        )
+        s.post_fixup_companions = self._post_fixup_companions.isChecked()
+        s.post_fixup_citation = self._post_fixup_citation.isChecked()
         s.post_run_validate = self._post_run_validate.isChecked()
         s.post_validate_strict = self._post_validate_strict.isChecked()
         s.post_validate_html = self._post_validate_html.isChecked()

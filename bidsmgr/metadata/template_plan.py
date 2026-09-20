@@ -127,7 +127,13 @@ ORIGIN_ABSENT = "not in the data"
 ORIGIN_USUALLY_DERIVED = "usually read from the data, but missing here"
 
 
-def _as_template_field(spec, origin: str = ORIGIN_ABSENT) -> TemplateField:
+def as_template_field(spec, origin: str = ORIGIN_ABSENT) -> TemplateField:
+    """A schema :class:`~bidsmgr.schema.FieldInfo` as a template question.
+
+    Public because two subsystems now need it: the metadata templates it was
+    written for, and the Editor's sidecar form, which builds its controls
+    from the same description so a field is filled the same way in both.
+    """
     return TemplateField(
         name=spec.name,
         level=spec.level,
@@ -159,7 +165,7 @@ def dataset_description_section(bids_root=None) -> TemplateSection:
     except (KeyError, ValueError, OSError):
         specs = []
     fields = [
-        _as_template_field(s)
+        as_template_field(s)
         for s in specs
         # Written by the tool itself: the version it validates against and the
         # provenance chain. Asking would invite a wrong answer.
@@ -232,7 +238,7 @@ def sidecar_section(
     # or that an anonymiser removed it, either of which the user can act on.
     usually = derived_fields(datatype)
     fields = [
-        _as_template_field(
+        as_template_field(
             s,
             ORIGIN_USUALLY_DERIVED if s.name in usually else ORIGIN_ABSENT,
         )
@@ -256,7 +262,7 @@ def sidecar_section(
         n_files=n_files,
         supplied=tuple(sorted((skip & declared_names) - CONVERTER_PRIVATE)),
         declared=tuple(
-            _as_template_field(spec)
+            as_template_field(spec)
             for spec in specs
             if spec.level != "prohibited"
         ),

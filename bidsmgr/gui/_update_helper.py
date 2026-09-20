@@ -22,7 +22,6 @@ import argparse
 import os
 import platform
 import subprocess
-import sys
 import time
 
 
@@ -49,7 +48,12 @@ def _wait_for_parent_windows(pid: int, timeout_s: float) -> bool:
 
     SYNCHRONIZE = 0x00100000
     WAIT_OBJECT_0 = 0
-    WAIT_TIMEOUT = 0x102
+    # Not used, and kept on purpose: it is the OTHER value
+    # WaitForSingleObject returns, so the pair is what makes the
+    # `result == WAIT_OBJECT_0` below legible as "exited" rather than
+    # "timed out". Deleting it to satisfy the linter would trade a
+    # documented Win32 contract for a tidier report.
+    WAIT_TIMEOUT = 0x102  # noqa: F841
 
     kernel32 = ctypes.windll.kernel32
     handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)

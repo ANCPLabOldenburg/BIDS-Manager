@@ -26,7 +26,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from bidsval import schema as bidsval_schema
+from ..vendor.bidsval import schema as bidsval_schema
 from bidsschematools.types.namespace import Namespace
 
 _BUNDLED_DIR = Path(__file__).parent / "bundled"

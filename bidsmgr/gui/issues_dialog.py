@@ -23,17 +23,14 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QScrollArea,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from .models import COLUMNS, InventoryTableModel
 from .delegates import ROW_STATE_ROLE
-from .theme_manager import CUR
-from .widgets import StatusBadge, ValMessage
+from .widgets import ElidedPushButton, StatusBadge, ValMessage
 
 
 # Human-readable titles per severity. Drives the dialog window title +
@@ -67,30 +64,29 @@ class _RowCard(QFrame):
         self._row = row
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(14, 12, 14, 12)
-        v.setSpacing(8)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(5)
 
         # Header row: clickable "jump →" link styled as a flat button.
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
-        head.setSpacing(8)
+        head.setSpacing(6)
 
         # Row identifier is a button so it gets focus + keyboard support
         # for free. Styled by QSS to look like a link rather than a
-        # button (no border, accent color, hand cursor).
-        self._title_btn = QPushButton(title)
+        # button (no border, accent color, hand cursor). Elided rather than
+        # Preferred: a long basename used to set the dialog's width floor,
+        # so the window opened wide and could not be narrowed.
+        self._title_btn = ElidedPushButton(title)
         self._title_btn.setObjectName("issue-card-title")
         self._title_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._title_btn.setFlat(True)
-        self._title_btn.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred,
-        )
         self._title_btn.clicked.connect(lambda: self.activated.emit(self._row))
         head.addWidget(self._title_btn, 1)
 
         jump = QLabel("jump →")
         jump.setObjectName("issue-card-jump-hint")
-        head.addWidget(jump)
+        head.addWidget(jump, 0)
         v.addLayout(head)
 
         # One ValMessage per issue. ``warn`` and ``skip`` use the amber
@@ -132,7 +128,8 @@ class IssuesDialog(QDialog):
         title = _SEVERITY_LABEL.get(severity, severity.title())
         count = self._count(model, severity)
         self.setWindowTitle(f"{title} · {count} row{'s' if count != 1 else ''}")
-        self.resize(620, 640)
+        self.resize(520, 560)
+        self.setMinimumWidth(340)
         self._severity = severity
 
         outer = QVBoxLayout(self)
@@ -143,8 +140,8 @@ class IssuesDialog(QDialog):
         header = QFrame()
         header.setObjectName("issue-dialog-header")
         h = QHBoxLayout(header)
-        h.setContentsMargins(18, 14, 18, 14)
-        h.setSpacing(10)
+        h.setContentsMargins(14, 10, 14, 10)
+        h.setSpacing(8)
 
         badge = StatusBadge(severity if severity in ("err", "warn") else "skip")
         h.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -172,8 +169,8 @@ class IssuesDialog(QDialog):
         body = QWidget()
         body.setObjectName("issue-dialog-body")
         bl = QVBoxLayout(body)
-        bl.setContentsMargins(16, 14, 16, 14)
-        bl.setSpacing(10)
+        bl.setContentsMargins(10, 8, 10, 8)
+        bl.setSpacing(6)
         self._cards_layout = bl
 
         scroll.setWidget(body)

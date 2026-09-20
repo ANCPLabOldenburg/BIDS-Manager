@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,

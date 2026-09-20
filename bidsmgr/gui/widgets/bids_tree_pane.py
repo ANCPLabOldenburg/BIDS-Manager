@@ -41,9 +41,13 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QColor, QDesktopServices
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QLabel,
     QMenu,
+    QPushButton,
+    QHBoxLayout,
+    QSizePolicy,
     QStackedLayout,
     QTreeWidget,
     QTreeWidgetItem,
@@ -52,8 +56,14 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import icons
-from ..delegates.bids_tree import BADGE_ROLE, BidsTreeDelegate
+from ..delegates.bids_tree import (
+    BADGE_ROLE,
+    COUNT_ROLE,
+    ISSUE_ROLE,
+    BidsTreeDelegate,
+)
 from ..theme_manager import CUR
+from .panel_frame import HEADER_EXTRAS
 from .primitives import PaneHeader
 
 # Severity ordering for folder rollup — pick the worst of any descendant.
@@ -81,6 +91,9 @@ _FOLDER_RECORDING_SUFFIXES: tuple[str, ...] = (".ds", ".mff")
 # Item data roles.
 PATH_ROLE = Qt.ItemDataRole.UserRole          # absolute path string
 COLOR_TOKEN_ROLE = Qt.ItemDataRole.UserRole + 1  # palette token for foreground
+# COUNT_ROLE and ISSUE_ROLE are defined by the delegate that paints them and
+# re-exported here, because every role the tree uses should be reachable from
+# the tree.
 
 
 def _color_token_for(entry_name: str, is_dir: bool) -> str:
@@ -122,12 +135,83 @@ def _norm_path(p) -> str:
         return str(Path(p))
 
 
+def is_hidden_name(name: str) -> bool:
+    """Would this entry be hidden with "Show hidden files" off?
+
+    One source of truth for the filter and for the dimming, so a name can
+    never be shown at full weight by one rule and hidden by the other.
+    Dotfiles plus the machinery directories in :data:`_SKIP_DIRS`.
+    """
+    return name.startswith(".") or name in _SKIP_DIRS
+
+
+def _is_hidden_item(item: QTreeWidgetItem) -> bool:
+    """A row the tree shows only because "show hidden" is on.
+
+    The fold and unfold buttons are about the DATASET. ``.bidsmgr/`` holds the
+    operation log and every backup it has taken, which is a great many rows
+    nobody asked to see, and somebody who opened it did so on purpose.
+    """
+    return is_hidden_name(item.text(0))
+
+
+def _renameable_entities(path: Path) -> list[tuple[str, str, str]]:
+    """Every entity the clicked row carries, as ``(key, value, label)``.
+
+    A folder named ``sub-01`` offers the subject; a file named
+    ``sub-01_task-rest_run-02_bold.nii.gz`` offers the task and the run as
+    well. Offering only what is actually in front of the user is the
+    difference between a menu that reads as an answer and one that reads as a
+    form to fill in.
+
+    The entity set and its display names come from the ACTIVE schema, in the
+    schema's own filename order, so this tracks the BIDS version in force
+    instead of whatever was true when the list was last hand-edited.
+    """
+    from ...editor.rename import entity_value
+    from ...schema import entity_key_info, entity_keys
+
+    name = path.name
+    if "-" not in name:
+        return []
+    out: list[tuple[str, str, str]] = []
+    for key in entity_keys():
+        value = entity_value(name, key)
+        if not value:
+            continue
+        try:
+            label = entity_key_info(key).display_name.lower()
+        except KeyError:
+            label = key
+        out.append((key, value, label))
+    return out
+
+
+def _in_session(path: Path) -> bool:
+    """Is this row inside a ``ses-`` folder, or does it name one?"""
+    return any(part.startswith("ses-") for part in path.parts)
+
+
+def _can_restructure(path: Path) -> bool:
+    """Is it meaningful to change the entities of what was clicked?
+
+    Anything at or under a subject. Above that there is no recording to speak
+    of, and the tool's own ``.bidsmgr/`` holds the operation log, which is the
+    one thing a restructuring must not restructure.
+    """
+    parts = path.parts
+    if any(is_hidden_name(part) for part in parts):
+        return False
+    return any(part.startswith("sub-") for part in parts)
+
+
 def _walk(
     folder: Path,
     parent_item: QTreeWidgetItem,
     *,
     depth: int,
     dirs: Optional[list[str]] = None,
+    show_hidden: bool = False,
 ) -> None:
     """Populate ``parent_item`` with the contents of ``folder``.
 
@@ -149,23 +233,67 @@ def _walk(
 
     pal = CUR()
     for entry in entries:
-        if entry.name.startswith("."):
-            continue
-        if entry.name in _SKIP_DIRS:
+        hidden = is_hidden_name(entry.name)
+        if hidden and not show_hidden:
             continue
         is_dir = entry.is_dir()
         item = QTreeWidgetItem([entry.name])
         token = _color_token_for(entry.name, is_dir)
         item.setData(0, PATH_ROLE, entry.path)
         item.setData(0, COLOR_TOKEN_ROLE, token)
-        item.setForeground(0, QColor(pal[token]))
+        if hidden:
+            # Shown but dimmed. A dataset carries .bidsmgr/, .git/ and
+            # .bidsignore, and none of them are the data: they should be
+            # reachable without competing with the tree proper.
+            item.setData(0, COLOR_TOKEN_ROLE, "muted")
+            item.setForeground(0, QColor(pal["muted"]))
+        else:
+            item.setForeground(0, QColor(pal[token]))
         item.setIcon(0, icons.icon_for_path(entry.name, is_dir=is_dir))
         parent_item.addChild(item)
         # Recurse only into real directories that are not folder-recordings.
         if is_dir and not _is_folder_recording(entry.name):
             if dirs is not None:
                 dirs.append(entry.path)
-            _walk(Path(entry.path), item, depth=depth + 1, dirs=dirs)
+            _walk(
+                Path(entry.path), item, depth=depth + 1, dirs=dirs,
+                show_hidden=show_hidden,
+            )
+            _annotate_folder(item, entry.name)
+
+
+def _annotate_folder(item: QTreeWidgetItem, name: str) -> None:
+    """Put what is inside a folder on the folder's own row.
+
+    A subject with three sessions and forty-seven files is a fact a reader
+    wants without expanding anything, and it is the difference between a tree
+    you scan and a tree you excavate. Counted from the children already built,
+    so it costs nothing extra.
+    """
+    sessions = 0
+    files = 0
+    stack = [item]
+    while stack:
+        node = stack.pop()
+        for i in range(node.childCount()):
+            child = node.child(i)
+            child_name = child.text(0)
+            if child.childCount():
+                if child_name.startswith("ses-"):
+                    sessions += 1
+                stack.append(child)
+            else:
+                files += 1
+    if not files:
+        return
+    bits = []
+    if sessions and name.startswith("sub-"):
+        bits.append(f"{sessions} ses")
+    bits.append(f"{files} file" + ("s" if files != 1 else ""))
+    # A ROLE, not the text. The text is the folder's name and several things
+    # look items up by it; painting the count in the delegate keeps the name
+    # the name.
+    item.setData(0, COUNT_ROLE, ", ".join(bits))
 
 
 class BidsTreePane(QWidget):
@@ -177,6 +305,35 @@ class BidsTreePane(QWidget):
     """
 
     file_selected = pyqtSignal(Path)
+    # Every selected row, for actions that act on a set rather than a file.
+    # ``file_selected`` still carries the one the panes should show, so the
+    # centre pane's behaviour is unchanged by multi-select existing.
+    selection_changed = pyqtSignal(list)
+    # (entity, current value) for a rename the user started from the tree.
+    # The pane does not open the dialog itself: the tree knows what was
+    # clicked, the panel knows the dataset root and what to refresh after.
+    # (entity, current value, the path that was clicked). The path is what
+    # lets the dialog open on THAT recording rather than on every file in the
+    # dataset carrying the same subject.
+    rename_requested = pyqtSignal(str, str, str)
+    # (paths, mode, session_mode) for adding or removing an entity, and for
+    # creating or removing a session, on what the user right-clicked. Same
+    # division of labour as ``rename_requested``: the tree knows what was
+    # clicked, the panel owns the root and the refresh.
+    entities_requested = pyqtSignal(list, str, bool)
+    # The paths to delete. Same division of labour again: the tree knows what
+    # was clicked, the panel owns the root, the dialog and the refresh.
+    delete_requested = pyqtSignal(list)
+    #: Remove faces from the clicked anatomical images. ``list[Path]``.
+    deface_requested = pyqtSignal(list)
+    #: Show one image before and after defacing. ``Path``, always a file.
+    deface_compare_requested = pyqtSignal(object)
+    #: Put the face back on the clicked images. ``list[Path]``.
+    deface_revert_requested = pyqtSignal(list)
+    #: Keep only the brain in the clicked images. ``list[Path]``.
+    strip_requested = pyqtSignal(list)
+    #: Put the clicked images side by side. ``list[Path]``, one or two.
+    compare_requested = pyqtSignal(list)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -186,6 +343,8 @@ class BidsTreePane(QWidget):
         # re-applies them onto the freshly-walked items instead of dropping
         # them. Keyed by normalised absolute path string.
         self._last_badges: dict[str, str] = {}
+        # (errors, warnings) per file, kept for the same reason.
+        self._last_counts: dict[str, tuple[int, int]] = {}
 
         # Live refresh: every visible directory is registered with a
         # ``QFileSystemWatcher`` so files created / deleted / renamed under the
@@ -202,7 +361,72 @@ class BidsTreePane(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        v.addWidget(PaneHeader("BIDS dataset"))
+        # A header row rather than a bare label: a tree of any size needs a
+        # way to get back to the top, and a way to go down one level at a
+        # time. Expand-all on a real dataset produces thousands of rows and
+        # is almost never what somebody wants.
+        header_row = QWidget()
+        header_line = QHBoxLayout(header_row)
+        header_line.setContentsMargins(0, 0, 6, 0)
+        header_line.setSpacing(4)
+        # Stretch 0 plus an explicit stretch after it. When this pane is
+        # wrapped in a ``PanelFrame`` the frame HIDES this header (it draws
+        # its own title), and a hidden widget is ignored by the layout: with
+        # the stretch on the label, the button group inherited the whole width
+        # and rendered as two buttons the width of the pane.
+        header_line.addWidget(PaneHeader("BIDS dataset"), 0)
+        header_line.addStretch(1)
+
+        # Two buttons in one group, because they are one control: fold the
+        # tree, or open one more level of it. Separating them across the
+        # header made them read as unrelated.
+        #
+        # Named ``HEADER_EXTRAS`` so that when this pane is wrapped in a
+        # ``PanelFrame`` the pair is lifted up beside the frame's title,
+        # rather than sitting on a row of its own under it. The group keeps a
+        # plain ``tree-nav`` styling hook through a dynamic property, because
+        # the object name is now spoken for.
+        group = QWidget()
+        group.setObjectName(HEADER_EXTRAS)
+        group.setProperty("navGroup", True)
+        group.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed,
+        )
+        group_line = QHBoxLayout(group)
+        group_line.setContentsMargins(0, 0, 0, 0)
+        group_line.setSpacing(0)
+
+        self._collapse_btn = QPushButton()
+        self._collapse_btn.setObjectName("tree-nav-left")
+        icons.apply_button(self._collapse_btn, "tree_collapse", size=15)
+        self._collapse_btn.setToolTip(
+            "Collapse everything.\n\nBack to the top of a tree you have "
+            "opened your way into."
+        )
+        self._collapse_btn.clicked.connect(self.collapse_all)
+        group_line.addWidget(self._collapse_btn)
+
+        self._expand_btn = QPushButton()
+        self._expand_btn.setObjectName("tree-nav-right")
+        icons.apply_button(self._expand_btn, "tree_expand", size=15)
+        self._expand_btn.setToolTip(
+            "Open the next level.\n\nOne click opens the shallowest depth "
+            "that still has anything folded, so a deep tree is explored a "
+            "level at a time instead of all at once. Hidden folders are not "
+            "opened. Greyed out when everything is already open."
+        )
+        self._expand_btn.clicked.connect(self.expand_next_level)
+        group_line.addWidget(self._expand_btn)
+
+        # Sized here rather than in the QSS, because a button that is allowed
+        # to grow WILL grow: these two are a fixed-size control, not text.
+        from ..theme_manager import scaled_px
+        for button in (self._collapse_btn, self._expand_btn):
+            button.setFixedSize(scaled_px(30), scaled_px(22))
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        header_line.addWidget(group, 0)
+        v.addWidget(header_row)
 
         # Stack the tree on top of an empty-state hint; we flip between
         # them as the user opens / clears a root.
@@ -219,6 +443,11 @@ class BidsTreePane(QWidget):
         _tree_ico = scaled_px(icons.DEFAULT_TREE_ICON_SIZE)
         self._tree.setIconSize(QSize(_tree_ico, _tree_ico))
         self._tree.setItemDelegate(BidsTreeDelegate(self._tree))
+        # Multi-select: the prerequisite for anything that acts on a set of
+        # files rather than one. Ctrl/Cmd-click adds, shift-click extends.
+        self._tree.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_show_context_menu)
@@ -241,6 +470,81 @@ class BidsTreePane(QWidget):
 
     def root(self) -> Optional[Path]:
         return self._root
+
+    # -- opening and closing -------------------------------------------
+
+    def collapse_all(self) -> None:
+        """Fold the dataset, and leave the dataset row itself open.
+
+        Collapsing the root as well would hide the whole tree behind one
+        chevron, which is not "back to the top", it is "gone".
+
+        Hidden folders fold along with everything else. The asymmetry with
+        :meth:`expand_next_level` is deliberate and is about rows: opening
+        ``.bidsmgr/`` produces hundreds nobody asked for, closing it produces
+        none, and a "collapse all" that leaves something open is a lie.
+        """
+        def visit(item: QTreeWidgetItem) -> None:
+            for i in range(item.childCount()):
+                child = item.child(i)
+                visit(child)
+                child.setExpanded(False)
+
+        for i in range(self._tree.topLevelItemCount()):
+            root = self._tree.topLevelItem(i)
+            visit(root)
+            root.setExpanded(True)
+        self._refresh_expand_button()
+
+    def expand_next_level(self) -> None:
+        """Open the shallowest depth that still has anything folded.
+
+        One level per click. Expand-all on a real dataset produces thousands
+        of rows, and the useful gesture is almost always "show me one more
+        step down".
+
+        Hidden folders are not opened: ``.bidsmgr/`` holds the operation log
+        and its backups, which is a great many rows nobody asked for.
+        """
+        depth = self._next_folded_depth()
+        if depth is None:
+            return
+
+        def visit(item: QTreeWidgetItem, level: int) -> None:
+            if level > depth or _is_hidden_item(item):
+                return
+            if item.childCount():
+                item.setExpanded(True)
+            for i in range(item.childCount()):
+                visit(item.child(i), level + 1)
+
+        for i in range(self._tree.topLevelItemCount()):
+            visit(self._tree.topLevelItem(i), 0)
+        self._refresh_expand_button()
+
+    def _next_folded_depth(self) -> Optional[int]:
+        """The shallowest depth holding a folded folder, or ``None``."""
+        best: Optional[int] = None
+
+        def visit(item: QTreeWidgetItem, depth: int) -> None:
+            nonlocal best
+            if _is_hidden_item(item):
+                return          # not ours to open
+            if item.childCount() and not item.isExpanded():
+                if best is None or depth < best:
+                    best = depth
+                return          # nothing under a folded node is reachable yet
+            for i in range(item.childCount()):
+                visit(item.child(i), depth + 1)
+
+        for i in range(self._tree.topLevelItemCount()):
+            visit(self._tree.topLevelItem(i), 0)
+        return best
+
+    def _refresh_expand_button(self) -> None:
+        """Grey out Expand when there is nothing left folded."""
+        if hasattr(self, "_expand_btn"):
+            self._expand_btn.setEnabled(self._next_folded_depth() is not None)
 
     def set_root(self, path: Optional[Path]) -> None:
         """Switch the tree to a new BIDS root (or clear it with ``None``).
@@ -269,14 +573,21 @@ class BidsTreePane(QWidget):
         if path is None or not path.exists() or not path.is_dir():
             self._root = None
             self._last_badges = {}
+            self._last_counts = {}
             self._stack.setCurrentIndex(0)
             return
 
         self._root = path
-        self._last_badges = {}  # new root -> stale badges no longer apply
+        # New root: stale badges and counts no longer apply to anything.
+        self._last_badges = {}
+        self._last_counts = {}
         dirs = self._populate(path)
         self._watch(dirs)
-        self._tree.expandToDepth(2)
+        # Opens shut, showing the dataset row and nothing else. Guessing at
+        # two levels meant a dataset with many subjects opened as a wall of
+        # rows the user then had to close, and it is the unfold button's job
+        # to go down anyway.
+        self.collapse_all()
         self._stack.setCurrentIndex(1)
 
     def refresh(self) -> None:
@@ -308,7 +619,7 @@ class BidsTreePane(QWidget):
         # Re-apply badges from the cache (validation has not re-run, but the
         # markers are still valid for files that survived the change).
         if self._last_badges:
-            self._apply_badge_map(self._last_badges)
+            self._apply_badge_map(self._last_badges, self._last_counts)
 
     def _populate(self, path: Path) -> list[str]:
         """Build the tree under ``path`` and return the dirs to watch."""
@@ -323,7 +634,13 @@ class BidsTreePane(QWidget):
         top.setIcon(0, icons.icon_for_path(path.name or str(path), is_dir=True))
         self._tree.addTopLevelItem(top)
         dirs: list[str] = [str(path)]
-        _walk(path, top, depth=0, dirs=dirs)
+        # Read the preference at build time rather than caching it, so a
+        # change in Settings shows on the next refresh without extra wiring.
+        from ..app_settings import AppSettings
+        _walk(
+            path, top, depth=0, dirs=dirs,
+            show_hidden=AppSettings.load().editor_show_hidden,
+        )
         self._stack.setCurrentIndex(1)
         return dirs
 
@@ -393,31 +710,51 @@ class BidsTreePane(QWidget):
             _walk_items(self._tree.topLevelItem(i))
         self._tree.verticalScrollBar().setValue(snap["scroll"])
 
-    def set_badges(self, severities: dict[Path, str]) -> None:
-        """Stamp per-row severity badges from a path → severity map.
+    def set_badges(
+        self,
+        severities: dict[Path, str],
+        counts: Optional[dict[Path, tuple[int, int]]] = None,
+    ) -> None:
+        """Stamp per-row severities, and how many findings each row has.
 
         ``severities`` keys must be absolute paths matching the paths
         stored at :data:`PATH_ROLE`. Files not in the map get no badge.
-        Directories receive the **rollup** (worst) severity across
-        their visible descendants.
+
+        ``counts`` maps the same paths to ``(errors, warnings)``. A folder
+        gets the SUM over its descendants, not the worst of them: the point
+        of a number is to say how much work is in there, and a subject with
+        one missing recommended field should not look like a subject with
+        ninety.
         """
         # Build a normalised lookup (string form) so we don't have to
         # construct ``Path`` for every tree item.
         leaf_map = {_norm_path(p): s for p, s in severities.items()}
+        count_map = {
+            _norm_path(p): (int(c[0]), int(c[1]))
+            for p, c in (counts or {}).items()
+        }
         # Remember so a live (watcher-driven) refresh can re-stamp the rebuilt
         # tree without re-running validation.
         self._last_badges = dict(leaf_map)
-        self._apply_badge_map(leaf_map)
+        self._last_counts = dict(count_map)
+        self._apply_badge_map(leaf_map, count_map)
 
-    def _apply_badge_map(self, leaf_map: dict[str, str]) -> None:
+    def _apply_badge_map(
+        self,
+        leaf_map: dict[str, str],
+        count_map: Optional[dict[str, tuple[int, int]]] = None,
+    ) -> None:
         """Stamp a normalised path -> severity map onto the current tree."""
+        count_map = count_map or {}
 
-        def visit(item: QTreeWidgetItem) -> str | None:
-            """Set this item's badge; return the rolled-up severity for
-            propagation to the parent."""
+        def visit(item: QTreeWidgetItem) -> tuple[str | None, int, int]:
+            """Set this item's badge and counts; return them rolled up."""
             children_worst: str | None = None
+            errors = warnings = 0
             for i in range(item.childCount()):
-                child_sev = visit(item.child(i))
+                child_sev, child_err, child_warn = visit(item.child(i))
+                errors += child_err
+                warnings += child_warn
                 if child_sev is not None:
                     if children_worst is None or \
                             _SEVERITY_RANK[child_sev] > _SEVERITY_RANK[children_worst]:
@@ -430,12 +767,15 @@ class BidsTreePane(QWidget):
             else:
                 # Leaf: look up by absolute path (normalised).
                 path_str = item.data(0, PATH_ROLE)
-                badge = leaf_map.get(_norm_path(path_str)) if path_str else None
-            if badge:
-                item.setData(0, BADGE_ROLE, badge)
-            else:
-                item.setData(0, BADGE_ROLE, None)
-            return badge
+                key = _norm_path(path_str) if path_str else None
+                badge = leaf_map.get(key) if key else None
+                errors, warnings = count_map.get(key, (0, 0)) if key else (0, 0)
+            item.setData(0, BADGE_ROLE, badge or None)
+            item.setData(
+                0, ISSUE_ROLE,
+                (errors, warnings) if (errors or warnings) else None,
+            )
+            return badge, errors, warnings
 
         for i in range(self._tree.topLevelItemCount()):
             visit(self._tree.topLevelItem(i))
@@ -445,8 +785,11 @@ class BidsTreePane(QWidget):
     def clear_badges(self) -> None:
         """Remove every badge from the tree (and forget the cached map)."""
         self._last_badges = {}
+        self._last_counts = {}
+
         def visit(item: QTreeWidgetItem) -> None:
             item.setData(0, BADGE_ROLE, None)
+            item.setData(0, ISSUE_ROLE, None)
             for i in range(item.childCount()):
                 visit(item.child(i))
 
@@ -482,13 +825,31 @@ class BidsTreePane(QWidget):
         for i in range(self._tree.topLevelItemCount()):
             visit(self._tree.topLevelItem(i))
 
+        # The fold/unfold pair is tinted from the palette too, and its icons
+        # came out of the cache that was just cleared.
+        icons.apply_button(self._collapse_btn, "tree_collapse", size=15)
+        icons.apply_button(self._expand_btn, "tree_expand", size=15)
+
     def _on_selection_changed(self) -> None:
         items = self._tree.selectedItems()
+        self.selection_changed.emit(self.selected_paths())
         if not items:
             return
+        # The FIRST selected row drives the viewer. Extending a selection with
+        # shift should not make the centre pane flicker through every file on
+        # the way, so only the anchor is published as the shown file.
         path_str = items[0].data(0, PATH_ROLE)
         if path_str:
             self.file_selected.emit(Path(path_str))
+
+    def selected_paths(self) -> list[Path]:
+        """Every selected row as a path, in tree order."""
+        out: list[Path] = []
+        for item in self._tree.selectedItems():
+            value = item.data(0, PATH_ROLE)
+            if value:
+                out.append(Path(value))
+        return out
 
     def _on_show_context_menu(self, position: QPoint) -> None:
         item = self._tree.itemAt(position)
@@ -518,6 +879,155 @@ class BidsTreePane(QWidget):
         copy_rel_path_action.triggered.connect(
             lambda: self._copy_relative_path(path)
         )
+
+        # Comparing is offered on ANY NIfTI, including one under
+        # derivatives/, because putting a derivative beside the scan it came
+        # from is the most common reason to want this. It sits above the
+        # restructuring block deliberately: it changes nothing.
+        selected_now = self.selected_paths()
+        clicked_path = Path(path)
+        images = [
+            p for p in (selected_now if clicked_path in selected_now
+                        and len(selected_now) > 1 else [clicked_path])
+            if p.is_file() and p.name.lower().endswith((".nii", ".nii.gz"))
+        ]
+        if images:
+            pair = len(images) > 1
+            compare_images = menu.addAction(
+                "Compare these two images..." if pair
+                else "Compare with another image..."
+            )
+            compare_images.setToolTip(
+                "Side by side with one set of controls: crosshair, slice, "
+                "plane, 3-D camera, effects and cut plane stay together."
+                + ("" if pair else " You pick the second image.")
+            )
+            compare_images.triggered.connect(
+                lambda _c=False, s=images[:2]: self.compare_requested.emit(s)
+            )
+            menu.addSeparator()
+
+        # Every entity the clicked row actually carries, so the menu offers
+        # renaming exactly what is in front of the user. A folder named
+        # sub-01 offers the subject; a func file offers task, run and echo.
+        renames = _renameable_entities(Path(path))
+        if renames:
+            menu.addSeparator()
+            for entity, value, label in renames:
+                action = menu.addAction(f"Rename {label} {entity}-{value}...")
+                action.setToolTip(
+                    f"Rename {entity}-{value} everywhere in the dataset, "
+                    "including the references inside IntendedFor, "
+                    "*_scans.tsv and participants.tsv."
+                )
+                action.triggered.connect(
+                    lambda _checked=False, e=entity, v=value:
+                        self.rename_requested.emit(e, v, str(path))
+                )
+
+        # Restructuring, on whatever the click covers. A right-click inside an
+        # existing multi-selection acts on the whole selection, which is what
+        # every file manager does and what makes "these four runs" one step;
+        # a click outside it acts on the one row, because that is plainly what
+        # was meant.
+        chosen = self.selected_paths()
+        clicked = Path(path)
+        scope = chosen if clicked in chosen and len(chosen) > 1 else [clicked]
+        if _can_restructure(clicked):
+            menu.addSeparator()
+            add_entity = menu.addAction("Add or change an entity...")
+            add_entity.setToolTip(
+                "Give these files an entity the schema allows them, placed "
+                "where the standard puts it. Sidecars and companion files "
+                "travel with the recording."
+            )
+            add_entity.triggered.connect(
+                lambda _c=False, s=scope:
+                    self.entities_requested.emit(s, "add", False)
+            )
+            drop_entity = menu.addAction("Remove an entity...")
+            drop_entity.setToolTip(
+                "Take an optional entity off these files. Required ones are "
+                "not offered, because a name without them has no reading."
+            )
+            drop_entity.triggered.connect(
+                lambda _c=False, s=scope:
+                    self.entities_requested.emit(s, "remove", False)
+            )
+
+            if _in_session(clicked):
+                session = menu.addAction("Remove from its session...")
+                mode = "remove"
+            else:
+                session = menu.addAction("Create a session for this...")
+                mode = "add"
+            session.setToolTip(
+                "A session is a folder and an entity at once. The "
+                "*_scans.tsv travels to the level BIDS puts it at and every "
+                "reference follows."
+            )
+            session.triggered.connect(
+                lambda _c=False, s=scope, m=mode:
+                    self.entities_requested.emit(s, m, True)
+            )
+
+            menu.addSeparator()
+
+            deface = menu.addAction("Remove faces...")
+            deface.setToolTip(
+                "Blank the face on the anatomical images here, leaving the "
+                "brain alone. Shows which images, and which cannot be done, "
+                "before anything is written. One undoable step."
+            )
+            deface.triggered.connect(
+                lambda _c=False, s=scope: self.deface_requested.emit(s)
+            )
+
+            if clicked.is_file() and clicked.name.endswith((".nii", ".nii.gz")):
+                compare = menu.addAction("Compare with the original...")
+                compare.setToolTip(
+                    "Show the image before defacing beside the one in the "
+                    "dataset, with one crosshair between them, so you can "
+                    "check that the face went and the brain did not."
+                )
+                compare.triggered.connect(
+                    lambda _c=False, p=clicked:
+                        self.deface_compare_requested.emit(p)
+                )
+
+            strip = menu.addAction("Remove the skull...")
+            strip.setToolTip(
+                "Keep only the brain. The result is a derivative, so it goes "
+                "to derivatives/ and the original scan is left alone."
+            )
+            strip.triggered.connect(
+                lambda _c=False, s=scope: self.strip_requested.emit(s)
+            )
+
+            revert = menu.addAction("Put the face back...")
+            revert.setToolTip(
+                "Restore these images from the undefaced copies kept in "
+                "sourcedata/ or in the edit history."
+            )
+            revert.triggered.connect(
+                lambda _c=False, s=scope: self.deface_revert_requested.emit(s)
+            )
+
+            menu.addSeparator()
+            what = (
+                f"{len(scope)} items" if len(scope) > 1
+                else ("this folder and everything in it" if clicked.is_dir()
+                      else "this recording")
+            )
+            delete = menu.addAction(f"Delete {what}...")
+            delete.setToolTip(
+                "Shows what would go first, including the *_scans.tsv rows, "
+                "the IntendedFor entries and the folders this empties. One "
+                "step in the Editor's history, so it can be undone."
+            )
+            delete.triggered.connect(
+                lambda _c=False, s=scope: self.delete_requested.emit(s)
+            )
 
         menu.addSeparator()
 

@@ -29,13 +29,61 @@ from bidsmgr.fixups.blood import (
     is_blood_role,
     parse_blood_role,
 )
+from tests.fixtures.data_root import dataset
 
-BLOOD_DATA = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/PET_BLOOD/pmod"
+def _published_blood() -> Path | None:
+    """The blood files in the sample the documentation publishes.
+
+    Fetched and cached, so a runner gets this tier with no local data and no
+    manual copying. The sample carries one whole-blood file and one plasma
+    file, which is exactly the pair the first test below needs.
+
+    Returns None when the machine is offline and has nothing cached; the gate
+    then falls through to the lab's own collection.
+    """
+    try:
+        from tests.fixtures import sample_data
+
+        root = sample_data.fetch("pet")
+    except Exception:
+        return None
+    found = sorted(root.rglob("*.bld"))
+    return found[0].parent if found else None
+
+
+PUBLISHED_BLOOD = _published_blood()
+
+# The lab's own PMOD collection, which is richer: it also carries the mixed
+# manual/autosampled case the published sample has no example of.
+BLOOD_DATA = dataset("PET_BLOOD", "pmod")
+# Two gates, because the two cases need different things.
+#
+# The whole-blood/plasma pair is in the PUBLISHED sample, so it runs on any
+# machine that can reach the internet: no env var, no local copy. That is the
+# point, and it is why this tier no longer skips on a runner.
+#
+# The mixed manual/autosampled case has no published example, so it still
+# needs the lab's own PMOD collection and stays opt-in.
+any_blood = pytest.mark.skipif(
+    PUBLISHED_BLOOD is None
+    and (
+        os.environ.get("BIDS_MANAGER_REAL_PET_BLOOD") != "1"
+        or BLOOD_DATA is None or not BLOOD_DATA.is_dir()
+    ),
+    reason=(
+        "needs either the published PET sample (downloaded automatically) "
+        "or BIDS_MANAGER_REAL_PET_BLOOD=1 with $BIDSMGR_TEST_DATA"
+    ),
 )
+
 real_blood = pytest.mark.skipif(
-    os.environ.get("BIDS_MANAGER_REAL_PET_BLOOD") != "1" or not BLOOD_DATA.is_dir(),
-    reason="needs BIDS_MANAGER_REAL_PET_BLOOD=1 and the PMOD example files",
+    os.environ.get("BIDS_MANAGER_REAL_PET_BLOOD") != "1"
+    or BLOOD_DATA is None or not BLOOD_DATA.is_dir(),
+    reason=(
+        "needs the lab's PMOD collection: the mixed manual/autosampled case "
+        "has no published example. The whole-blood and plasma pair, which "
+        "does, is covered above from the downloaded sample."
+    ),
 )
 
 
@@ -279,9 +327,17 @@ def test_the_dictionary_describes_the_table_beside_it(
 # --------------------------------------------------------------------------
 
 
-@real_blood
+@any_blood
 def test_whole_blood_and_plasma_convert(tmp_path: Path) -> None:
-    src = BLOOD_DATA / "Ex_bld_wholeblood_and_plasma_only"
+    # The published sample holds exactly this pair, so this case runs
+    # anywhere. The local collection is used when it is configured, because
+    # more real files is better, but it is not required.
+    src = (
+        BLOOD_DATA / "Ex_bld_wholeblood_and_plasma_only"
+        if BLOOD_DATA is not None
+        and (BLOOD_DATA / "Ex_bld_wholeblood_and_plasma_only").is_dir()
+        else PUBLISHED_BLOOD
+    )
     basename = "sub-001_trc-FDG_run-1_pet"
     staging = _staged(tmp_path, basename)
     task = _task(

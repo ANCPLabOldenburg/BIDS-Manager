@@ -28,15 +28,13 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QScrollArea,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from ..editor.types import FileVerdict, Severity, ValidationReport
-from .widgets import StatusBadge, ValMessage
+from .widgets import ElidedPushButton, StatusBadge, ValMessage
 
 
 _SEVERITY_LABEL: dict[str, str] = {
@@ -50,6 +48,13 @@ class _FileCard(QFrame):
     """One file's findings: path button header + stacked ValMessages."""
 
     activated = pyqtSignal(Path)
+    # A Fix button inside one of this card's messages. Carries the file as
+    # well as the field, because the dialog lists many files and the button
+    # alone cannot say which one it belongs to.
+    #
+    # This was the defect: the button was drawn whenever the finding had a
+    # fix label, and connected to nothing, so it did nothing at all.
+    fix_requested = pyqtSignal(Path, str)
 
     def __init__(
         self,
@@ -65,26 +70,21 @@ class _FileCard(QFrame):
         self._path = path
 
         v = QVBoxLayout(self)
-        v.setContentsMargins(14, 12, 14, 12)
-        v.setSpacing(8)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(5)
 
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
-        head.setSpacing(8)
+        head.setSpacing(6)
 
+        # A long path must not force the dialog wide. This button elides to
+        # the room it is given (full path stays in the tooltip), rather than
+        # clipping a word in half the way a plain QPushButton does.
         title_text = str(path)
-        self._title_btn = QPushButton(title_text)
+        self._title_btn = ElidedPushButton(title_text)
         self._title_btn.setObjectName("issue-card-title")
         self._title_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._title_btn.setFlat(True)
-        self._title_btn.setToolTip(title_text)
-        # Ignored horizontal policy: a long path must not force the dialog
-        # wide. The button clips to the available width (full path stays in
-        # the tooltip) so the chips dialog stays compact.
-        self._title_btn.setMinimumWidth(40)
-        self._title_btn.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
-        )
         self._title_btn.clicked.connect(
             lambda: self.activated.emit(self._path)
         )
@@ -115,14 +115,19 @@ class _FileCard(QFrame):
                     if isinstance(issue.severity, Severity)
                     else str(issue.severity)
                 )
-                v.addWidget(ValMessage(
+                message = ValMessage(
                     severity=sev_str,
                     rule=issue.rule_id,
                     body_html=issue.message,
                     fix_label=issue.fix_label,
                     field=issue.field,
                     schema_rule=issue.schema_rule,
-                ))
+                )
+                message.fix_requested.connect(
+                    lambda field, p=self._path:
+                        self.fix_requested.emit(p, field)
+                )
+                v.addWidget(message)
 
 
 class EditorIssuesDialog(QDialog):
@@ -138,6 +143,10 @@ class EditorIssuesDialog(QDialog):
     """
 
     file_selected = pyqtSignal(Path)
+    # (file, field) when a Fix button inside the listing is pressed. The panel
+    # decides where that lands, because it owns the panes; this dialog only
+    # knows which file and which field the button belonged to.
+    fix_requested = pyqtSignal(Path, str)
 
     def __init__(
         self,
@@ -198,8 +207,8 @@ class EditorIssuesDialog(QDialog):
         body = QWidget()
         body.setObjectName("issue-dialog-body")
         bl = QVBoxLayout(body)
-        bl.setContentsMargins(16, 14, 16, 14)
-        bl.setSpacing(10)
+        bl.setContentsMargins(10, 8, 10, 8)
+        bl.setSpacing(6)
         if not matched:
             empty = QLabel(
                 f"No files with severity ‘{severity}’ in this report."
@@ -228,6 +237,7 @@ class EditorIssuesDialog(QDialog):
                     suffix=f.suffix,
                 )
                 card.activated.connect(self._on_card_activated)
+                card.fix_requested.connect(self._on_fix_requested)
                 bl.addWidget(card)
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
@@ -301,6 +311,15 @@ class EditorIssuesDialog(QDialog):
         if rel_or_abs.is_absolute():
             return rel_or_abs
         return (self._bids_root / rel_or_abs).resolve()
+
+    def _on_fix_requested(self, path: Path, field: str) -> None:
+        """Take the user to where the finding is actually edited.
+
+        Same destination the validation pane's Fix button reaches, because it
+        is the same question: the panel owns the routing, and this dialog only
+        has to say which file and which field.
+        """
+        self.fix_requested.emit(path, field)
 
     def _on_card_activated(self, path: Path) -> None:
         self.file_selected.emit(path)

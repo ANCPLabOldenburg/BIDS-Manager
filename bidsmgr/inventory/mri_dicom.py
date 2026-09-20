@@ -239,7 +239,6 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
     given = pn.given_name.strip() if pn and pn.given_name else ""
     family = pn.family_name.strip() if pn and pn.family_name else ""
     pid = str(getattr(ds, "PatientID", "")).strip()
-    birth = str(getattr(ds, "PatientBirthDate", "")).strip()
     subj = given or pid or "UNKNOWN"
     study = (
         getattr(ds, "StudyDescription", None)

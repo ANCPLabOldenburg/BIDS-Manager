@@ -24,16 +24,25 @@ from bidsmgr.inventory.pet_ecat import (
     find_ecat_files,
     is_ecat_file,
 )
+from tests.fixtures import sample_data
 
-REAL_DATA = os.environ.get("BIDS_MANAGER_REAL_PET_DATA") == "1"
 # The three ECAT phantoms, in the raw data where they persist. This used to
 # point at a scratch directory under bids_manager_outputs, which is conversion
 # OUTPUT and gets cleared, so these tests silently found nothing the moment the
 # folder was tidied away.
-PHANTOMS = Path(
-    "/Users/karelo/Development/datasets/BIDS_Manager/raw_data/PET_DICOMS"
-    "/PN000001/OpenNeuroPET-Phantoms/sourcedata"
-)
+# The PUBLISHED sample, which any machine with a network can fetch, and which
+# carries a real ECAT ``.v``. These tests used to need a local copy of the
+# OpenNeuroPET phantom set and an opt-in variable, so they ran on one laptop
+# and skipped on every runner: coverage that existed on paper and nowhere
+# else. What they actually need is a real ECAT file, and the sample has one.
+#
+# ``pet_ecat_file`` returns None when the sample is neither cached nor
+# reachable, so a module-level constant stays importable offline and the gate
+# below is what decides.
+ECAT_SAMPLE = sample_data.pet_ecat_file()
+ECAT_DIR = ECAT_SAMPLE.parent if ECAT_SAMPLE else Path("__no_ecat_sample__")
+
+REAL_DATA = ECAT_SAMPLE is not None
 
 
 # ---------------------------------------------------------------------------
@@ -156,12 +165,17 @@ def test_unreadable_ecat_reports_an_error_rather_than_raising(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not REAL_DATA, reason="needs BIDS_MANAGER_REAL_PET_DATA=1")
+@pytest.mark.skipif(not REAL_DATA, reason="the published PET sample could not be fetched (offline with an empty cache)")
 def test_real_phantoms_probe_cleanly() -> None:
     from bidsmgr.inventory.pet_ecat import probe_ecat
 
-    files = find_ecat_files(PHANTOMS)
-    assert len(files) == 3, "expected the three ECAT phantoms"
+    files = find_ecat_files(ECAT_DIR)
+    # However many the data source carries. This used to demand exactly three,
+    # which was a guard on the lab's multi-vendor phantom set rather than an
+    # assertion about the code, and it is what stopped the test running
+    # anywhere else. The substance is the loop: every real ECAT probes
+    # cleanly, with frame timing that makes sense.
+    assert files, "no ECAT file to probe"
     for fp in files:
         probe = probe_ecat(fp)
         assert probe is not None
@@ -220,27 +234,27 @@ def test_a_missing_orientation_field_is_survived() -> None:
     assert np.array_equal(_orient_to_affine(_Img(), data), data)
 
 
-@pytest.mark.skipif(not REAL_DATA, reason="needs BIDS_MANAGER_REAL_PET_DATA=1")
+@pytest.mark.skipif(not REAL_DATA, reason="the published PET sample could not be fetched (offline with an empty cache)")
 def test_a_single_frame_scan_is_written_as_3d(tmp_path) -> None:
     """A static scan must not look dynamic. nibabel reports ECAT as
     (x, y, z, frames) whatever the count, and a trailing length-1 axis makes
     anything keying on ndim treat a static image as a time series."""
     import nibabel
 
-    src = find_ecat_files(PHANTOMS)[0]
+    src = find_ecat_files(ECAT_DIR)[0]
     result = EcatDirect().convert(_task(tmp_path, src), tmp_path / "staging")
     assert result.success, result.error
     nii = next(p for p in result.staged_files if p.name.endswith(".nii.gz"))
     assert nibabel.load(str(nii)).ndim == 3
 
 
-@pytest.mark.skipif(not REAL_DATA, reason="needs BIDS_MANAGER_REAL_PET_DATA=1")
+@pytest.mark.skipif(not REAL_DATA, reason="the published PET sample could not be fetched (offline with an empty cache)")
 def test_real_phantom_converts_with_matching_voxels(tmp_path) -> None:
     """The written NIfTI must carry the ECAT's scaled data, not raw counts."""
     import nibabel
     import numpy as np
 
-    src = find_ecat_files(PHANTOMS)[0]
+    src = find_ecat_files(ECAT_DIR)[0]
     result = EcatDirect().convert(_task(tmp_path, src), tmp_path / "staging")
     assert result.success, result.error
 

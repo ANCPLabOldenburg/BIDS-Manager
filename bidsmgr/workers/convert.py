@@ -85,7 +85,10 @@ class ConvertWorker(QThread):
         recording_meta: Optional[Path] = None,
         raw_root: Optional[Path] = None,
         skip_residuals: bool = True,
+        preserve_curation: bool = True,
         force_edf: bool = False,
+        deface: bool = False,
+        deface_engine: str = "allineate",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -99,7 +102,10 @@ class ConvertWorker(QThread):
         self._recording_meta = Path(recording_meta) if recording_meta is not None else None
         self._raw_root = Path(raw_root) if raw_root is not None else None
         self._skip_residuals = skip_residuals
+        self._preserve_curation = preserve_curation
         self._force_edf = force_edf
+        self._deface = deface
+        self._deface_engine = deface_engine
         # Cooperative stop flag, polled by ``run_convert`` between subjects
         # and between per-subject tasks.
         self._stop = threading.Event()
@@ -140,7 +146,10 @@ class ConvertWorker(QThread):
                 recording_meta=self._recording_meta,
                 raw_root=self._raw_root,
                 skip_residuals=self._skip_residuals,
+                preserve_curation=self._preserve_curation,
                 force_edf=self._force_edf,
+                deface=self._deface,
+                deface_engine=self._deface_engine,
                 cancel_check=self._stop.is_set,
             )
             if rc == 130 or self._stop.is_set():

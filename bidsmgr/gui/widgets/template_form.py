@@ -231,6 +231,14 @@ def build_field_widget(field, suggestions: tuple = ()) -> QWidget:
         combo.addItem("")
         combo.addItems([str(v) for v in field.enum])
         combo.setProperty("template_kind", "enum")
+        # The same treatment every other combo here gets, and it was missing
+        # only from this branch. Left to itself a vocabulary combo keeps Qt's
+        # Preferred policy and sizes to its widest item on first show, which
+        # inside a folded section means it is measured while hidden: it came out
+        # 49px wide, too narrow to draw "3D" beside the arrow, so a field the
+        # conversion had answered read as a stunted box with a fragment of a
+        # glyph in it.
+        _let_it_shrink(combo)
         fit_popup_to_contents(combo)
         return combo
 

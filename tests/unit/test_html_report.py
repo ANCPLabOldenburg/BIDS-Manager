@@ -145,7 +145,11 @@ class TestIssueRendering:
             ),
         ]
         out = render_html(report)
-        assert "sub-001/func/sub-001_task-rest_bold.json" in out
+        # The report renders str(path), which is native, and that is right
+        # for a local file somebody opens in a browser on that machine. The
+        # test compares on the same footing instead of assuming POSIX.
+        rendered = str(Path("sub-001/func/sub-001_task-rest_bold.json"))
+        assert rendered in out
         assert "func/bold" in out  # the typed annotation
         assert "TaskDescription" in out
 

@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from bidsval import Severity as BvSeverity
-from bidsval import schema as bidsval_schema
+from ..vendor.bidsval import Severity as BvSeverity
+from ..vendor.bidsval import schema as bidsval_schema
 
 from . import bidsmgr_checks as bm
 from . import pet_checks
@@ -191,13 +191,23 @@ def to_bm_report(
 
 
 def _mirror_sidecar_findings(files: list[FileVerdict]) -> None:
-    """Append a mirrored copy of each data file's field-bearing findings onto
-    its sibling ``.json`` verdict (in place).
+    """Put each finding on the file it is actually about (in place).
 
-    A sidecar metadata finding canonically attaches to the data file
-    (``*_bold.nii.gz``); this also surfaces it on the editable ``*_bold.json``
-    so it shows where the user edits and the fix button can jump to the field.
-    Mirrors carry ``mirrored=True`` so they render but are not counted twice.
+    bidsval attaches a metadata finding to the DATA file, because that is what
+    the standard describes: ``sub-01_bold.nii.gz`` is the thing that must have
+    a ``RepetitionTime``. But a metadata finding is not about the image, it is
+    about the sidecar, and the sidecar is where a user reads it, edits it and
+    fixes it. Counting it against the image put the number in the tree beside
+    a file nothing can be done to.
+
+    So a field-bearing finding is MOVED to the sibling ``.json`` and a mirror
+    is left on the data file, rather than the other way round. Both still
+    show, and the mirror carries ``mirrored=True`` so it is not counted twice.
+    Findings about the data itself (an empty file, an unreadable header) carry
+    no field and stay where they are.
+
+    When there is no sibling ``.json`` on disk the finding stays on the data
+    file, because moving it to a file that does not exist would hide it.
     """
     index = {str(f.path): f for f in files}
     for f in files:
@@ -207,14 +217,23 @@ def _mirror_sidecar_findings(files: list[FileVerdict]) -> None:
         target = index.get(str(sib))
         if target is None:
             continue
-        mirrors = [
-            issue.model_copy(update={"mirrored": True})
-            for issue in f.issues
+        moving = [
+            issue for issue in f.issues
             if issue.field and not issue.mirrored
         ]
-        if mirrors:
-            target.issues.extend(mirrors)
-            target.severity = rollup_severity([i.severity for i in target.issues])
+        if not moving:
+            continue
+        # The canonical copy goes where the user edits it.
+        target.issues.extend(moving)
+        # The data file keeps a mirror, so a reader looking at the image still
+        # sees that something is said about it.
+        kept = [i for i in f.issues if i not in moving]
+        kept.extend(
+            issue.model_copy(update={"mirrored": True}) for issue in moving
+        )
+        f.issues = kept
+        f.severity = rollup_severity([i.severity for i in f.issues])
+        target.severity = rollup_severity([i.severity for i in target.issues])
 
 
 def _ensure_field_rows(files: list[FileVerdict], bids_root: Path) -> None:

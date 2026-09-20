@@ -9,7 +9,9 @@ Public API:
 
 * ``list_datatypes``, ``list_suffixes``, ``list_extensions``
 * ``required_entities``, ``optional_entities``, ``deprecated_entities``,
-  ``allowed_entities``, ``entity_info``, ``entity_format``, ``entity_order``
+  ``allowed_entities``, ``entity_info``, ``entity_format``, ``entity_order``,
+  ``entity_keys``, ``entity_key_info``, ``directory_entity_keys``
+* ``opaque_directories``, ``datatypes_with_suffix``
 * ``required_sidecar_fields``, ``recommended_sidecar_fields``,
   ``optional_sidecar_fields``, ``deprecated_sidecar_fields``,
   ``dataset_description_fields``, ``field_metadata``
@@ -25,6 +27,8 @@ from __future__ import annotations
 from .engine import (
     coerce,
     allowed_entities,
+    datatypes_with_suffix,
+    directory_entity_keys,
     build_basename,
     build_relative_path,
     deprecated_entities,
@@ -32,12 +36,15 @@ from .engine import (
     deprecated_sidecar_fields,
     entity_format,
     entity_info,
+    entity_key_info,
+    entity_keys,
     entity_order,
     field_applies,
     field_metadata,
     list_datatypes,
     list_extensions,
     list_suffixes,
+    opaque_directories,
     optional_entities,
     optional_sidecar_fields,
     recommended_sidecar_fields,
@@ -83,6 +90,12 @@ __all__ = [
     "allowed_entities",
     "entity_info",
     "entity_format",
+    "entity_keys",
+    "entity_key_info",
+    "directory_entity_keys",
+    # layout
+    "opaque_directories",
+    "datatypes_with_suffix",
     # sidecar fields
     "required_sidecar_fields",
     "recommended_sidecar_fields",

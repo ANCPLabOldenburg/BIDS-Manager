@@ -78,7 +78,6 @@ from .resolve import (
 )
 from .schema_types import bids_channel_types, mne_channel_types
 from .serialize import (
-    DEFAULT_POWER_LINE_FREQ,
     RECORDING_META_SIDECAR,
     default_spec,
     dump_spec,
@@ -134,7 +133,6 @@ __all__ = [
     "resolve_pet",
     "bids_channel_types",
     "mne_channel_types",
-    "DEFAULT_POWER_LINE_FREQ",
     "RECORDING_META_SIDECAR",
     "default_spec",
     "dump_spec",

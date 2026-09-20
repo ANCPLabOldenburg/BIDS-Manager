@@ -1,0 +1,399 @@
+# Full test matrix on the lab's own machines.
+#
+# Modelled on MEEGqc's tests.yml, with two deliberate differences.
+#
+# 1. SELF-HOSTED RUNNERS, not GitHub's.
+#    MEEGqc's suite is `workflow_dispatch` only, and says why in its own
+#    comment: "to conserve GitHub Actions minutes". This one is manual too,
+#    for a different reason: two office laptops should not grind through a
+#    35-cell matrix because somebody pushed a typo fix. Self-hosted also keeps
+#    the datasets on the machines that already hold them.
+#
+#    The trade is real and worth naming. A manual gate only catches what
+#    somebody remembers to check, so run it before a release, after touching
+#    anything platform-shaped (paths, subprocesses, Qt windows, packaging),
+#    and whenever a change felt bigger than it looked.
+#
+# 2. nox + uv, not setup-python + pip.
+#    `noxfile.py` is the ONE definition of "run the tests". The same command
+#    works on your Mac, over SSH, and here, so CI cannot drift away from what
+#    you run by hand. uv fetches whatever interpreter a cell needs: nothing is
+#    pre-installed on the runners beyond uv itself.
+#
+# And one tier MEEGqc does not have. It runs `pip install -e .`, which proves
+# the DEPENDENCIES resolve on each Python. The `installed` job below builds
+# the wheel, installs it into a clean environment and drives the tool from
+# outside the checkout. Only the second kind can see a broken wheel, and this
+# repository shipped one: the vendored bidsval schemas were absent from every
+# wheel for weeks while the source tree was complete and every test green.
+#
+# SECURITY. A self-hosted runner on a PUBLIC repository executes whatever a
+# workflow tells it to, on real hardware in a real office. There is therefore
+# no `pull_request` trigger: a fork's PR gets no run here. If one is ever
+# added, set Settings -> Actions -> "Require approval for all outside
+# collaborators" in the same change.
+
+# RETRIES. Every test tier gets up to SIX attempts before the job is called
+# failed. These tiers fail for reasons that are not the code often enough to be
+# worth absorbing: a runner that lost the network mid-download, a Qt session
+# that raced another cell, a transient uv resolution. Re-running by hand is
+# what happens otherwise, so it may as well happen here.
+#
+# Six chained steps rather than `cmd || cmd` or a third-party retry action.
+# The shell operator is not portable: PowerShell 5.1 has no `||`, this
+# repository's self-hosted Windows runner has no Git Bash, and `shell: bash` is
+# therefore not available. A third-party action would execute code from outside
+# this repository on office hardware, which the security note above rules out.
+#
+# The chaining is what keeps it to the attempts actually needed. Each step runs
+# only `if` the PREVIOUS one's `outcome` was failure, and `outcome` is the
+# result before continue-on-error is applied. A step that never ran has outcome
+# `skipped`, not `failure`, so once an attempt succeeds the rest of the chain
+# skips itself. Only the last attempt omits continue-on-error, so only a sixth
+# failure fails the job.
+#
+# A genuinely broken commit therefore costs six runs of the tier. That is the
+# deliberate trade: a red matrix is read by a person, and a flaky red one stops
+# being read at all.
+
+name: tests
+
+on:
+  # MANUAL ONLY, the same choice MEEGqc's tests.yml makes, for a different
+  # reason: there it conserves paid GitHub minutes, here it keeps two office
+  # laptops from grinding through a 35-cell matrix every time somebody pushes
+  # a typo fix. Run it when you want an answer.
+  #
+  #   Actions -> tests -> Run workflow
+  #   gh workflow run tests.yml
+  #   gh workflow run tests.yml -f full=false     # skip the slow GUI row
+  #
+  # To make it automatic again, uncomment either block below. Note that
+  # `pull_request` must stay OFF while the runners are self-hosted and this
+  # repository is public: see the security note at the top of this file.
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Run the slow GUI tier on every Python (off = 3.12 only)"
+        type: boolean
+        default: true
+  # push:
+  #   branches: ["main"]
+  # schedule:
+  #   - cron: "0 3 * * *"      # 03:00 UTC, laptops idle
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+# NOTE: no UV_CACHE_DIR here. An earlier version set it to
+# `${{ runner.temp }}/uv-cache`, which is invalid: `runner` is a JOB context
+# and only `github`, `inputs`, `secrets` and `vars` exist at workflow level.
+# GitHub rejects the whole file for it.
+#
+# It was unnecessary anyway. uv already caches outside the workspace by
+# default (~/.cache/uv, or %LOCALAPPDATA%\uv\cache), which is the entire
+# reason the override existed: actions/checkout runs `git clean -ffdx` and
+# would wipe anything inside the checkout. The default already survives that
+# and persists between runs on a self-hosted runner.
+
+# NOTE: no workflow-level `defaults: run: shell: bash`.
+#
+# An earlier version had one, copied from MEEGqc's tests.yml. That works there
+# because MEEGqc uses GitHub-HOSTED Windows runners, which ship Git Bash. This
+# workflow runs on a bare Windows laptop, where every Windows job died before
+# it started with:
+#
+#     Error: bash: command not found
+#
+# Nothing here needs bash. Every step is a single `uv tool run nox` command,
+# which runs the same in PowerShell as in sh. The one place that does need a
+# shell (`plan`, below) sets it on the step, and runs on Linux anyway.
+
+jobs:
+  # A tiny job whose only purpose is to decide whether the GUI tier runs on
+  # one Python or five, so the decision is written once instead of repeated
+  # in every matrix expression.
+  #
+  # `inputs.full` is empty for any trigger that is not workflow_dispatch, so
+  # the default here is the full row: if the push or schedule blocks above are
+  # ever uncommented, they get everything rather than silently getting one
+  # cell and looking like a passing full run.
+  plan:
+    runs-on: [self-hosted, linux]
+    outputs:
+      gui_pythons: ${{ steps.pick.outputs.gui_pythons }}
+    steps:
+      - id: pick
+        # The one step in this file that is shell-specific. It is a Linux job,
+        # so bash is a safe assumption here in a way it was not globally.
+        shell: bash
+        run: |
+          if [ "${{ inputs.full }}" = "false" ]; then
+            echo 'gui_pythons=["3.12"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'gui_pythons=["3.10","3.11","3.12","3.13","3.14"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  lint:
+    name: lint
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: lint1
+        continue-on-error: true
+        run: uv tool run nox -s lint
+      - id: lint2
+        if: steps.lint1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s lint
+      - id: lint3
+        if: steps.lint2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s lint
+      - id: lint4
+        if: steps.lint3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s lint
+      - id: lint5
+        if: steps.lint4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s lint
+      - id: lint6
+        if: steps.lint5.outcome == 'failure'
+        name: attempt 6 of 6
+        run: uv tool run nox -s lint
+
+  unit:
+    name: unit ${{ matrix.os }} py${{ matrix.python }}
+    strategy:
+      fail-fast: false          # a matrix exists to say WHICH cells fail
+      matrix:
+        os: [linux, windows]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    runs-on: [self-hosted, "${{ matrix.os }}"]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: unit1
+        continue-on-error: true
+        run: uv tool run nox -s "unit-${{ matrix.python }}"
+      - id: unit2
+        if: steps.unit1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "unit-${{ matrix.python }}"
+      - id: unit3
+        if: steps.unit2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "unit-${{ matrix.python }}"
+      - id: unit4
+        if: steps.unit3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "unit-${{ matrix.python }}"
+      - id: unit5
+        if: steps.unit4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "unit-${{ matrix.python }}"
+      - id: unit6
+        if: steps.unit5.outcome == 'failure'
+        name: attempt 6 of 6
+        run: uv tool run nox -s "unit-${{ matrix.python }}"
+
+  installed:
+    # The pip-installation tier, and stronger than `pip install -e .`: it
+    # builds the wheel, force-reinstalls it into a clean environment, and runs
+    # the tool from a directory where the checkout cannot shadow it. Console
+    # scripts, a real EEG + MEG conversion, the GUI.
+    #
+    # Every Python, because "the wheel installs on 3.10 but not 3.14" is a
+    # real failure mode and the only way to know is to try each one.
+    name: installed ${{ matrix.os }} py${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    runs-on: [self-hosted, "${{ matrix.os }}"]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: installed1
+        continue-on-error: true
+        run: uv tool run nox -s "installed-${{ matrix.python }}"
+      - id: installed2
+        if: steps.installed1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "installed-${{ matrix.python }}"
+      - id: installed3
+        if: steps.installed2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "installed-${{ matrix.python }}"
+      - id: installed4
+        if: steps.installed3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "installed-${{ matrix.python }}"
+      - id: installed5
+        if: steps.installed4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "installed-${{ matrix.python }}"
+      - id: installed6
+        if: steps.installed5.outcome == 'failure'
+        name: attempt 6 of 6
+        run: uv tool run nox -s "installed-${{ matrix.python }}"
+
+  gui:
+    # About five minutes per cell, so ten cells is most of the matrix's wall
+    # clock: roughly 25 minutes on each laptop, in parallel. Run with
+    # `full=false` when you want the rest of the matrix back in a few minutes
+    # and do not need the whole GUI row.
+    name: gui ${{ matrix.os }} py${{ matrix.python }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      # NO max-parallel. It was set to 2 as a segfault mitigation and has been
+      # removed, because it bought nothing and cost a great deal.
+      #
+      # What it cost: `max-parallel` is a cap on the WHOLE matrix, across every
+      # OS, so two cells ran at a time out of ten however many runner instances
+      # were free. Idle runners sat idle while the row drained two at a time,
+      # which is the queueing this repository added runners to avoid.
+      #
+      # What it bought: nothing measurable. gui-3.10 on Linux still segfaults
+      # in the same test with the cap in place, and the other nine cells were
+      # green before it. The per-session XDG cache isolation in noxfile.py is
+      # the part of that mitigation worth keeping, and it stays.
+      matrix:
+        os: [linux, windows]
+        python: ${{ fromJSON(needs.plan.outputs.gui_pythons) }}
+    runs-on: [self-hosted, "${{ matrix.os }}"]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: gui1
+        continue-on-error: true
+        run: uv tool run nox -s "gui-${{ matrix.python }}"
+      - id: gui2
+        if: steps.gui1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "gui-${{ matrix.python }}"
+      - id: gui3
+        if: steps.gui2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "gui-${{ matrix.python }}"
+      - id: gui4
+        if: steps.gui3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "gui-${{ matrix.python }}"
+      - id: gui5
+        if: steps.gui4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "gui-${{ matrix.python }}"
+      - id: gui6
+        if: steps.gui5.outcome == 'failure'
+        name: attempt 6 of 6
+        run: uv tool run nox -s "gui-${{ matrix.python }}"
+
+  integration:
+    # scan -> convert -> metadata -> validate against the multimodal sample
+    # the documentation publishes: one participant, 56 MB, real Siemens and GE
+    # DICOM, real EDF, real FIF. The tier the last three defects belonged to,
+    # every one of them an end-to-end behaviour no unit test could see.
+    #
+    # Fetches the sample once per runner and caches it in the user's cache
+    # directory, OUTSIDE the workspace, because actions/checkout runs
+    # `git clean -ffdx` and would otherwise force a re-download every run. A
+    # runner with no network and no cache skips these rather than failing.
+    name: integration ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+    runs-on: [self-hosted, "${{ matrix.os }}"]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: integration1
+        continue-on-error: true
+        run: uv tool run nox -s "integration-3.12"
+      - id: integration2
+        if: steps.integration1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "integration-3.12"
+      - id: integration3
+        if: steps.integration2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "integration-3.12"
+      - id: integration4
+        if: steps.integration3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "integration-3.12"
+      - id: integration5
+        if: steps.integration4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s "integration-3.12"
+      - id: integration6
+        if: steps.integration5.outcome == 'failure'
+        name: attempt 6 of 6
+        run: uv tool run nox -s "integration-3.12"
+
+  wheel:
+    # Cheap structural check on the artefact: does the zip carry its package
+    # data. `installed` proves the stronger thing; this names the missing glob
+    # directly when it fails.
+    name: wheel contents
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      # Up to 6 attempts. See RETRIES at the top of this file.
+      - id: wheel1
+        continue-on-error: true
+        run: uv tool run nox -s wheel
+      - id: wheel2
+        if: steps.wheel1.outcome == 'failure'
+        name: attempt 2 of 6
+        continue-on-error: true
+        run: uv tool run nox -s wheel
+      - id: wheel3
+        if: steps.wheel2.outcome == 'failure'
+        name: attempt 3 of 6
+        continue-on-error: true
+        run: uv tool run nox -s wheel
+      - id: wheel4
+        if: steps.wheel3.outcome == 'failure'
+        name: attempt 4 of 6
+        continue-on-error: true
+        run: uv tool run nox -s wheel
+      - id: wheel5
+        if: steps.wheel4.outcome == 'failure'
+        name: attempt 5 of 6
+        continue-on-error: true
+        run: uv tool run nox -s wheel
+      - id: wheel6
+        if: steps.wheel5.outcome == 'failure'
+        name: attempt 6 of 6
+        run: uv tool run nox -s wheel

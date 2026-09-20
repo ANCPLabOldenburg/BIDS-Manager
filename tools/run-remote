@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Run the tests on another machine, from this terminal, without committing.
+#
+#   tools/run-remote office-win  nox -s unit-3.12
+#   tools/run-remote office-linux pytest tests/gui -k tree
+#   tools/run-remote office-win  pytest tests/unit/test_rename_split.py -x
+#
+# CI answers "is main broken". It cannot answer "did my change fix the Windows
+# bug", because a push-and-wait cycle is too slow to think in and because the
+# change is not committed yet. This syncs the WORKING TREE, uncommitted edits
+# and all, runs one command there, and streams the output back.
+#
+# Requires ssh and rsync here, and a checkout plus uv on the far side. See
+# ancp_development_context_mds/reference/CI_SELF_HOSTED_SETUP.md for the
+# Tailscale and OpenSSH setup that makes the host names resolve from anywhere.
+
+set -euo pipefail
+
+if [ $# -lt 2 ]; then
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+fi
+
+HOST="$1"; shift
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Where the tree lands on the far side. One directory per checkout name, so
+# two projects do not overwrite each other.
+REMOTE_DIR="${RUN_REMOTE_DIR:-bidsmgr-remote/$(basename "$HERE")}"
+
+echo "==> syncing $(basename "$HERE") to $HOST:$REMOTE_DIR"
+
+# --delete so a file removed here is removed there: a stale module that still
+# imports is the most confusing possible result from a remote run.
+#
+# The excludes are the things that must NOT travel. .venv and .nox hold
+# absolute paths and platform binaries and would be actively wrong on the far
+# side; .git is large and not needed to run tests; the caches are noise.
+rsync -az --delete \
+    --exclude '.git/' \
+    --exclude '.nox/' \
+    --exclude '.venv/' \
+    --exclude 'environments/' \
+    --exclude '__pycache__/' \
+    --exclude '*.pyc' \
+    --exclude '.pytest_cache/' \
+    --exclude 'dist/' \
+    --exclude 'build/' \
+    --exclude '*.egg-info/' \
+    --exclude '.tmp_bidsmgr/' \
+    "$HERE/" "$HOST:$REMOTE_DIR/"
+
+echo "==> $HOST: $*"
+
+# `bash -lc` so the login profile runs and uv is on PATH. Windows runs this
+# through its own default shell; see the setup document for pointing that at
+# PowerShell.
+#
+# The remote exit code is this script's exit code, so it composes: you can put
+# it in a loop or a && chain and it behaves.
+ssh -o BatchMode=yes "$HOST" \
+    "bash -lc 'cd \"$REMOTE_DIR\" && export PATH=\"\$HOME/.local/bin:\$PATH\" && $*'"

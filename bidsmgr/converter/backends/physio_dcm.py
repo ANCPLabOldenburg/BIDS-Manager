@@ -21,7 +21,6 @@ import logging
 import time
 import warnings
 from pathlib import Path
-from typing import Optional
 
 from ..types import ConvertResult, ConvertTask
 

@@ -19,9 +19,7 @@ import logging
 from typing import Optional
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QFrame,
     QLabel,
     QTreeWidget,
     QTreeWidgetItem,
@@ -30,7 +28,6 @@ from PyQt6.QtWidgets import (
 )
 
 from .models import InventoryTableModel
-from .theme_manager import CUR
 from .widgets import PaneHeader
 
 log = logging.getLogger(__name__)

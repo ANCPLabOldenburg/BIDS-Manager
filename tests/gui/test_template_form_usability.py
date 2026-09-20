@@ -538,3 +538,90 @@ def test_an_array_of_strings_is_still_left_alone(qtbot):
     qtbot.addWidget(widget)
     write_field_widget(widget, ["subsets, iterations"])
     assert read_field_widget(widget, field) == ["subsets, iterations"]
+
+
+def test_a_vocabulary_combo_follows_its_row_like_every_other_control(qtbot):
+    """A schema ``enum`` combo was the one control that kept Qt's own sizing.
+
+    Every other combo the form builds — the suggestion box, the boolean — is put
+    through ``_let_it_shrink``, which drops the minimum to zero and makes the
+    control expand into its row. The ``field.enum`` branch was missed, so it
+    kept the Preferred policy and sized itself to its widest item on first
+    show. Inside a folded section that measurement happens while the widget is
+    hidden, and ``MRAcquisitionType`` came out 49 px wide: too narrow to draw
+    "3D" beside the arrow, so a field the conversion HAD answered read as a
+    stunted box with a fragment of a glyph in it.
+    """
+    from PyQt6.QtWidgets import QSizePolicy
+
+    field = _any_field("anat", "T1w", "MRAcquisitionType")
+    assert field.enum, "this test needs a field the schema gives a vocabulary"
+
+    widget = build_field_widget(field, ())
+    qtbot.addWidget(widget)
+
+    assert isinstance(widget, QComboBox)
+    assert widget.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
+    assert widget.minimumWidth() == 0
+    assert widget.minimumContentsLength() == 0
+
+
+def test_every_control_in_the_answered_block_shares_the_field_column(qtbot, tmp_path):
+    """The whole block, not one field.
+
+    This is what the user actually reported: values that were in the scaffold
+    but unreadable on screen. A control's own ``minimumSizeHint`` cannot catch
+    it — the stunted combo agreed with itself that 49 px was enough. What gives
+    it away is the row beside it: the block is one ``QFormLayout``, so every
+    control in it is handed the same field column, and one that opts out of the
+    layout is the bug.
+    """
+    import json
+
+    from PyQt6.QtWidgets import QLineEdit
+
+    from bidsmgr.gui.widgets.template_form import CollapsibleSection
+
+    scaffold = tmp_path / "inv.tsv.recording_meta.json"
+    scaffold.write_text(json.dumps({
+        "converter_preview": {
+            "anat/T1w": {
+                "MRAcquisitionType": "3D",
+                "Manufacturer": "Siemens",
+                "MagneticFieldStrength": 3,
+                "MTState": False,
+            },
+        },
+    }), encoding="utf-8")
+
+    dlg = RecordingMetaDialog(
+        scaffold, present_datatypes={"anat"}, present_pairs=[("anat", "T1w")],
+    )
+    qtbot.addWidget(dlg)
+    dlg.resize(800, 900)
+    dlg.show()
+    for _ in range(6):
+        before = len(dlg.findChildren(CollapsibleSection))
+        _expand_all(dlg)
+        if len(dlg.findChildren(CollapsibleSection)) == before:
+            break
+
+    blocks = [
+        s for s in dlg.findChildren(CollapsibleSection)
+        if "Already answered" in s._title_text
+    ]
+    assert blocks, "the conversion answered four fields; the block must exist"
+    block = blocks[0]
+
+    edits = [w for w in block.findChildren(QLineEdit) if w.isVisible()]
+    combos = [c for c in block.findChildren(QComboBox) if c.isVisible()]
+    assert edits, "MagneticFieldStrength is a plain box"
+    assert combos, "MRAcquisitionType, Manufacturer and MTState are combos"
+
+    # A combo's line edit is a child of the combo, so measure the combo itself.
+    column = max(w.width() for w in edits if w.parent() not in combos)
+    for combo in combos:
+        assert combo.width() == column, (
+            f"{combo.currentText()!r} is drawn {combo.width()}px wide in a "
+            f"{column}px column, so its value is clipped"
+        )

@@ -333,3 +333,108 @@ def test_convert_finished_refreshes_output_pane(qtbot, tmp_path: Path) -> None:
     for i in range(panel._output_pane._tree.topLevelItemCount()):
         labels.extend(walk(panel._output_pane._tree.topLevelItem(i)))
     assert any("marker.tsv" in lbl for lbl in labels)
+
+
+# ---------------------------------------------------------------------------
+# Lifetime: a scan in flight when the pane goes away
+# ---------------------------------------------------------------------------
+
+
+def test_the_signals_object_is_not_parented_to_the_pane() -> None:
+    """The fix for the Linux segfault, stated as a property.
+
+    The pane's disk walk runs on the GLOBAL thread pool, which nothing waits
+    for, and finishes by emitting through ``_scan_signals``. Parenting that
+    object to the pane put its C++ lifetime on the GUI thread while a pool
+    thread could still be inside the emit, and destroying a QObject while
+    another thread emits its signal is undefined behaviour in Qt: emission
+    takes the sender's connection mutex, and that mutex is part of the object
+    being freed.
+
+    No Python guard can cover it. ``sip.isdeleted`` followed by ``emit`` is
+    two steps with a window between them, and no ``except`` clause catches a
+    segmentation fault. Unparented, the runnable's own reference keeps the
+    object alive, so there is nothing to race.
+
+    Asserted here rather than left to a comment because re-parenting it is a
+    one-word change that looks tidier and reintroduces a crash that only
+    shows up on a loaded CI machine.
+    """
+    pane = OutputFsPane()
+    try:
+        assert pane._scan_signals.parent() is None, (
+            "parenting the signals object to the pane reintroduces the "
+            "cross-thread lifetime race"
+        )
+    finally:
+        pane.deleteLater()
+
+
+def test_a_scan_still_running_when_the_pane_dies_does_not_crash(
+    qtbot, tmp_path: Path,
+) -> None:
+    """The sequence that crashed, driven on purpose.
+
+    Start a walk over a tree big enough that it is still running, drop the
+    pane, and let the pool finish into it. Before the lifetime fix this was a
+    race that landed on whichever test happened to be running when the
+    collector got round to the widget, which is exactly why it read as a flake
+    and moved from test to test between runs.
+
+    This cannot FAIL politely if it regresses: the process dies. That is the
+    honest shape of the assertion, and it is worth having, because a crash
+    attributed to this test names the cause instead of the victim.
+    """
+    import gc
+
+    root = tmp_path / "bids"
+    for subject in range(12):
+        for datatype in ("anat", "func", "fmap", "eeg"):
+            folder = root / f"sub-{subject:03d}" / datatype
+            folder.mkdir(parents=True)
+            for n in range(12):
+                (folder / f"file-{n:02d}.json").write_text("{}")
+
+    pane = OutputFsPane()
+    pane.set_root(root)
+    assert pane._scan_in_progress or pane._completed_scan_generation, (
+        "expected a scan to have been dispatched"
+    )
+
+    # Drop it without waiting. The runnable is still on the pool.
+    pane.deleteLater()
+    del pane
+    gc.collect()
+
+    # Drain the event loop so the queued result is delivered, into a pane that
+    # is no longer there.
+    qtbot.wait(300)
+
+
+def test_a_late_result_after_the_root_changed_is_dropped(
+    qtbot, tmp_path: Path,
+) -> None:
+    """The generation guard, which is a different concern from lifetime.
+
+    A stale scan must not paint over a newer one. Lifetime says the emit is
+    safe; the generation says the RESULT is ignored.
+    """
+    first, second = tmp_path / "a", tmp_path / "b"
+    (first / "sub-001" / "anat").mkdir(parents=True)
+    (first / "sub-001" / "anat" / "x.json").write_text("{}")
+    (second / "sub-002" / "eeg").mkdir(parents=True)
+    (second / "sub-002" / "eeg" / "y.json").write_text("{}")
+
+    pane = OutputFsPane()
+    qtbot.addWidget(pane)
+    pane.set_root(first)
+    pane.set_root(second)          # supersedes the first before it can land
+    _wait_scan_idle(qtbot, pane)
+
+    labels = {
+        pane._tree.topLevelItem(i).text(0)
+        for i in range(pane._tree.topLevelItemCount())
+    }
+    assert "b" in labels or any("sub-002" in x for x in labels), (
+        f"the newer root should be what is rendered, got {labels}"
+    )

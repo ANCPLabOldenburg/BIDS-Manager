@@ -84,6 +84,17 @@ class FieldInfo:
     # The unit the schema declares, empty when it declares none. A form shows
     # it beside the box so nobody has to guess whether a dose is in MBq or Bq.
     unit: str = ""
+    # Every JSON type the field accepts. ``type`` is empty for the many fields
+    # the schema declares as ``anyOf`` (PowerLineFrequency is a number OR the
+    # string "n/a"), which told a caller nothing except that it could not
+    # know. Anything deciding what may be WRITTEN into a field needs this.
+    accepts: tuple[str, ...] = ()
+    # An arbitrary string is valid here. NOT the same as having a string
+    # variant: PowerLineFrequency's is constrained to "n/a".
+    accepts_free_text: bool = False
+    # The literal "n/a" is accepted, which is how BIDS spells "asked, and
+    # there is no answer".
+    accepts_na: bool = False
     required: bool = False
     # True when the level or the rule's applicability depends on something a
     # datatype and suffix cannot settle. Show such a field, but present it as
