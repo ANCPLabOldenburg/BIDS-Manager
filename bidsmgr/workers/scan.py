@@ -94,6 +94,7 @@ class ScanWorker(QThread):
         preview_converter_fields: bool = True,
         user_hints=None,
         exclusions=None,
+        index_widths=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -110,6 +111,7 @@ class ScanWorker(QThread):
         # to the engine's frozen dataclasses by the caller.
         self._user_hints = user_hints
         self._exclusions = exclusions
+        self._index_widths = index_widths
         # Cooperative stop flag. ``run_scan`` polls ``_stop.is_set`` at
         # DICOM-read boundaries and raises ``OperationCancelled`` when set.
         self._stop = threading.Event()
@@ -123,6 +125,27 @@ class ScanWorker(QThread):
         self._stop.set()
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _warm_schema_for(df) -> None:
+        """Fill the schema lookups the inventory table is about to make."""
+        try:
+            from .. import schema as schema_mod
+
+            pairs = set()
+            for column in ("datatype", "bids_guess_datatype"):
+                if column not in df.columns:
+                    continue
+                suffixes = df.get("bids_guess_suffix")
+                if suffixes is None:
+                    continue
+                pairs |= {
+                    (str(a or ""), str(b or ""))
+                    for a, b in zip(df[column], suffixes)
+                }
+            schema_mod.warm_pairs(pairs)
+        except Exception:  # noqa: BLE001 - warming must never fail a scan
+            return
+
     def run(self) -> None:
         """Execute the scan. Called by ``QThread.start()`` on the worker
         thread; do not invoke directly.
@@ -157,7 +180,16 @@ class ScanWorker(QThread):
                 cancel_check=self._stop.is_set,
                 user_hints=self._user_hints,
                 exclusions=self._exclusions,
+                index_widths=self._index_widths,
             )
+            # Warm the schema for the types this scan actually produced,
+            # HERE, on the worker thread. Binding the table asks "which
+            # sidecar fields apply" for each distinct type, and answering
+            # cold is a walk of the standard's rule tree: measured at 589 ms
+            # of frozen window immediately after a scan, with the spinner
+            # already stopped. A dozen lookups here cost nothing and the
+            # table then binds without touching the schema.
+            self._warm_schema_for(df)
             self.progress.emit(
                 f"Scan complete: {len(df)} row(s) → {self._output_tsv}"
             )

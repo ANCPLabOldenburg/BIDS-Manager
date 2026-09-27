@@ -20,9 +20,9 @@ Pipeline:
    within each subject+session; assign ``run-1, run-2, …`` only to groups
    with more than one row, ordered by acquisition time. Singletons get no
    run entity.
-6. Emit ``proposed_datatype`` / ``proposed_basename`` / ``Proposed BIDS name``
+6. Emit ``datatype`` / ``bids_name`` / ``bids_path``
    for every classified row (best effort — even when the schema would
-   reject it). ``proposed_issues`` records any required-entity / format
+   reject it). ``issues`` records any required-entity / format
    violations so the GUI / planner can prompt the user.
 7. Write the TSV.
 """
@@ -40,6 +40,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import pandas as pd
 
@@ -53,7 +54,7 @@ from ..classifier.user_rules import (
 )
 from ..classifier import user_rules as user_rules_module
 from ..inventory import probe_convert as probe_convert_module
-from ..inventory._time import parse_dicom_time_seconds as _parse_dicom_time_seconds
+from ..inventory._time import parse_time_seconds as _parse_time_seconds
 from ..inventory.eeg_meg import EEG_MEG_COLUMNS, scan_eeg_meg
 from ..inventory.mri_dicom import (
     BIDS_ENTITIES_COLUMNS,
@@ -84,7 +85,7 @@ BIDS_GUESS_COLUMNS: tuple[str, ...] = (
     "bids_guess_entities",
     "bids_guess_confidence",
     "bids_guess_skip",
-    "proposed_issues",
+    "issues",
     "repetition_type",
 )
 
@@ -194,7 +195,7 @@ def _reroute_b0_references_to_fmap_epi(
 
     The user can re-route back to ``dwi/_dwi`` via the GUI if the b0
     series is meant as a real b=0-only DWI acquisition. We surface the
-    decision in ``proposed_issues`` (added downstream by
+    decision in ``issues`` (added downstream by
     ``_augment_dataframe``).
     """
 
@@ -290,7 +291,7 @@ def _rows_from_dataframe(df: pd.DataFrame) -> list[InventoryRow]:
         if not source_dir:
             continue
         uids_field = str(r.get("series_uid") or "")
-        bids_name = str(r.get("BIDS_name") or "").replace("sub-", "") or None
+        participant = str(r.get("participant_id") or "").replace("sub-", "") or None
         session = str(r.get("session") or "").replace("ses-", "") or None
         for uid in (u for u in uids_field.split("|") if u):
             rows.append(
@@ -299,11 +300,11 @@ def _rows_from_dataframe(df: pd.DataFrame) -> list[InventoryRow]:
                     source=Path(source_dir),
                     series_uid=uid,
                     series_description=str(r.get("sequence") or ""),
-                    subject_hint=bids_name,
+                    subject_hint=participant,
                     session_hint=session,
                     n_files=int(r.get("n_files") or 0),
                     acq_time=str(r.get("acq_time") or "") or None,
-                    fine_modality=str(r.get("modality") or "") or None,
+                    sequence_kind=str(r.get("sequence_kind") or "") or None,
                     image_type=str(r.get("image_type") or "") or None,
                     raw_metadata={
                         "source_folder": str(r.get("source_folder") or ""),
@@ -392,9 +393,27 @@ def _run_classifier_chain(
     # Seed force user hints (0.95) before BidsGuess so BidsGuess (0.85) can't
     # displace them.
     chosen: dict[str, Classification] = dict(force_hints)
+    # A ``discard`` recommendation carries no positive content: it says only
+    # that dcm2niix would not convert the series. It therefore must NOT
+    # pre-empt a classifier that can actually NAME the series, so it is held
+    # back and applied after the fallback has had its turn.
+    #
+    # This matters because dcm2niix v1.0.20260724 renamed the label it uses
+    # for DWI scanner-derivatives from ``derived`` to ``discard``. ``derived``
+    # was never a schema datatype, so it was rejected here and the row fell
+    # through to ``sequence_dict``, which recognises ``FA`` / ``colFA`` /
+    # ``trace`` as the raw ``dwi/`` suffixes BIDS 1.11 defines for them.
+    # ``discard`` IS accepted (as a no-emit decision), so taking it at face
+    # value silently stopped converting eight real files in the lab's own
+    # data. Deferring it restores that and keeps the recommendation for the
+    # rows nothing else claims.
+    deferred_skips: dict[str, Classification] = {}
     for c in bg_results:
         if not _is_classification_schema_valid(c):
             log.debug("BidsGuess result rejected by schema: %s", c)
+            continue
+        if c.skip or c.datatype == "discard":
+            deferred_skips[c.row_id.hex] = c
             continue
         # BidsGuess often emits a generic ``dwi`` suffix for series whose
         # SeriesDescription clearly marks them as scanner-derivatives
@@ -423,6 +442,12 @@ def _run_classifier_chain(
     fb_results = sequence_dict.classify(needs_fallback)
     for c in fb_results:
         chosen.setdefault(c.row_id.hex, c)
+
+    # Last: the held-back ``discard`` recommendations, for the rows no
+    # classifier could name. ``setdefault`` is the whole point, so a series
+    # something else recognised keeps that classification.
+    for key, c in deferred_skips.items():
+        chosen.setdefault(key, c)
 
     return chosen
 
@@ -567,8 +592,8 @@ def _detect_aborts(
             sorted_members = sorted(
                 name_members,
                 key=lambda k: (
-                    _parse_dicom_time_seconds(rows_by_id[k].acq_time)
-                    if _parse_dicom_time_seconds(rows_by_id[k].acq_time) is not None
+                    _parse_time_seconds(rows_by_id[k].acq_time)
+                    if _parse_time_seconds(rows_by_id[k].acq_time) is not None
                     else float("inf"),
                     rows_by_id[k].series_uid or "",
                 ),
@@ -584,8 +609,8 @@ def _detect_aborts(
                     continue
                 if (row_l.n_files or 0) < abort_min_files:
                     continue
-                t_e = _parse_dicom_time_seconds(row_e.acq_time)
-                t_l = _parse_dicom_time_seconds(row_l.acq_time)
+                t_e = _parse_time_seconds(row_e.acq_time)
+                t_l = _parse_time_seconds(row_l.acq_time)
                 if t_e is None or t_l is None:
                     # No timing information: be conservative — only flag if
                     # there are 3+ same-name same-image_type acquisitions.
@@ -685,7 +710,7 @@ _DERIVATIVES_PIPELINE = "dcm2niix"
 
 
 def _propose_basename(
-    bids_name: str,
+    participant: str,
     session: str,
     classification: Classification,
 ) -> tuple[str, str, list[str], dict[str, str]]:
@@ -707,12 +732,12 @@ def _propose_basename(
     if classification.skip or classification.datatype == "discard":
         return ("", "", [], {})
 
-    if not bids_name:
-        return ("", "", ["BIDS_name missing"], {})
+    if not participant:
+        return ("", "", ["participant_id missing"], {})
 
     entities = dict(classification.candidate_entities)
     entities.pop("subject", None)
-    entities = {"subject": bids_name, **entities}
+    entities = {"subject": participant, **entities}
     if session:
         entities["session"] = session
 
@@ -760,12 +785,12 @@ def _propose_derivatives_basename(
     ``trace`` — are handled by the regular path above.
     """
 
-    bids_name = entities.get("subject", "")
+    participant = entities.get("subject", "")
     session = entities.get("session", "")
-    if not bids_name:
-        return ("", "", ["BIDS_name missing"])
+    if not participant:
+        return ("", "", ["participant_id missing"])
 
-    parts = [f"derivatives/{_DERIVATIVES_PIPELINE}", f"sub-{bids_name}"]
+    parts = [f"derivatives/{_DERIVATIVES_PIPELINE}", f"sub-{participant}"]
     if session:
         parts.append(f"ses-{session}")
     parts.append("dwi")
@@ -825,7 +850,7 @@ def _is_real_answer(value) -> bool:
     return True
 
 
-def _finish_unified_frame(merged, exclusions) -> None:
+def _finish_unified_frame(merged, exclusions, index_widths=None) -> None:
     """The last passes over the finished inventory, whatever it holds.
 
     Extracted because there are two write paths, one for a tree with MRI in it
@@ -836,10 +861,20 @@ def _finish_unified_frame(merged, exclusions) -> None:
 
     Order matters. Exclusions first, because an excluded row is never written
     and so cannot collide. Names next. The mixed-study heads-up last, so it only
-    ever appends to ``proposed_issues`` and never downgrades a more severe row
+    ever appends to ``issues`` and never downgrades a more severe row
     state.
     """
     _apply_user_exclusions(merged, exclusions)
+
+    # Index widths, before collisions are counted: two rows that differ only
+    # by padding are the same name once padded, and the collision pass is
+    # what has to see that.
+    if index_widths and _apply_index_widths(merged, index_widths):
+        from ..inventory.rebuild import rebuild_from_entities
+
+        # ``in_place``: the default returns a NEW frame and leaves this one
+        # alone, so the padded entity dict never reached the basename.
+        rebuild_from_entities(merged, in_place=True)
 
     # Two recordings resolving to one name means one silently overwrites the
     # other. Where BIDS has an answer (a run) it is applied; where it does not,
@@ -916,10 +951,10 @@ def _augment_dataframe(
             continue
         best = max(candidates, key=lambda c: c.confidence)
 
-        bids_name = str(df.at[df_idx, "BIDS_name"] or "").replace("sub-", "")
+        participant = str(df.at[df_idx, "participant_id"] or "").replace("sub-", "")
         session = str(df.at[df_idx, "session"] or "").replace("ses-", "")
         datatype, basename, issues, entities_used = _propose_basename(
-            bids_name, session, best,
+            participant, session, best,
         )
 
         # Repetition verdict: "isolated" (singleton group), "trivial"
@@ -992,16 +1027,28 @@ def _augment_dataframe(
                     "files that will be written into fmap/"
                 )
 
-        df.at[df_idx, "proposed_issues"] = " | ".join(annotated_issues)
-
         if best.skip:
+            # Say WHY. Every other exclusion annotates itself and this one
+            # did not, so a third of the excluded rows in the test data sat
+            # in the table unticked with an empty issues cell. A row the
+            # user can see but not account for is the same problem as a row
+            # that was dropped: they cannot tell a deliberate exclusion from
+            # a classifier that failed.
+            annotated_issues.append(
+                f"not convertible to BIDS: {best.classifier} identified this "
+                f"as {best.datatype}/{best.suffix}, which the standard has no "
+                "place for (scanner localizers, scouts and reformats of them "
+                "are not raw data). Tick include to convert it anyway."
+            )
             df.at[df_idx, "include"] = 0
+
+        df.at[df_idx, "issues"] = " | ".join(annotated_issues)
 
         if basename:
             ext = ".tsv" if basename.endswith("_physio") else ".nii.gz"
-            df.at[df_idx, "proposed_datatype"] = datatype
-            df.at[df_idx, "proposed_basename"] = basename
-            df.at[df_idx, "Proposed BIDS name"] = f"{datatype}/{basename}{ext}"
+            df.at[df_idx, "datatype"] = datatype
+            df.at[df_idx, "bids_name"] = basename
+            df.at[df_idx, "bids_path"] = f"{datatype}/{basename}{ext}"
 
         # Record the canonical entities dict used to build the basename
         # in JSON so ``bidsmgr-rebuild`` can regenerate the basename
@@ -1060,12 +1107,15 @@ def _augment_dataframe(
                 )
                 if anomaly:
                     annotated_issues.append(anomaly)
-                    df.at[df_idx, "proposed_issues"] = " | ".join(annotated_issues)
+                    df.at[df_idx, "issues"] = " | ".join(annotated_issues)
 
     # PET, from the DICOM Modality tag: classify anything the probe missed,
     # derive the suggestion columns, then exclude the CT companion of a
     # PET/CT study (which raw BIDS cannot hold).
     _classify_pet_rows(df)
+    # Before the non-image cull, which is exactly what it saves these rows
+    # from: a spectroscopy series carries no Image Pixel module either.
+    _classify_mrs_rows(df)
     _fill_pet_suggestions(df)
     _flag_ct_companion_rows(df)
 
@@ -1073,10 +1123,26 @@ def _augment_dataframe(
     return df
 
 
-# Marker prepended to ``proposed_issues`` for a DERIVED non-image series.
+# Marker prepended to ``issues`` for a DERIVED non-image series.
 # The GUI inventory model keys on the leading ``NONIMAGE_ISSUE_TOKEN``
 # substring to paint the row's "not an image" highlight, so keep the two
 # in sync (mirrors how the abort highlight keys on ``suspected_abort``).
+# Short key to the schema's long name, so the pad pass can reach an entity
+# dict whichever spelling it holds. Built once from the schema rather than
+# listed, so a new entity needs no edit here.
+def _entity_long_names() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for long_name in schema.entity_order():
+        try:
+            out[schema.entity_info(long_name).name] = long_name
+        except KeyError:
+            continue
+    return out
+
+
+_ENTITY_LONG = _entity_long_names()
+
+
 NONIMAGE_ISSUE_TOKEN = "non-image series"
 NONIMAGE_ISSUE = (
     "non-image series: the DICOM headers carry no pixel data "
@@ -1109,9 +1175,30 @@ def _is_physio_row(df: pd.DataFrame, idx: object) -> bool:
 
     return (
         _cell("bids_guess_suffix") == "physio"
-        or _cell("modality") == "physio"
-        or _cell("proposed_basename").endswith("_physio")
+        or _cell("sequence_kind") == "physio"
+        or _cell("bids_name").endswith("_physio")
     )
+
+
+def _is_spectroscopy_row(df: pd.DataFrame, idx: object) -> bool:
+    """True for MR spectroscopy, which no longer belongs in the non-image set.
+
+    An MRS DICOM carries no Image Pixel module, exactly like a TENSOR map, so
+    the pixel-data rule caught it. That rule's stated reason is that dcm2niix
+    cannot turn the series into a NIfTI, and **since v1.0.20260724 that is no
+    longer true for spectroscopy**: it writes NIfTI-MRS. Verified on this
+    lab's own data, where two `_svs` series produce real 32 KB volumes with
+    `SpectrometerFrequency` and `ResonantNucleus` filled in.
+
+    `mrs` is a BIDS 1.11 datatype with `svs` among its suffixes, so the
+    output has somewhere to go. Keyed on the classifier's DATATYPE rather
+    than the series description, because "svs" appears in plenty of protocol
+    names that are not spectroscopy, and because the datatype is the thing
+    that decides where the file lands.
+    """
+    if "bids_guess_datatype" not in df.columns:
+        return False
+    return str(df.at[idx, "bids_guess_datatype"]).strip().lower() == "mrs"
 
 
 def _flag_nonimage_rows(df: pd.DataFrame) -> None:
@@ -1123,7 +1210,7 @@ def _flag_nonimage_rows(df: pd.DataFrame) -> None:
     a NIfTI, so instead of letting the converter attempt it and fail with a
     cryptic ``rc=2`` we flag the row here: force ``bids_guess_skip`` /
     ``include=0`` so it is never converted, and prepend a clear reason to
-    ``proposed_issues`` so it surfaces in the inventory table highlighted as
+    ``issues`` so it surfaces in the inventory table highlighted as
     "not an actual image". Operates on the internal ``_has_pixel_data``
     column (stamped by ``inventory.mri_dicom``, dropped from the final TSV).
     """
@@ -1135,10 +1222,14 @@ def _flag_nonimage_rows(df: pd.DataFrame) -> None:
         # Physio rows have no pixel data but ARE convertible (bidsphysio).
         if _is_physio_row(df, df_idx):
             continue
+        # Nor is spectroscopy a non-image object any more: dcm2niix writes
+        # NIfTI-MRS for it from v1.0.20260724.
+        if _is_spectroscopy_row(df, df_idx):
+            continue
         df.at[df_idx, "bids_guess_skip"] = True
         df.at[df_idx, "include"] = 0
-        existing = str(df.at[df_idx, "proposed_issues"] or "").strip()
-        df.at[df_idx, "proposed_issues"] = (
+        existing = str(df.at[df_idx, "issues"] or "").strip()
+        df.at[df_idx, "issues"] = (
             f"{NONIMAGE_ISSUE} | {existing}" if existing else NONIMAGE_ISSUE
         )
 
@@ -1172,8 +1263,8 @@ def _flag_ct_companion_rows(df: pd.DataFrame) -> None:
             continue
         df.at[idx, "bids_guess_skip"] = True
         df.at[idx, "include"] = 0
-        existing = str(df.at[idx, "proposed_issues"] or "").strip()
-        df.at[idx, "proposed_issues"] = (
+        existing = str(df.at[idx, "issues"] or "").strip()
+        df.at[idx, "issues"] = (
             f"{CT_COMPANION_ISSUE} | {existing}" if existing else CT_COMPANION_ISSUE
         )
 
@@ -1191,17 +1282,17 @@ def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
     and a separate feature), simply give the incoming block a disjoint range;
     the user renames rows in the inventory to merge them deliberately.
 
-    Rewrites ``BIDS_name`` plus the ``entities`` / basename columns derived
+    Rewrites ``participant_id`` plus the ``entities`` / basename columns derived
     from it, so the row stays internally consistent.
     """
-    if df.empty or "BIDS_name" not in df.columns:
+    if df.empty or "participant_id" not in df.columns:
         return
 
     used: set[int] = set()
     for other in others:
-        if other is None or other.empty or "BIDS_name" not in other.columns:
+        if other is None or other.empty or "participant_id" not in other.columns:
             continue
-        for label in other["BIDS_name"].astype(str):
+        for label in other["participant_id"].astype(str):
             m = _SUB_LABEL_RE.match(label.strip())
             if m:
                 used.add(int(m.group(1)))
@@ -1210,7 +1301,7 @@ def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
 
     offset = max(used)
     remap: dict[str, str] = {}
-    for label in df["BIDS_name"].astype(str):
+    for label in df["participant_id"].astype(str):
         m = _SUB_LABEL_RE.match(label.strip())
         if m and label not in remap:
             remap[label] = f"sub-{int(m.group(1)) + offset:03d}"
@@ -1218,11 +1309,11 @@ def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
         return
 
     for idx in df.index:
-        old = str(df.at[idx, "BIDS_name"]).strip()
+        old = str(df.at[idx, "participant_id"]).strip()
         new = remap.get(old)
         if not new:
             continue
-        df.at[idx, "BIDS_name"] = new
+        df.at[idx, "participant_id"] = new
         token = new[len("sub-"):]
         if "entities" in df.columns:
             try:
@@ -1232,7 +1323,7 @@ def _renumber_subjects_after(df: pd.DataFrame, others) -> None:
             if ents.get("subject"):
                 ents["subject"] = token
                 df.at[idx, "entities"] = json.dumps(ents, sort_keys=True)
-        for col in ("proposed_basename", "Proposed BIDS name"):
+        for col in ("bids_name", "bids_path"):
             if col in df.columns:
                 df.at[idx, col] = str(df.at[idx, col]).replace(old, new, 1)
 
@@ -1262,6 +1353,156 @@ def _classify_pet_rows(df: pd.DataFrame) -> None:
             df.at[idx, "modality"] = "pet"
 
 
+def _mrs_may_overrule(classifier: str) -> bool:
+    """May the header's spectroscopy verdict replace this classifier's?
+
+    Unlike :func:`_classify_pet_rows`, which only fills blanks, this one has
+    to be able to overrule the regex layer, and the reason is in the data: a
+    Siemens spectroscopy series called
+
+        task-xx_rec-tra_run-sedley_voi-RAC_acq-hermes_svs
+
+    matched ``task-`` and was filed as ``func``/``bold``, its reference scan as
+    ``func``/``sbref``. Both then failed the pixel-data test and were dropped
+    from the conversion as non-image series. A name pattern guessing from
+    ``task-`` is weaker evidence than a SOP class that says MR Spectroscopy,
+    so the header wins.
+
+    It does NOT overrule dcm2niix. Where BidsGuess survives the file it is the
+    better classifier, reads the same header and more, and is the layer this
+    one exists to stand in for.
+    """
+    name = classifier.strip().lower()
+    if not name:
+        return True
+    return name.startswith("sequence_dict")
+
+
+def _classify_mrs_rows(df: pd.DataFrame) -> None:
+    """Classify MR spectroscopy from its DICOM header, not from a conversion.
+
+    ``mrs`` only ever arrived via dcm2niix's BidsGuess, and on Windows
+    dcm2niix does not survive spectroscopy: it dies with a stack overflow
+    (``0xC00000FD``) and an EMPTY stderr. Measured on two unrelated samples,
+    one Siemens CSA non-image and one stored under the standard MR
+    Spectroscopy SOP class; in both, ordinary images in the same study
+    converted fine. The spectroscopy series then reached the inventory with no
+    datatype at all, and a series with no datatype is also the one
+    :func:`_is_spectroscopy_row` cannot rescue from the non-image cull. That
+    is what "MRS is not detected" was.
+
+    The header answers the question on its own and cannot crash, so this does
+    not wait for a converter. Same contract as :func:`_classify_pet_rows`: it
+    fills in only where nothing else has, at a confidence just under
+    BidsGuess's 0.85, so a real BidsGuess result still wins where dcm2niix
+    does survive (it does on macOS).
+
+    The suffix comes from the standard rather than from the protocol name:
+
+    * ``VolumeLocalizationTechnique`` explicitly ``NONE`` -> ``unloc``;
+    * a grid of voxels (``Rows`` x ``Columns`` > 1) -> ``mrsi``;
+    * otherwise ``svs``.
+
+    Note which way the default falls. An ABSENT localisation tag is not a
+    claim that the acquisition was unlocalised — Siemens' CSA objects carry no
+    such tag at all, and the ones here are plainly voxel spectroscopy
+    (``voi-RAC`` in the protocol name). Reading absence as ``unloc`` would
+    assert something specific the header never said, so only an explicit
+    ``NONE`` earns it.
+
+    ``mrsref`` is deliberately never guessed. A water-reference scan is not
+    reliably distinguishable from the metabolite scan in the header — the two
+    samples here differ only by an ``_ave`` in the series description — and
+    silently labelling the wrong one reference is worse than leaving a
+    curation decision to the user.
+    """
+    if "_mrs_tags" not in df.columns:
+        return
+    for idx in df.index:
+        tags = df.at[idx, "_mrs_tags"]
+        if not isinstance(tags, dict) or not tags:
+            continue
+        if not _mrs_may_overrule(str(df.at[idx, "bids_guess_classifier"] or "")):
+            continue
+        voxels = int(tags.get("rows") or 0) * int(tags.get("columns") or 0)
+        localisation = str(tags.get("localisation") or "").strip().upper()
+        if localisation == "NONE":
+            suffix = "unloc"
+        elif voxels > 1:
+            suffix = "mrsi"
+        else:
+            suffix = "svs"
+        df.at[idx, "bids_guess_datatype"] = "mrs"
+        df.at[idx, "bids_guess_suffix"] = suffix
+        df.at[idx, "bids_guess_classifier"] = "dicom_spectroscopy"
+        df.at[idx, "bids_guess_confidence"] = 0.80
+        if "modality" in df.columns:
+            df.at[idx, "modality"] = "mrs"
+        _name_the_row(df, idx, suffix)
+
+
+def _name_the_row(df: pd.DataFrame, idx: object, suffix: str) -> None:
+    """Give a spectroscopy row the BIDS name the converter writes it to.
+
+    Setting only the ``bids_guess_*`` columns is not enough, and the gap is
+    silent: those columns are the CLASSIFIER's opinion, while ``datatype`` /
+    ``bids_name`` / ``bids_path`` are where the file actually goes, and the
+    converter reads the latter. A row classified ``mrs`` with no name reached
+    the inventory looking correct, showed the right datatype in the table, and
+    then converted to nowhere.
+
+    The name is built through :func:`_propose_basename`, the same call
+    :func:`_augment_dataframe` makes for every other row, rather than
+    assembled here. That is the point: entity order, the schema check and the
+    ``entities`` JSON that ``bidsmgr-rebuild`` reads all come out identical to
+    every other datatype, and a change to BIDS naming reaches spectroscopy
+    without anybody remembering this function exists.
+    """
+    participant = str(df.at[idx, "participant_id"] or "").replace("sub-", "")
+    session = str(df.at[idx, "session"] or "").replace("ses-", "")
+    datatype, basename, _issues, entities_used = _propose_basename(
+        participant,
+        session,
+        Classification(
+            row_id=uuid4(),
+            classifier="dicom_spectroscopy",
+            datatype="mrs",
+            suffix=suffix,
+            confidence=0.80,
+        ),
+    )
+    if not basename:
+        return
+    # NIfTI-MRS is a NIfTI, so the extension is the ordinary one.
+    df.at[idx, "datatype"] = datatype
+    df.at[idx, "bids_name"] = basename
+    df.at[idx, "bids_path"] = f"{datatype}/{basename}.nii.gz"
+    if entities_used:
+        df.at[idx, "entities"] = json.dumps(entities_used, sort_keys=True)
+
+    # Whatever the superseded verdict complained about is no longer true of
+    # this row. A spectroscopy series filed as ``func``/``sbref`` carried
+    # "Required entity 'task' missing" -- a fact about ``sbref``, which needs
+    # one, and not about ``svs``, which does not. Left in place it reads as an
+    # unfixable problem with a row that is now correct, and no later pass
+    # revisits it because nothing else knows the classification changed.
+    if "issues" in df.columns:
+        df.at[idx, "issues"] = " | ".join(
+            note for note in str(df.at[idx, "issues"] or "").split(" | ")
+            if note.strip() and _survives_reclassification(note)
+        )
+
+
+# Notes that describe the DATA rather than the verdict, and so remain true
+# when the verdict changes. Everything else is discarded on reclassification.
+_ROW_FACT_TOKENS = ("suspected_abort", "user-excluded", "existing subject")
+
+
+def _survives_reclassification(note: str) -> bool:
+    """Is this note about the data, or about the classification we replaced?"""
+    return any(token in note for token in _ROW_FACT_TOKENS)
+
+
 def _fill_pet_suggestions(df: pd.DataFrame) -> None:
     """Populate the read-only PET suggestion columns from the scanned tags.
 
@@ -1286,7 +1527,7 @@ def _fill_pet_suggestions(df: pd.DataFrame) -> None:
                 df.at[idx, col] = value
 
 
-# Marker prepended to ``proposed_issues`` for a user-excluded series. Mirrors
+# Marker prepended to ``issues`` for a user-excluded series. Mirrors
 # the non-image precedent: row stays visible (include=0) so the user can
 # re-enable it; the GUI surfaces the reason via the issues column / tooltip.
 USER_EXCLUDED_ISSUE_TOKEN = "user-excluded"
@@ -1298,7 +1539,7 @@ def _apply_user_exclusions(
 ) -> None:
     """Flag rows matching a user exclusion rule: ``include=0`` +
     ``bids_guess_skip`` + a ``user-excluded`` note prepended to
-    ``proposed_issues``. Reversible (the row stays in the inventory; the user
+    ``issues``. Reversible (the row stays in the inventory; the user
     can re-tick ``include``). Matches the rule against the series description
     (``sequence``) or the relative path (``source_folder`` / ``source_file``).
     """
@@ -1327,9 +1568,9 @@ def _apply_user_exclusions(
             f"'{matched.pattern}' ({matched.target}/{matched.match_mode}); "
             "excluded from conversion. Re-tick 'include' to convert it anyway."
         )
-        existing = str(df.at[idx, "proposed_issues"] or "").strip() if "proposed_issues" in df.columns else ""
-        if "proposed_issues" in df.columns:
-            df.at[idx, "proposed_issues"] = f"{note} | {existing}" if existing else note
+        existing = str(df.at[idx, "issues"] or "").strip() if "issues" in df.columns else ""
+        if "issues" in df.columns:
+            df.at[idx, "issues"] = f"{note} | {existing}" if existing else note
 
 
 def _probe_anomaly(
@@ -1518,7 +1759,7 @@ def _unified_column_order(df: pd.DataFrame) -> list[str]:
 
     The ``entities`` column carries the canonical JSON-encoded BIDS
     entity dict; the converter and ``bidsmgr-rebuild`` use it as the
-    source of truth. Display columns (``proposed_basename``, ``task``,
+    source of truth. Display columns (``bids_name``, ``task``,
     ``run`` …) are derived from it.
 
     Columns absent from ``df`` are skipped (so an MRI-only or EEG/MEG-only
@@ -1573,10 +1814,10 @@ def _write_files_by_uid_sidecar(output_tsv: Path, files_by_uid: dict[str, list[s
     return sidecar
 
 
-# Marker prepended to ``proposed_issues`` for a row whose scan pooled multiple
+# Marker prepended to ``issues`` for a row whose scan pooled multiple
 # distinct DICOM StudyDescriptions. This routes the heads-up through the
 # existing severity system: the GUI inventory model classifies any non-error
-# ``proposed_issues`` note as a ``warn`` row, so these rows count toward the
+# ``issues`` note as a ``warn`` row, so these rows count toward the
 # "warnings" chip and appear in the Issues dialog. Awareness-only: the row is
 # NOT excluded or altered, and it still converts. The wording deliberately
 # avoids the error-token substrings the model treats as fatal
@@ -1592,7 +1833,7 @@ def _flag_mixed_study_descriptions(df: pd.DataFrame) -> None:
     StudyDescription is not a BIDS entity and is deliberately not shown as a GUI
     column, so the heads-up is surfaced two ways instead: a one-line summary on
     the ``bidsmgr.cli.scan`` logger (the CLI surface, also the GUI Log dock), and
-    a non-fatal note appended to each affected row's ``proposed_issues`` so the
+    a non-fatal note appended to each affected row's ``issues`` so the
     rows read as ``warn`` in the inventory table, count toward the warnings chip,
     and list in the Issues dialog (the GUI surface the user already knows).
     Nothing is excluded or rewritten. EEG/MEG rows have no StudyDescription and
@@ -1620,7 +1861,7 @@ def _flag_mixed_study_descriptions(df: pd.DataFrame) -> None:
 
     # GUI severity-system surface: append a per-row warning note so each affected
     # row shows up in the warnings chip + Issues dialog.
-    if "proposed_issues" in df.columns:
+    if "issues" in df.columns:
         for df_idx in df.index[present]:
             this_study = studies.at[df_idx]
             others = ", ".join(f"'{s}'" for s in distinct if s != this_study)
@@ -1628,17 +1869,17 @@ def _flag_mixed_study_descriptions(df: pd.DataFrame) -> None:
                 f"{MIXED_STUDY_ISSUE_TOKEN}: this series is '{this_study}'; "
                 f"scan also contains {others}"
             )
-            existing = str(df.at[df_idx, "proposed_issues"] or "").strip()
-            df.at[df_idx, "proposed_issues"] = (
+            existing = str(df.at[df_idx, "issues"] or "").strip()
+            df.at[df_idx, "issues"] = (
                 f"{existing} | {note}" if existing else note
             )
 
     # The strongest signal is a single subject spanning more than one study.
-    if "BIDS_name" in df.columns:
-        sub = df.loc[present, ["BIDS_name", "StudyDescription"]].copy()
-        sub["BIDS_name"] = sub["BIDS_name"].astype(str).str.strip()
-        sub = sub[sub["BIDS_name"] != ""]
-        for name, grp in sub.groupby("BIDS_name"):
+    if "participant_id" in df.columns:
+        sub = df.loc[present, ["participant_id", "StudyDescription"]].copy()
+        sub["participant_id"] = sub["participant_id"].astype(str).str.strip()
+        sub = sub[sub["participant_id"] != ""]
+        for name, grp in sub.groupby("participant_id"):
             subj_studies = sorted(
                 grp["StudyDescription"].astype(str).str.strip().unique()
             )
@@ -1649,6 +1890,46 @@ def _flag_mixed_study_descriptions(df: pd.DataFrame) -> None:
                     len(subj_studies),
                     ", ".join(f"'{s}'" for s in subj_studies),
                 )
+
+
+def _apply_index_widths(df: "pd.DataFrame", widths: dict[str, int]) -> int:
+    """Write every index entity at the width the user asked for.
+
+    Done HERE rather than in the Editor afterwards because the inspection
+    table is where a user first sees the names, and a table that already
+    reads ``run-01`` is one they do not have to go and fix. The standard
+    accepts either width, so this is a preference and it is off unless set.
+
+    Only NUMERIC values are touched: an index whose value is not a number
+    is a different problem and padding it would hide that.
+    """
+    if not widths or df.empty or "entities" not in df.columns:
+        return 0
+
+    from ..editor.values import pad
+
+    changed = 0
+    for idx in df.index:
+        try:
+            ents = json.loads(df.at[idx, "entities"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(ents, dict):
+            continue
+        touched = False
+        for entity, width in widths.items():
+            long_name = _ENTITY_LONG.get(entity, entity)
+            for key in (entity, long_name):
+                value = str(ents.get(key, ""))
+                if value and value.isdigit():
+                    padded = pad(value, int(width))
+                    if padded != value:
+                        ents[key] = padded
+                        touched = True
+        if touched:
+            df.at[idx, "entities"] = json.dumps(ents, sort_keys=True)
+            changed += 1
+    return changed
 
 
 def run_scan(
@@ -1665,6 +1946,7 @@ def run_scan(
     cancel_check=None,
     user_hints: Optional[list[UserHint]] = None,
     exclusions: Optional[list[ExclusionRule]] = None,
+    index_widths: Optional[dict[str, int]] = None,
 ) -> pd.DataFrame:
     """Run the full scan pipeline and return the DataFrame written to TSV.
 
@@ -1695,7 +1977,7 @@ def run_scan(
         ``<output_tsv_parent>/.tmp/``. The probe pass produces
         per-series NIfTI / sidecar / bvec / bval; anomalies (e.g. a
         bold series that produced 2 NIfTI files because of an
-        operator-aborted volume) surface in ``proposed_issues``. The
+        operator-aborted volume) surface in ``issues``. The
         ``.tmp/`` scratch tree is **always wiped** when ``run_scan``
         returns — including on error — so the user is left with the
         inventory TSV and nothing else. MRI rows only.
@@ -1749,7 +2031,7 @@ def run_scan(
             if col not in df_eeg.columns:
                 _init_object_column(df_eeg, col)
         merged = _finalize_unified_dataframe(df_eeg)
-        _finish_unified_frame(merged, exclusions)
+        _finish_unified_frame(merged, exclusions, index_widths)
         merged.to_csv(output_tsv, sep="\t", index=False, columns=_unified_column_order(merged))
         print(f"Inventory written to: {output_tsv}")
         scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
@@ -1830,7 +2112,7 @@ def run_scan(
     # Exclusions, name collisions and the mixed-study heads-up, on the unified
     # frame so they cover MRI and EEG/MEG alike. Shared with the EEG-only path
     # above, which is what stopped them drifting apart again.
-    _finish_unified_frame(merged, exclusions)
+    _finish_unified_frame(merged, exclusions, index_widths)
 
     merged.to_csv(
         output_tsv, sep="\t", index=False,
@@ -1907,7 +2189,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "probe_n_files / probe_n_nifti / probe_n_volumes / "
             "probe_extensions columns to the TSV and surfaces conversion "
             "anomalies (e.g. a bold series that split into two NIfTIs "
-            "because of an operator-aborted volume) in proposed_issues. "
+            "because of an operator-aborted volume) in issues. "
             "The .tmp/ directory is always removed when this command "
             "returns — including on error."
         ),

@@ -1074,6 +1074,33 @@ QPushButton#load-signal-btn {
 QPushButton#load-signal-btn:hover { background: $accent_border; color: $text; }
 QPushButton#load-signal-btn:pressed { background: $accent_bg; }
 
+/* The toolbar-sized version of the same idea. "Visualize" sits in a row of
+ * buttons that all edit the table (add a row, delete a column, save) and it
+ * does something categorically different: it leaves the table and opens
+ * another view of the same file. Styled as the accent action it is, and
+ * sized to the bar so it does not make the row taller.
+ *
+ * Checked, not just hovered, because it is a toggle: while the viewer is
+ * open the button has to read as pressed, or the only way back to the table
+ * is guessing. */
+QPushButton#primary-btn {
+    background: $accent_bg;
+    color: $accent;
+    border: 1px solid $accent_border;
+    border-radius: 4px;
+    padding: 4px 13px;
+    font-size: 11px;
+    font-weight: 600;
+}
+QPushButton#primary-btn:hover { background: $accent_border; color: $text; }
+QPushButton#primary-btn:pressed,
+QPushButton#primary-btn:checked {
+    background: $accent;
+    color: $primary_btn_text;
+    border: 1px solid $accent;
+}
+QPushButton#primary-btn:disabled { color: $muted; border-color: $border; background: transparent; }
+
 /* ---------- Editor: validation panel ---------- */
 QWidget#val-panel { background: $surface; }
 QLabel#val-section-title {

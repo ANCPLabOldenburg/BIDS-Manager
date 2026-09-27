@@ -118,10 +118,10 @@ class UserSetEntity(_EventBase):
 
 
 class UserSetCell(_EventBase):
-    """A user changed a non-entity TSV cell (e.g. ``BIDS_name``, ``session``).
+    """A user changed a non-entity TSV cell (e.g. ``participant_id``, ``session``).
 
     Distinct from :class:`UserSetEntity` because entities have their own
-    rebuild semantics (they regenerate ``proposed_basename``); arbitrary
+    rebuild semantics (they regenerate ``bids_name``); arbitrary
     cells do not.
     """
 

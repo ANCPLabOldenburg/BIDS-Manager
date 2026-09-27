@@ -47,7 +47,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .primitives import PaneHeader
+from .flow_layout import flow
+from .primitives import ElidedLabel, PaneHeader
 
 log = logging.getLogger(__name__)
 
@@ -355,11 +356,13 @@ class TsvViewerPane(QWidget):
         v.addWidget(PaneHeader("Table"))
 
         # --- Edit toolbar ----------------------------------------------
+        # A WRAPPING bar. A QHBoxLayout's minimum width is the sum of its
+        # children, so six buttons put a 627-pixel floor under a pane the
+        # user is meant to be able to drag narrow. See flow_layout.py.
         self._edit_toolbar = QFrame()
         self._edit_toolbar.setObjectName("sidecar-toolbar")
-        et = QHBoxLayout(self._edit_toolbar)
+        et = flow(self._edit_toolbar, h_spacing=8, v_spacing=6)
         et.setContentsMargins(14, 6, 14, 6)
-        et.setSpacing(8)
 
         self._add_row_btn = QPushButton("+ Add row")
         self._add_row_btn.setObjectName("tb-btn")
@@ -386,9 +389,53 @@ class TsvViewerPane(QWidget):
         self._dirty_chip = QLabel("")
         self._dirty_chip.setObjectName("sidecar-dirty-chip")
         self._dirty_chip.setVisible(False)
-        et.addWidget(self._dirty_chip)
-        et.addStretch(1)
+        # A continuous recording is a vector, and a grid of six-decimal
+        # numbers cannot answer any question about its shape. Offered only
+        # when the sidecar says there IS a sampling frequency, which is how
+        # BIDS distinguishes a recording from a table of onsets.
+        self._visualize_btn = QPushButton("  Visualize")
+        # NOT "tb-btn". Every other control in this bar edits the table:
+        # add a row, delete a column, save. This one leaves the table
+        # behind and opens a different view of the same file, so it is
+        # styled as the accent action it is rather than as one more verb in
+        # a row of eight.
+        self._visualize_btn.setObjectName("primary-btn")
+        self._visualize_btn.setCheckable(True)
+        self._visualize_btn.setVisible(False)
+        self._visualize_btn.setToolTip(
+            "Open the columns in the time-series viewer, the same one the "
+            "MEG and EEG recordings use: channel picker, navigation, "
+            "amplitude and window controls, zero-phase filtering, resample, "
+            "spectrum and an events overlay. The sampling frequency and "
+            "start time come from the sidecar; the channel kinds are read "
+            "from the column names, so a cardiac trace is coloured and "
+            "grouped as one."
+        )
+        self._visualize_btn.toggled.connect(self._on_visualize_toggled)
+        et.addWidget(self._visualize_btn)
 
+        # BIDS splits one run's physio by the ``recording`` entity, so the
+        # cardiac trace, the belt and the trigger are three files describing
+        # one acquisition. The question people bring to physio (did the
+        # trigger fire where the ECG says it should) cannot be answered one
+        # file at a time.
+        self._together_btn = QPushButton("  All of this run")
+        self._together_btn.setObjectName("tb-btn")
+        self._together_btn.setCheckable(True)
+        self._together_btn.setVisible(False)
+        self._together_btn.setToolTip(
+            "Show every physio recording of this run at once, on one "
+            "clock. They are resampled onto the fastest one's grid and "
+            "each keeps its own start time, because physio starts before "
+            "the scanner does and by a different amount per device."
+        )
+        self._together_btn.toggled.connect(self._on_together_toggled)
+        et.addWidget(self._together_btn)
+
+        et.addWidget(self._dirty_chip)
+        # No stretch: a wrapping row has no fixed right-hand edge to push
+        # against, because where the edge is depends on how many rows there
+        # turn out to be.
         self._revert_btn = QPushButton("Revert")
         self._revert_btn.setObjectName("tb-btn")
         self._revert_btn.setEnabled(False)
@@ -459,16 +506,27 @@ class TsvViewerPane(QWidget):
         srow.addWidget(self._loading_spinner)
         srow.addStretch(1)
         lp.addLayout(srow)
-        self._loading_label = QLabel("")
+        # ELIDED: it carries the file's path, and a QStackedWidget sizes
+        # itself to its LARGEST page whichever one is showing, so a plain
+        # QLabel here is a floor under the whole pane even while hidden.
+        self._loading_label = ElidedLabel(
+            "", mode=Qt.TextElideMode.ElideMiddle,
+        )
         self._loading_label.setObjectName("pane-hint")
         self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lp.addWidget(self._loading_label)
         lp.addStretch(1)
 
-        # Index 0 = empty hint, 1 = table, 2 = loading.
+        # Index 0 = empty hint, 1 = table, 2 = loading, 3 = the plot (built
+        # lazily, so a session that only reads tables never imports
+        # pyqtgraph).
         self._stack.addWidget(self._empty_hint)
         self._stack.addWidget(self._table)
         self._stack.addWidget(self._loading_page)
+        self._viewer_page: Optional[QWidget] = None
+        self._signal_worker = None
+        self._siblings: list = []
+        self._timing: Optional[dict] = None
         self._stack.setCurrentIndex(0)
 
         # Footer (path + summary), QSS-driven so theme follows.
@@ -477,9 +535,11 @@ class TsvViewerPane(QWidget):
         fl = QHBoxLayout(self._footer)
         fl.setContentsMargins(14, 6, 14, 6)
         fl.setSpacing(10)
-        self._footer_path = QLabel("")
+        # ELIDED: a plain QLabel reports its full text width as its
+        # MINIMUM, so a dataset-relative path was a floor of its own.
+        self._footer_path = ElidedLabel("", mode=Qt.TextElideMode.ElideLeft)
         self._footer_path.setObjectName("sidecar-footer-path")
-        self._footer_summary = QLabel("")
+        self._footer_summary = ElidedLabel("")
         self._footer_summary.setObjectName("sidecar-footer-summary")
         fl.addWidget(self._footer_path, 1)
         fl.addWidget(self._footer_summary)
@@ -627,12 +687,154 @@ class TsvViewerPane(QWidget):
             self._populate_model(header, rows)
             self._stack.setCurrentIndex(1)
         self._update_footer(path, self._current_root, len(rows), len(header), total)
+        self._offer_visualizer(path, header, rows)
         self._edit_toolbar.setVisible(True)
         self._refresh_dirty_ui()
         self._pre_edit = self._snapshot()
         self.history_changed.emit()
         self.loading_changed.emit(False, "")
         self.loaded.emit(path)
+
+    # ------------------------------------------------------------------
+    # The viewer
+    # ------------------------------------------------------------------
+
+    def _offer_visualizer(
+        self, path: Path, header: list, rows: list,
+    ) -> None:
+        """Show the Visualize toggle when this file is a continuous recording.
+
+        Decided by the SIDECAR, not by the filename: BIDS puts the sampling
+        frequency there, and a table of onsets (``_events.tsv``) has none.
+        That also means a ``_stim.tsv.gz`` or any future continuous suffix
+        is offered a viewer without this knowing the suffix exists.
+        """
+        from .physio_viewer import read_timing, related_recordings
+
+        timing = read_timing(path)
+        # The header row counts as a sample. A physio TSV has no column
+        # names in the file (they are in the sidecar), so pandas reads the
+        # first SAMPLE as the header and it belongs back in the data.
+        if timing is not None and len(timing["columns"]) == len(header):
+            rows = [list(header)] + [list(r) for r in rows]
+        self._timing = timing
+        self._plot_rows = rows if timing is not None else []
+        self._visualize_btn.setVisible(timing is not None)
+        siblings = related_recordings(path) if timing is not None else []
+        self._siblings = siblings
+        self._together_btn.setVisible(len(siblings) > 1)
+        if timing is None:
+            self._visualize_btn.setChecked(False)
+            self._together_btn.setChecked(False)
+        elif self._visualize_btn.isChecked():
+            self._show_visualizer()
+
+    def _on_visualize_toggled(self, showing: bool) -> None:
+        if showing:
+            self._show_visualizer()
+        else:
+            self._stack.setCurrentIndex(1)
+
+    def _show_visualizer(self) -> None:
+        """Read the whole recording on a worker, then hand it to the view.
+
+        The table's preview is NOT shown first. It is bounded at five
+        thousand rows, so on a 1.4-million-sample trigger channel it is the
+        first four seconds, and showing it while the real read completes
+        means the viewer visibly changes its mind about what the recording
+        is. A spinner that says "reading" is the honest version.
+        """
+        if self._timing is None:
+            self._visualize_btn.setChecked(False)
+            return
+        if self._viewer_page is None:
+            try:
+                from .time_series_view import TimeSeriesView
+
+                self._viewer_page = TimeSeriesView(self)
+                # Physio is a channel or four and fits in a window whole, so
+                # this is the one consumer that offers Fit all. MEG and EEG
+                # do not, where the whole recording is hundreds of millions
+                # of samples.
+                self._viewer_page.enable_fit_all(True)
+                self._viewer_page.close_requested.connect(
+                    lambda: self._visualize_btn.setChecked(False)
+                )
+            except Exception as exc:  # noqa: BLE001 - reported, not hidden
+                log.warning("could not build the time-series viewer: %s", exc)
+                self._visualize_btn.setChecked(False)
+                self._visualize_btn.setEnabled(False)
+                self._visualize_btn.setToolTip(f"Unavailable: {exc}")
+                return
+            self._stack.addWidget(self._viewer_page)
+
+        self._stack.setCurrentWidget(self._viewer_page)
+        self._start_signal_read()
+
+    def _start_signal_read(self) -> None:
+        """Read + build the RawArray off the GUI thread.
+
+        A ``QThread``, not the pool: this ends in scipy, and a pooled thread
+        retired between calls takes scipy's per-thread state with it
+        (CLAUDE.md guard 8b).
+        """
+        from ...workers.meeg_recording_loader import RecordingComputeWorker
+        from .physio_viewer import build_combined_raw, build_raw, read_columns
+
+        path = self._current_file
+        timing = dict(self._timing or {})
+        if path is None:
+            return
+
+        previous = self._signal_worker
+        if previous is not None:
+            previous.cancel()
+
+        together = self._together_btn.isChecked() and len(self._siblings) > 1
+        siblings = list(self._siblings)
+
+        def work():
+            if together:
+                raw, gaps = build_combined_raw(siblings)
+                return path, raw, gaps, raw.n_times, 1
+            columns, total, step = read_columns(path)
+            if not columns:
+                raise ValueError("no numeric columns could be read")
+            raw, gaps = build_raw(columns, timing, step)
+            return path, raw, gaps, total, step
+
+        worker = RecordingComputeWorker(work, parent=self)
+        worker.finished_with_result.connect(self._on_signal_read)
+        worker.failed.connect(self._on_signal_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._signal_worker = worker
+        self.loading_changed.emit(True, "Reading the recording...")
+        worker.start()
+
+    def _on_together_toggled(self, _checked: bool) -> None:
+        """Re-read in the other mode, if a viewer is open."""
+        if self._visualize_btn.isChecked():
+            self._start_signal_read()
+
+    def _on_signal_read(self, result) -> None:
+        path, raw, gaps, total, step = result
+        self._signal_worker = None
+        self.loading_changed.emit(False, "")
+        if path != self._current_file or self._viewer_page is None:
+            return
+        self._viewer_page.set_current_filepath(path, self._current_root)
+        self._viewer_page.load_raw(raw, gaps=gaps)
+        if step > 1:
+            self._viewer_page.status_message.emit(
+                f"{total:,} samples held as {raw.n_times:,}: the recording "
+                f"was read one sample in {step} to stay within memory"
+            )
+
+    def _on_signal_failed(self, message: str) -> None:
+        self._signal_worker = None
+        self.loading_changed.emit(False, "")
+        log.warning("could not open the recording for viewing: %s", message)
+        self._visualize_btn.setChecked(False)
 
     def _on_load_failed(self, path: Path, error: str) -> None:
         if path != self._current_file:
@@ -685,13 +887,23 @@ class TsvViewerPane(QWidget):
         self.set_file(path, root)
 
     def repaint_for_palette(self, pal: dict) -> None:
-        """Same QSS-only refresh pattern as :class:`SidecarFormPane`."""
-        del pal
+        """Same QSS-only refresh pattern as :class:`SidecarFormPane`.
+
+        With one exception, and it is the reason this takes ``pal`` at all:
+        **the plot is drawn by pyqtgraph, which reads no QSS.** Unpolishing
+        and re-polishing it does nothing, so a dark/light swap left the
+        plot on the old theme's background until the app was restarted and
+        it happened to be built under the new one. The palette is handed
+        down instead, the way the MEG/EEG viewer already hands it to its
+        own plot.
+        """
         style = self.style()
         for w in [self, *self.findChildren(QWidget)]:
             style.unpolish(w)
             style.polish(w)
             w.update()
+        if self._viewer_page is not None:
+            self._viewer_page.repaint_for_palette(pal)
 
     # ----------------------------------------------------------------------
     # Toolbar handlers

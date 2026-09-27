@@ -29,7 +29,7 @@ def _eeg_rows(*derived: dict, task: str = "rest") -> pd.DataFrame:
     exactly what mne-bids will derive from it."""
     return pd.DataFrame([
         {
-            "include": "1", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+            "include": "1", "datatype": "eeg", "bids_guess_suffix": "eeg",
             "task": task, "_derived_fields": json.dumps(d),
         }
         for d in derived
@@ -92,7 +92,7 @@ def test_a_placeholder_is_not_an_answer() -> None:
     that as answered is what hid EEGReference and EEGGround from the form."""
     df = pd.DataFrame([{
         "include": "1", "series_uid": "1.2.3",
-        "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
+        "datatype": "eeg", "bids_guess_suffix": "eeg",
     }])
     stats = {"1.2.3": SimpleNamespace(sidecar_fields={
         "EEGReference": "n/a", "SamplingFrequency": 500.0,
@@ -105,7 +105,7 @@ def test_a_placeholder_is_not_an_answer() -> None:
 def test_a_probe_previews_what_dcm2niix_wrote() -> None:
     df = pd.DataFrame([{
         "include": "1", "series_uid": "1.2.3",
-        "proposed_datatype": "anat", "bids_guess_suffix": "T1w",
+        "datatype": "anat", "bids_guess_suffix": "T1w",
     }])
     stats = {"1.2.3": SimpleNamespace(sidecar_fields={
         "EchoTime": 0.003, "FlipAngle": 8, "ConversionSoftware": "dcm2niix",
@@ -120,7 +120,7 @@ def test_a_field_the_datatype_does_not_take_is_dropped() -> None:
     """dcm2niix writes keys BIDS does not declare for the file it wrote."""
     df = pd.DataFrame([{
         "include": "1", "series_uid": "1.2.3",
-        "proposed_datatype": "anat", "bids_guess_suffix": "T1w",
+        "datatype": "anat", "bids_guess_suffix": "T1w",
     }])
     stats = {"1.2.3": SimpleNamespace(sidecar_fields={
         "EchoTime": 0.003, "TracerName": "FDG",
@@ -172,10 +172,10 @@ def test_each_recording_gets_its_own_measurement() -> None:
     from bidsmgr.metadata.converter_preview import preview_by_row
 
     df = pd.DataFrame([
-        {"include": "1", "proposed_datatype": "func", "bids_guess_suffix": "bold",
+        {"include": "1", "datatype": "func", "bids_guess_suffix": "bold",
          "series_uid": "1.2.3",
          "_derived_fields": json.dumps({"RepetitionTime": 2.5, "EchoTime": 0.03})},
-        {"include": "1", "proposed_datatype": "func", "bids_guess_suffix": "bold",
+        {"include": "1", "datatype": "func", "bids_guess_suffix": "bold",
          "series_uid": "1.2.4",
          "_derived_fields": json.dumps({"RepetitionTime": 3.0})},
     ])
@@ -188,7 +188,7 @@ def test_a_per_row_measurement_drops_what_the_file_cannot_carry() -> None:
     from bidsmgr.metadata.converter_preview import preview_by_row
 
     df = pd.DataFrame([{
-        "include": "1", "proposed_datatype": "anat", "bids_guess_suffix": "T1w",
+        "include": "1", "datatype": "anat", "bids_guess_suffix": "T1w",
         "series_uid": "1.2.3",
         "_derived_fields": json.dumps({
             "EchoTime": 0.03, "TracerName": "FDG", "ConversionSoftware": "dcm2niix",

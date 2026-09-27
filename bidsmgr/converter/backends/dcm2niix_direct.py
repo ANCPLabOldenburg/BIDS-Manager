@@ -40,7 +40,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from ...classifier.dcm2niix_bidsguess import find_dcm2niix
+from ... import schema
+from ...classifier.dcm2niix_bidsguess import find_dcm2niix, run_dcm2niix
 from ...util.paths import long_path
 from ..types import ConvertResult, ConvertTask
 
@@ -161,6 +162,7 @@ class Dcm2niixDirect:
             )
 
         staged = _collect_outputs(output_dir, task.basename)
+        staged = _drop_disallowed_extensions(staged, task)
 
         if task.skip_residuals:
             staged, dropped = _partition_residuals(staged, task.basename)
@@ -310,7 +312,67 @@ def _run_dcm2niix(
         "-f", basename,
         str(dicom_dir),
     ]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return run_dcm2niix(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def _drop_disallowed_extensions(staged: list[Path], task) -> list[Path]:
+    """Remove files whose extension the schema forbids for this suffix.
+
+    dcm2niix writes ``.bval`` and ``.bvec`` for every series it recognises as
+    diffusion, INCLUDING the scanner derivatives: FA, trace, colFA, ADC.
+    Those are legitimate raw ``dwi/`` suffixes in BIDS 1.11, but they are
+    scalar maps, not diffusion-weighted volumes, so the standard allows them
+    only ``.nii[.gz]`` and ``.json``. A gradient table beside an FA map
+    describes nothing: the directions were consumed to compute it.
+
+    Left in place they are a validator error on every diffusion derivative a
+    Siemens scanner produces, which is what this lab's own data was doing.
+
+    **The schema decides, not a list.** ``list_extensions(datatype, suffix)``
+    says ``.bvec`` and ``.bval`` belong to ``dwi/dwi`` and to nothing else,
+    so this needs no maintenance when BIDS adds a suffix. A datatype or
+    suffix the schema has no rule for is left completely alone: refusing to
+    stage a file because the schema is silent about it would be the fixup
+    deciding it knows better than the standard.
+    """
+    datatype = str(getattr(task, "datatype", "") or "")
+    suffix = str(getattr(task, "suffix", "") or "")
+    if not datatype or not suffix:
+        return staged
+    try:
+        allowed = set(schema.list_extensions(datatype, suffix))
+    except Exception:  # noqa: BLE001 - a staging pass must not fail on this
+        return staged
+    if not allowed:
+        return staged
+
+    keep: list[Path] = []
+    for path in staged:
+        ext = _matching_ext(path.name, allowed)
+        if ext is None and _matching_ext(path.name, _KNOWN_OUTPUT_EXTS) is not None:
+            # An extension dcm2niix writes, that the schema does not allow
+            # for THIS suffix. Dropped, and said out loud: a file silently
+            # vanishing is worse than one that should not be there.
+            log.info(
+                "%s: %s is not an allowed extension for %s/%s; not staged",
+                task.basename, path.name, datatype, suffix,
+            )
+            try:
+                path.unlink()
+            except OSError:
+                pass  # best-effort; an unstaged leftover is harmless
+            continue
+        keep.append(path)
+    return keep
+
+
+def _matching_ext(name: str, extensions) -> Optional[str]:
+    """The longest entry of ``extensions`` that ``name`` ends with."""
+    best = None
+    for ext in extensions:
+        if name.endswith(ext) and (best is None or len(ext) > len(best)):
+            best = ext
+    return best
 
 
 def _collect_outputs(output_dir: Path, basename: str) -> list[Path]:

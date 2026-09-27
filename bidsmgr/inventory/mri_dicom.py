@@ -6,15 +6,15 @@ SeriesDescription, SeriesInstanceUID).
 
 Preserves the v0.2.5 22-column TSV contract (improvement_plan.md §4):
 
-    subject, BIDS_name, session, source_folder,
+    subject, participant_id, session, source_folder,
     include, sequence, series_uid, rep, acq_time,
-    image_type, modality, modality_bids, n_files,
+    image_type, modality, sequence_kind, n_files,
     GivenName, FamilyName, PatientID,
     PatientSex, PatientAge, StudyDescription,
-    proposed_datatype, proposed_basename, Proposed BIDS name
+    datatype, bids_name, bids_path
 
-The ``modality`` and ``modality_bids`` columns are filled by the legacy
-regex-dictionary classifier (``classifier.sequence_dict.guess_modality``).
+The ``modality`` and ``sequence_kind`` columns are filled by the legacy
+regex-dictionary classifier (``classifier.sequence_dict.guess_sequence_kind``).
 ``proposed_*`` columns are populated downstream by the CLI orchestrator
 after running the BidsGuess classifier (improvement_plan.md M1).
 
@@ -38,9 +38,8 @@ from joblib import delayed  # pools are built by bidsmgr.util.parallel
 from pydicom.multival import MultiValue
 
 from ..classifier.sequence_dict import (
-    SKIP_MODALITIES,
-    guess_modality,
-    modality_to_container,
+    SKIP_SEQUENCE_KINDS,
+    guess_sequence_kind,
     normalize_study_name,
 )
 from .subject_identity import IdentityTuple, cluster_subjects, normalize_tuple
@@ -81,12 +80,12 @@ SESSION_RE = re.compile(r"ses-([a-zA-Z0-9]+)", re.IGNORECASE)
 # JSON list of already-curated sidecar companions - events / beh / stim - to
 # copy into the BIDS tree on convert).
 TSV_COLUMNS: tuple[str, ...] = (
-    "subject", "BIDS_name", "session", "source_folder",
+    "subject", "participant_id", "session", "source_folder",
     "include", "sequence", "series_uid", "rep", "acq_time",
-    "image_type", "modality", "modality_bids", "n_files",
+    "image_type", "modality", "sequence_kind", "n_files",
     "GivenName", "FamilyName", "PatientID",
     "PatientSex", "PatientAge", "Handedness", "StudyDescription",
-    "proposed_datatype", "proposed_basename", "Proposed BIDS name",
+    "datatype", "bids_name", "bids_path",
     "companion_files",
 )
 
@@ -107,7 +106,7 @@ DATASET_COLUMNS: tuple[str, ...] = ("dataset",)
 
 # The canonical BIDS entity dict per row, JSON-encoded. **Source of
 # truth** for the BIDS basename: scanners populate it; ``bidsmgr-rebuild``
-# regenerates ``proposed_basename`` and mirror cells from it (or, in
+# regenerates ``bids_name`` and mirror cells from it (or, in
 # ``--from columns`` mode, the reverse). The converter reads from this
 # column directly, so the row's BIDS name always reflects whatever the
 # user last edited here. Format: a JSON object with BIDS entity keys —
@@ -166,6 +165,143 @@ def classify_fieldmap_type(img_list: list[str]) -> str:
     if img_list == PHASE_IMGTYPE:
         return "P"
     return ""
+
+
+def acquisition_time(ds) -> str:
+    """When this image was acquired, as ``HHMMSS[.FFFFFF]``.
+
+    ``AcquisitionTime`` is the obvious tag and it used to be the only one
+    read here. Siemens XA, and every other enhanced-DICOM writer, records
+    the same fact in ``AcquisitionDateTime`` and omits ``AcquisitionTime``
+    entirely, so on those datasets this column came back EMPTY for every
+    image series.
+
+    That is not cosmetic. Four things key on it: the fieldmap collapse
+    below, the chronological ``rep``, the row ordering, and the
+    name-collision tie-breaker. An empty value made the first of those
+    merge every fieldmap in a session into one row.
+
+    The fallbacks are ordered by how close each tag is to the acquisition
+    itself. ``SeriesTime`` and ``ContentTime`` are written when the series
+    is stored rather than when it was acquired, which on the datasets here
+    runs about fifty seconds late, so they are a last resort and not an
+    equal choice.
+    """
+    raw = str(getattr(ds, "AcquisitionTime", "") or "").strip()
+    if raw:
+        return raw
+    # DT form: YYYYMMDDHHMMSS[.FFFFFF]. Take the time half, so the value in
+    # this column means the same thing whichever tag it came from.
+    dt = str(getattr(ds, "AcquisitionDateTime", "") or "").strip()
+    if len(dt) >= 14 and dt[:14].isdigit():
+        return dt[8:]
+    for tag in ("SeriesTime", "ContentTime"):
+        raw = str(getattr(ds, tag, "") or "").strip()
+        if raw:
+            return raw
+    return ""
+
+
+# SOP Class UID the standard reserves for MR spectroscopy. The authoritative
+# marker: a series stored under it IS spectroscopy, whatever it is called.
+MR_SPECTROSCOPY_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.4.2"
+
+# ``ImageType`` value 3 on a spectroscopy frame, where a vendor sets one.
+SPECTROSCOPY_IMAGE_TYPE = "SPECTROSCOPY"
+
+# Siemens stores spectroscopy under its OWN non-image SOP class rather than
+# the standard one, and that class is shared: physio logs and diffusion TENSOR
+# maps arrive under it too. So it is never evidence on its own.
+SIEMENS_CSA_NONIMAGE_SOP_CLASS = "1.3.12.2.1107.5.9.1"
+
+# Siemens' private "CSA Image Type" (0029,1008 / 0029,1108). Measured across
+# the three kinds of CSA non-image object in one study::
+#
+#     spectroscopy   SPEC NUM 4   ImageType ORIGINAL, PRIMARY
+#     physio log     SPEC NUM 4   ImageType ORIGINAL, PRIMARY, RAWDATA, PHYSIO
+#     TENSOR map     DTI NUM 4    ImageType DERIVED, PRIMARY, DIFFUSION, TENSOR
+#
+# ``SPEC`` separates spectroscopy and physio from the tensor map; ``PHYSIO`` in
+# ``ImageType`` then separates those two from each other. Neither test alone is
+# enough, which is why both are here.
+_SIEMENS_CSA_TYPE_TAGS = ((0x0029, 0x1008), (0x0029, 0x1108))
+_SIEMENS_CSA_SPECTROSCOPY_PREFIX = "SPEC"
+_PHYSIO_IMAGE_TYPE = "PHYSIO"
+
+
+def _siemens_csa_image_type(ds) -> str:
+    """Siemens' private CSA Image Type, or "" when the tag is absent."""
+    for tag in _SIEMENS_CSA_TYPE_TAGS:
+        try:
+            value = ds[tag].value
+        except (KeyError, IndexError, TypeError):
+            continue
+        if value:
+            return str(value).strip().upper()
+    return ""
+
+
+def read_mrs_tags(ds) -> dict:
+    """Facts that decide whether a series is MR spectroscopy, and which kind.
+
+    Read here rather than inferred later because they come from the DICOM
+    header and nothing downstream reopens the file.
+
+    This exists because the classifier that would otherwise answer the
+    question cannot. dcm2niix's BidsGuess is the only thing that ever returned
+    ``mrs``, and on Windows it dies on spectroscopy with a stack overflow
+    (``0xC00000FD``) and an empty stderr — measured on two unrelated samples,
+    one Siemens CSA and one stored under the standard SOP class. The series
+    then reached the inventory with no datatype at all, which is what "MRS is
+    not detected" looked like. A DICOM header does not crash, so the datatype
+    no longer depends on a converter surviving the file.
+
+    Returns an empty dict for anything that is not spectroscopy, so callers
+    can merge blindly.
+    """
+    sop = str(getattr(ds, "SOPClassUID", "") or "").strip()
+    image_type = [v.upper() for v in normalize_image_type(
+        getattr(ds, "ImageType", None)
+    )]
+
+    standard = sop == MR_SPECTROSCOPY_SOP_CLASS
+    tagged = SPECTROSCOPY_IMAGE_TYPE in image_type
+    siemens_csa = (
+        sop == SIEMENS_CSA_NONIMAGE_SOP_CLASS
+        and _siemens_csa_image_type(ds).startswith(
+            _SIEMENS_CSA_SPECTROSCOPY_PREFIX
+        )
+        and _PHYSIO_IMAGE_TYPE not in image_type
+    )
+    if not (standard or tagged or siemens_csa):
+        return {}
+
+    def _int(name: str) -> int:
+        """0 when the tag is absent, which for a CSA object is most of them."""
+        try:
+            return int(getattr(ds, name, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    # Single voxel or an imaging grid. BIDS splits the suffix on exactly this:
+    # ``svs`` is one voxel, ``mrsi`` is a matrix of them.
+    rows, columns = _int("Rows"), _int("Columns")
+    # Localisation technique (PRESS, STEAM, ...). Absent or NONE means the
+    # acquisition was not localised to a voxel at all, which BIDS calls
+    # ``unloc``.
+    localisation = str(
+        getattr(ds, "VolumeLocalizationTechnique", "") or ""
+    ).strip()
+
+    return {
+        "sop_class": sop,
+        "rows": rows,
+        "columns": columns,
+        "localisation": localisation,
+        # The nucleus observed (``1H``, ``31P``, ...). BIDS has an entity for
+        # it on every ``mrs`` suffix, so it is worth carrying.
+        "nucleus": str(getattr(ds, "ResonantNucleus", "") or "").strip(),
+    }
 
 
 def read_pet_tags(ds) -> dict:
@@ -260,7 +396,15 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
         # without ANY identifier don't collapse all rows into one subject.
         identity_key = f"{subj}||{study}"
 
-    rel = os.path.relpath(file_root, root_dir)
+    # POSIX, ALWAYS. ``os.path.relpath`` spells this with a backslash on
+    # Windows, and ``source_folder`` is not a local convenience: it is written
+    # into the inventory TSV, and ``_collapse_fieldmap_rows`` uses it as a
+    # grouping AND SORTING key. A separator that sorts differently reorders
+    # the fieldmap rows, and that walk assigns the acquisition index
+    # POSITIONALLY, so the magnitude and phase rows of one fieldmap can end up
+    # grouped differently there than here. Right on macOS and Linux by
+    # coincidence. See CROSS_PLATFORM_RULES 1.1.
+    rel = Path(os.path.relpath(file_root, root_dir)).as_posix()
     folder = root_dir.name if rel == "." else rel
     series = str(getattr(ds, "SeriesDescription", "n/a")).strip()
     uid = str(getattr(ds, "SeriesInstanceUID", ""))
@@ -275,7 +419,7 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
     img3 = classify_fieldmap_type(img_list)
     if not img3:
         img3 = img_list[2] if len(img_list) >= 3 else ""
-    acq_time = str(getattr(ds, "AcquisitionTime", "")).strip()
+    acq_time = acquisition_time(ds)
 
     # Study-level identifiers — used for longitudinal session inference
     # (architecture.md §4.1). Distinct StudyInstanceUID + StudyDate per
@@ -299,7 +443,7 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
         "file_path": fpath,
         "series": series,
         "uid": uid,
-        "modality": guess_modality(series),
+        "sequence_kind": guess_sequence_kind(series),
         "img3": img3,
         "acq_time": acq_time,
         "sess_tag": sess_tag,
@@ -312,6 +456,10 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
         # cannot be inferred from the series description alone.
         "dicom_modality": str(getattr(ds, "Modality", "")).strip().upper(),
         "pet": read_pet_tags(ds),
+        # Empty for everything that is not spectroscopy. ``cli/scan`` reads it
+        # to give the series the ``mrs`` datatype without needing dcm2niix,
+        # which crashes on these files.
+        "mrs": read_mrs_tags(ds),
         "demo": {
             "GivenName": given,
             "FamilyName": family_name,
@@ -365,6 +513,9 @@ def scan_dicoms_long(
     # constant within a series, so the first non-empty file wins.
     dicom_modalities: dict = defaultdict(lambda: defaultdict(dict))
     pet_tags: dict = defaultdict(lambda: defaultdict(dict))
+    # Per-series spectroscopy facts, empty for every other series. Same
+    # first-non-empty-file-wins rule: they are constant within a series.
+    mrs_tags: dict = defaultdict(lambda: defaultdict(dict))
     # study-level metadata (per series): subj_key -> folder -> (series,uid) -> study tuple
     study_uids: dict = defaultdict(lambda: defaultdict(dict))
     # all distinct study tuples seen for each subject (for session inference).
@@ -415,7 +566,7 @@ def scan_dicoms_long(
         folder = res["folder"]
         key = (res["series"], res["uid"])
         counts[subj_key][folder][key] += 1
-        mods[subj_key][folder][key] = res["modality"]
+        mods[subj_key][folder][key] = res["sequence_kind"]
         if key not in imgtypes[subj_key][folder]:
             imgtypes[subj_key][folder][key] = res["img3"]
         if key not in acq_times[subj_key][folder] and res["acq_time"]:
@@ -431,6 +582,8 @@ def scan_dicoms_long(
             dicom_modalities[subj_key][folder][key] = res["dicom_modality"]
         if key not in pet_tags[subj_key][folder] and res.get("pet"):
             pet_tags[subj_key][folder][key] = res["pet"]
+        if key not in mrs_tags[subj_key][folder] and res.get("mrs"):
+            mrs_tags[subj_key][folder][key] = res["mrs"]
         # Track every DICOM file path per UID for later per-series probe.
         uid_str = res["uid"]
         if uid_str:
@@ -481,16 +634,16 @@ def scan_dicoms_long(
         root: f"sub-{i + 1:03d}" for i, root in enumerate(cluster_roots)
     }
 
-    bids_map: dict[str, str] = {}
+    participant_map: dict[str, str] = {}
     for k, t in identity_to_tuple.items():
-        bids_map[k] = cluster_to_id[cluster_root_for_tuple[t]]
+        participant_map[k] = cluster_to_id[cluster_root_for_tuple[t]]
 
     # Session inference operates per *cluster* (one physical subject), not
     # per identity_key. Two visits with different anonymised PatientIDs
     # that the union-find merged still need to produce ses-1 / ses-2.
     studies_per_cluster: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
     for k, study_set in subject_studies.items():
-        bids_id = bids_map.get(k)
+        bids_id = participant_map.get(k)
         if not bids_id:
             continue
         studies_per_cluster[bids_id].update(study_set)
@@ -513,10 +666,10 @@ def scan_dicoms_long(
             session = ses_labels[0] if len(ses_labels) == 1 else ""
             rep_counter: dict = defaultdict(int)
             for (series, uid), n_files in sorted(counts[subj_key][folder].items()):
-                fine_mod = mods[subj_key][folder][(series, uid)]
+                kind = mods[subj_key][folder][(series, uid)]
                 img3 = imgtypes[subj_key][folder].get((series, uid), "")
-                include = 0 if fine_mod in SKIP_MODALITIES else 1
-                rep_key = series if fine_mod == "scout" else (series, img3)
+                include = 0 if kind in SKIP_SEQUENCE_KINDS else 1
+                rep_key = series if kind == "scout" else (series, img3)
                 rep_counter[rep_key] += 1
                 study_tuple = study_uids[subj_key][folder].get((series, uid), ("", "", ""))
 
@@ -524,14 +677,14 @@ def scan_dicoms_long(
                 # otherwise fall back to inferred longitudinal label.
                 row_session = session
                 if not row_session:
-                    bids_id = bids_map[subj_key]
+                    bids_id = participant_map[subj_key]
                     inferred = inferred_session.get(bids_id, {}).get(study_tuple)
                     if inferred:
                         row_session = inferred
 
                 rows.append({
                     "subject": given_name,
-                    "BIDS_name": bids_map[subj_key],
+                    "participant_id": participant_map[subj_key],
                     "session": row_session,
                     "source_folder": folder,
                     "include": include,
@@ -540,8 +693,12 @@ def scan_dicoms_long(
                     "rep": rep_counter[rep_key] if rep_counter[rep_key] > 1 else "",
                     "image_type": img3,
                     "acq_time": acq_times[subj_key][folder].get((series, uid), ""),
-                    "modality": fine_mod,
-                    "modality_bids": modality_to_container(fine_mod),
+                    # The MODALITY is how it was acquired, and every row
+                    # this scanner produces came off an MRI scanner. What
+                    # used to sit here was the classifier's sequence kind,
+                    # which is why a T1 reported its modality as "T1w".
+                    "modality": "mri",
+                    "sequence_kind": kind,
                     "n_files": n_files,
                     "study_instance_uid": study_tuple[0],
                     "study_date": study_tuple[1],
@@ -560,6 +717,7 @@ def scan_dicoms_long(
                         (series, uid), ""
                     ),
                     "_pet_tags": pet_tags[subj_key][folder].get((series, uid), {}),
+                    "_mrs_tags": mrs_tags[subj_key][folder].get((series, uid), {}),
                     **demo[subj_key],
                 })
 
@@ -571,7 +729,7 @@ def scan_dicoms_long(
         df = _assign_chronological_rep(df)
 
     # Add proposed_* columns as empty (filled by CLI orchestrator after BidsGuess).
-    for col in ("proposed_datatype", "proposed_basename", "Proposed BIDS name"):
+    for col in ("datatype", "bids_name", "bids_path"):
         if col not in df.columns:
             df[col] = ""
 
@@ -586,7 +744,7 @@ def scan_dicoms_long(
     df["format"] = "DICOM"
 
     if not df.empty:
-        df.sort_values(["BIDS_name", "subject", "session", "acq_time"], inplace=True)
+        df.sort_values(["participant_id", "subject", "session", "acq_time"], inplace=True)
 
     # Stash the per-UID file map on the DataFrame so callers (the CLI's
     # probe_convert pass) can find the source DICOMs of each detected
@@ -609,7 +767,7 @@ def scan_dicoms_long(
 
 def _assign_chronological_rep(df: pd.DataFrame) -> pd.DataFrame:
     """Populate ``rep`` with the chronological position within each
-    ``(BIDS_name, session, sequence, image_type)`` group.
+    ``(participant_id, session, sequence, image_type)`` group.
 
     Within a group (same subject, same session, same SeriesDescription,
     same image_type), rows are ordered by ``acq_time`` (then ``series_uid``
@@ -622,7 +780,7 @@ def _assign_chronological_rep(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     df = df.copy()
-    keys = ["BIDS_name", "session", "sequence", "image_type"]
+    keys = ["participant_id", "session", "sequence", "image_type"]
     sort_keys = keys + ["acq_time", "series_uid"]
     # Stable sort by acquisition time inside each group.
     df.sort_values(sort_keys, inplace=True, kind="stable")
@@ -633,28 +791,82 @@ def _assign_chronological_rep(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _collapse_fieldmap_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Merge magnitude/phase fieldmap rows the way v0.2.5 did.
+def _fieldmap_acquisition_index(
+    fmap_df: pd.DataFrame, base_cols: list[str]
+) -> list[int]:
+    """Number each fieldmap ACQUISITION within its ``base_cols`` group.
 
-    Same ``(BIDS_name, session, source_folder, sequence)`` grouped by
-    acquisition-time minute → joined ``series_uid`` (``|``-separated) and
-    summed ``n_files``. Run-numbering happens via the ``rep`` column.
+    One gradient-echo fieldmap is one magnitude series plus one phase
+    series, so a repeat of an image type is where the next acquisition
+    starts. That is the whole rule, and it needs no clock and no threshold:
+    ``M P M P`` is two acquisitions however far apart they were taken, and
+    a magnitude and phase pair recorded either side of a minute boundary is
+    still one.
+
+    The previous rule bucketed on the first four characters of
+    ``acq_time``, the clock minute. It had two failure modes. A dataset
+    whose DICOM carries no ``AcquisitionTime`` (see :func:`acquisition_time`)
+    gave every row the same empty bucket, so all four series above merged
+    into a single row and the second fieldmap was written out under
+    dcm2niix's own collision suffixes, which are not valid BIDS names. And
+    a pair straddling a minute boundary was split when it should not have
+    been.
+
+    ``acq_time`` still decides the ORDER rows are walked in, so a dataset
+    that does carry it gets the acquisitions numbered chronologically. When
+    it is absent the sort falls back to ``series_uid``, and the rule still
+    holds because it never asks how far apart two rows are.
+
+    An empty ``image_type`` is never treated as a repeat: if the vendor did
+    not say what the image is, we cannot claim to have seen it before, and
+    merging is the behaviour that was there already.
+    """
+    index: list[int] = []
+    prev_key: Optional[tuple] = None
+    seen: set[str] = set()
+    current = 0
+
+    # Tuples rather than a joined string: any separator we picked could
+    # occur inside a folder name.
+    keys = list(map(tuple, fmap_df[base_cols].astype(str).to_numpy()))
+    for key, img in zip(keys, fmap_df["image_type"].astype(str)):
+        if key != prev_key:
+            prev_key, seen, current = key, set(), 0
+        elif img and img in seen:
+            seen, current = set(), current + 1
+        if img:
+            seen.add(img)
+        index.append(current)
+    return index
+
+
+def _collapse_fieldmap_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Merge the magnitude and phase rows of one fieldmap into one row.
+
+    Same ``(participant_id, session, source_folder, sequence)``, split into
+    acquisitions by :func:`_fieldmap_acquisition_index` → joined
+    ``series_uid`` (``|``-separated) and summed ``n_files``. Run-numbering
+    happens via the ``rep`` column.
     """
 
-    fmap_mask = df["modality"] == "fmap"
+    fmap_mask = df["sequence_kind"] == "fmap"
     if not fmap_mask.any():
         return df
 
-    base_cols = ["BIDS_name", "session", "source_folder", "sequence"]
+    base_cols = ["participant_id", "session", "source_folder", "sequence"]
     fmap_df = df[fmap_mask].copy()
-    fmap_df["acq_group"] = fmap_df["acq_time"].apply(lambda t: str(t)[:4])
+    # Sorted before the walk, because the acquisition index is positional.
+    fmap_df.sort_values(
+        base_cols + ["acq_time", "series_uid"], inplace=True, kind="stable",
+    )
+    fmap_df["acq_group"] = _fieldmap_acquisition_index(fmap_df, base_cols)
 
     group_cols = base_cols + ["acq_group"]
     fmap_df["uid_list"] = fmap_df["series_uid"]
     fmap_df["img_set"] = fmap_df["image_type"]
     agg_spec = {
         "subject": "first",
-        "BIDS_name": "first",
+        "participant_id": "first",
         "session": "first",
         "source_folder": "first",
         "include": "max",
@@ -663,7 +875,7 @@ def _collapse_fieldmap_rows(df: pd.DataFrame) -> pd.DataFrame:
         "img_set": lambda x: "".join(sorted({str(v) for v in x})),
         "acq_time": "first",
         "modality": "first",
-        "modality_bids": "first",
+        "sequence_kind": "first",
         "n_files": "sum",
         "study_instance_uid": "first",
         "study_date": "first",

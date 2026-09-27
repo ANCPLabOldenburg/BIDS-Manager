@@ -63,9 +63,12 @@ from ..metadata.preserve import is_mergeable, merge_file
 from ..fixups import (
     apply_fieldmap_renames,
     attach_companion_files,
+    clean_mrs_outputs,
+    prune_identifiers,
     convert_blood_files,
     deface_staged,
     enrich_pet_sidecars,
+    enrich_physio_sidecars,
     enrich_recording_sidecars,
     populate_intended_for,
     repair_converter_output,
@@ -121,6 +124,19 @@ def _apply_pet_spreadsheet(spec, path: Path, df) -> object:
     if not table:
         return spec
 
+    # A sheet with no scan identifier is one row per FIELD, and the reader
+    # gives it back under the empty key meaning "every PET run". Same
+    # convention as the JSON route, so the two cannot disagree about what a
+    # study-wide dose means.
+    default = table.pop("", None)
+    if default is not None:
+        spec = spec.model_copy(update={
+            "pet_defaults": merge_pet(default, spec.pet_defaults)
+            if spec.pet_defaults is not None else default,
+        })
+    if not table:
+        return spec
+
     # Every identifier an inventory row answers to, mapped to EVERY row that
     # answers to it. A participant-level key must reach all of that
     # participant's scans, not just the first: a subject with two runs got one
@@ -134,7 +150,7 @@ def _apply_pet_spreadsheet(spec, path: Path, df) -> object:
 
     for i in df.index:
         rid = _row_id(df, i)
-        for column in ("BIDS_name", "subject", "source_file"):
+        for column in ("participant_id", "subject", "source_file"):
             if column not in df.columns:
                 continue
             value = str(df.at[i, column] or "").strip()
@@ -172,6 +188,71 @@ def _apply_pet_spreadsheet(spec, path: Path, df) -> object:
     return spec.model_copy(update={"pet_overrides": overrides})
 
 
+def _apply_pet_metadata_json(spec, path: Path, df) -> object:
+    """Fold a PET metadata JSON into ``spec`` as defaults plus per-row overrides.
+
+    The dataset-wide block (the file's unscoped keys) becomes
+    ``pet_defaults``; a ``sub-<label>`` block becomes an override on every
+    row of that subject. Both layer UNDER anything the user already stated
+    in the form, because a file is a starting point and the form is where
+    somebody looked at this particular scan.
+
+    The same alias matching as the spreadsheet: a subject-level key must
+    reach all of that subject's runs, not just the first.
+    """
+    from ..metadata.pet_metadata_json import read_pet_metadata_json
+    from ..project.orchestration import row_id as _row_id
+
+    blocks = read_pet_metadata_json(path)
+    if not blocks:
+        return spec
+
+    default = blocks.pop("", None)
+    if default is not None:
+        spec = spec.model_copy(update={
+            "pet_defaults": merge_pet(default, spec.pet_defaults)
+            if spec.pet_defaults is not None else default,
+        })
+
+    if not blocks:
+        return spec
+
+    aliases: dict[str, list[str]] = {}
+
+    def _add(key: str, rid: str) -> None:
+        text = key.strip()
+        if text and rid not in aliases.setdefault(text, []):
+            aliases[text].append(rid)
+
+    for i in df.index:
+        rid = _row_id(df, i)
+        for column in ("participant_id", "subject", "bids_name", "source_file"):
+            if column not in df.columns:
+                continue
+            value = str(df.at[i, column] or "").strip()
+            if not value:
+                continue
+            _add(value, rid)
+            _add(value[4:] if value.startswith("sub-") else f"sub-{value}", rid)
+            _add(Path(value).name, rid)
+
+    overrides = dict(spec.pet_overrides)
+    for key, block in blocks.items():
+        rids = aliases.get(key) or []
+        if not rids:
+            log.warning(
+                "PET metadata block %r matches no inventory row; ignoring", key,
+            )
+            continue
+        for rid in rids:
+            existing = overrides.get(rid)
+            overrides[rid] = (
+                block if existing is None else merge_pet(existing, block)
+            )
+
+    return spec.model_copy(update={"pet_overrides": overrides})
+
+
 def run_convert(
     tsv: Path,
     bids_parent: Path,
@@ -184,6 +265,7 @@ def run_convert(
     dcm2niix_bin: Optional[Path] = None,
     recording_meta: Optional[Path] = None,
     pet_spreadsheet: Optional[Path] = None,
+    pet_metadata: Optional[Path] = None,
     raw_root: Optional[Path] = None,
     skip_residuals: bool = True,
     force_edf: bool = False,
@@ -329,6 +411,11 @@ def run_convert(
     # records, and retyping it is both tedious and a fresh chance to mistype a
     # dose. Rows are matched on participant label or source filename, whichever
     # the spreadsheet used.
+    # The JSON first, then the spreadsheet: a spreadsheet is one row per
+    # SCAN and a JSON is usually one block per study, so the more specific
+    # statement layers on top of the more general one.
+    if pet_metadata is not None:
+        spec = _apply_pet_metadata_json(spec, Path(pet_metadata), df)
     if pet_spreadsheet is not None:
         spec = _apply_pet_spreadsheet(spec, Path(pet_spreadsheet), df)
 
@@ -365,7 +452,7 @@ def run_convert(
             # exist on disk (incremental add into an existing dataset).
             _log_existing_subject_summary(bids_root, dataset_df, on_existing)
 
-        for subject, subject_df in dataset_df.groupby("BIDS_name", sort=True):
+        for subject, subject_df in dataset_df.groupby("participant_id", sort=True):
             # Stop here if the user requested it. Subjects committed before
             # this point stay (the desired "stop now" behaviour); nothing
             # half-written is left because the commit is per-subject atomic.
@@ -373,7 +460,7 @@ def run_convert(
                 cancelled = True
                 break
             if not subject:
-                log.warning("skipping rows with empty BIDS_name")
+                log.warning("skipping rows with empty participant_id")
                 continue
 
             tasks = _build_tasks_for_subject(
@@ -491,6 +578,20 @@ def _convert_subject(
         # identifiers dcm2niix leaves behind under ``-ba n``. Runs even with
         # no spec, since the rename, type-fix and prune passes need no input.
         n_enriched += enrich_pet_sidecars(staging, tasks, spec)
+        # MR spectroscopy carries its metadata INSIDE the .nii.gz, as NIfTI
+        # extension 44, which is where the NIfTI-MRS standard puts the
+        # acquisition parameters a spectrum cannot be read without. It is
+        # also where dcm2niix puts the patient's name, ID, date of birth,
+        # sex and weight. No sidecar pass can reach inside an image, so
+        # this one opens it: measured on real data the moment MRS
+        # conversion was enabled, every _svs file carried all five.
+        n_enriched += clean_mrs_outputs(staging, tasks)
+        # Physio: the vendored bidsphysio writes the three fields a physio
+        # sidecar cannot do without and nothing the standard has asked for
+        # since. This fills what can be DERIVED, asking the active schema
+        # which fields it declares rather than hard-coding one BIDS version
+        # into third-party code.
+        n_enriched += enrich_physio_sidecars(staging)
         # Copy any per-row curated companion files (events/beh/stim/...) into
         # the staged tree (place + name only; no conversion).
         n_enriched += attach_companion_files(staging, tasks)
@@ -505,6 +606,15 @@ def _convert_subject(
         # What the USER stated is NOT applied here. That is the metadata step's
         # job, so this verb produces a faithful conversion and no opinions.
         n_enriched += repair_converter_output(staging)
+        # Identifiers, dataset-wide and LAST, so nothing above can put one
+        # back. dcm2niix is run with ``-ba n`` to keep SeriesInstanceUID for
+        # provenance, which also keeps the patient's name, ID, date of
+        # birth, age, sex, size and weight in every sidecar it writes. Until
+        # this existed only the PET fixup pruned them, so a PET dataset was
+        # clean and an MRI one was not: 58 of 71 MRI sidecars in this lab's
+        # own data carried all seven. BIDS is explicit that a sidecar must
+        # not carry identifying information, so there is no switch here.
+        n_enriched += prune_identifiers(staging)
         # Remove faces LAST, and before the commit, which is the whole point of
         # doing it here: the identifiable image exists only inside the staging
         # directory, for a few seconds, and what lands in the dataset was never
@@ -779,12 +889,12 @@ def _log_existing_subject_summary(bids_root: Path, dataset_df, on_existing: str)
 
     Awareness for incremental conversion: a subject already on disk will be
     merged into per ``on_existing``. Informational only (the per-subject merge
-    counts + the final summary report the actual outcome). ``BIDS_name`` values
+    counts + the final summary report the actual outcome). ``participant_id`` values
     (``sub-XXX``) match the on-disk subject dir names for the common case.
     """
-    if "BIDS_name" not in dataset_df.columns:
+    if "participant_id" not in dataset_df.columns:
         return
-    incoming = sorted({str(s).strip() for s in dataset_df["BIDS_name"] if str(s).strip()})
+    incoming = sorted({str(s).strip() for s in dataset_df["participant_id"] if str(s).strip()})
     on_disk = {p.name for p in bids_root.glob("sub-*") if p.is_dir()}
     if not incoming or not on_disk:
         return  # brand-new dataset (or no subjects): nothing to flag
@@ -910,14 +1020,14 @@ def _merge_commit(
 
 
 def _filter_convertible_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep only rows that are include=1 with a non-empty proposed_basename
+    """Keep only rows that are include=1 with a non-empty bids_name
     and are not flagged ``bids_guess_skip``.
     """
     out = df.copy()
     if "include" in out.columns:
         out = out[out["include"].astype(str) == "1"]
-    if "proposed_basename" in out.columns:
-        out = out[out["proposed_basename"].astype(str).str.len() > 0]
+    if "bids_name" in out.columns:
+        out = out[out["bids_name"].astype(str).str.len() > 0]
     if "bids_guess_skip" in out.columns:
         out = out[~out["bids_guess_skip"].astype(str).str.lower().isin({"true", "1"})]
     return out
@@ -1005,8 +1115,8 @@ def _row_to_task_mri(
         )
         return None
 
-    bids_name = str(row.get("BIDS_name", "")).strip()
-    subject = bids_name[len("sub-"):] if bids_name.startswith("sub-") else bids_name
+    participant = str(row.get("participant_id", "")).strip()
+    subject = participant[len("sub-"):] if participant.startswith("sub-") else participant
     if not subject:
         return None
 
@@ -1017,12 +1127,12 @@ def _row_to_task_mri(
     if session == "":
         session = None
 
-    datatype = str(row.get("proposed_datatype", "")).strip()
+    datatype = str(row.get("datatype", "")).strip()
     suffix = (
         str(row.get("bids_guess_suffix", "")).strip()
-        or _suffix_from_basename(str(row.get("proposed_basename", "")))
+        or _suffix_from_basename(str(row.get("bids_name", "")))
     )
-    basename = str(row.get("proposed_basename", "")).strip()
+    basename = str(row.get("bids_name", "")).strip()
     if not (datatype and suffix and basename):
         return None
 
@@ -1129,8 +1239,8 @@ def _row_to_task_file_based(
     if not source_file:
         return None
 
-    bids_name = str(row.get("BIDS_name", "")).strip()
-    subject = bids_name[len("sub-"):] if bids_name.startswith("sub-") else bids_name
+    participant = str(row.get("participant_id", "")).strip()
+    subject = participant[len("sub-"):] if participant.startswith("sub-") else participant
     if not subject:
         return None
 
@@ -1142,7 +1252,7 @@ def _row_to_task_file_based(
     if session == "":
         session = None
 
-    datatype = str(row.get("proposed_datatype", "")).strip().lower()
+    datatype = str(row.get("datatype", "")).strip().lower()
     if datatype not in _FILE_BASED_DATATYPES:
         # Either not actually a file-based row, or the user clobbered the
         # column. Skip.
@@ -1150,10 +1260,10 @@ def _row_to_task_file_based(
 
     suffix = (
         str(row.get("bids_guess_suffix", "")).strip()
-        or _suffix_from_basename(str(row.get("proposed_basename", "")))
+        or _suffix_from_basename(str(row.get("bids_name", "")))
         or datatype
     )
-    basename = str(row.get("proposed_basename", "")).strip()
+    basename = str(row.get("bids_name", "")).strip()
     if not basename:
         return None
 
@@ -1570,6 +1680,19 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--pet-metadata", default=None, type=Path,
+        help=(
+            "Path to a PET metadata JSON keyed by BIDS sidecar field names "
+            "(TracerName, InjectedRadioactivity, ModeOfAdministration, ...). "
+            "A flat object applies to every PET run; an object keyed by "
+            "sub-<label> scopes each block to that subject. This is the shape "
+            "pypet2bids accepts via --set-default-metadata-json, including its "
+            "nifti_json wrapper, so a file written for that tool is read here "
+            "unmodified. Keys BIDS does not define for a PET sidecar are "
+            "reported and dropped, never written."
+        ),
+    )
+    parser.add_argument(
         "--raw-root", default=None, type=Path,
         help=(
             "Folder the scan was run against. Used as the first "
@@ -1686,6 +1809,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
             dcm2niix_bin=args.dcm2niix,
             recording_meta=args.recording_meta,
             pet_spreadsheet=args.pet_spreadsheet,
+            pet_metadata=args.pet_metadata,
             raw_root=Path(version.raw_root) if version.raw_root else args.raw_root,
             skip_residuals=not args.keep_residuals,
             preserve_curation=not args.overwrite_curation,
@@ -1708,6 +1832,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
         dcm2niix_bin=args.dcm2niix,
         recording_meta=args.recording_meta,
         pet_spreadsheet=args.pet_spreadsheet,
+        pet_metadata=args.pet_metadata,
         raw_root=args.raw_root,
         skip_residuals=not args.keep_residuals,
         preserve_curation=not args.overwrite_curation,

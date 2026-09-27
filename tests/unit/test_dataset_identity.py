@@ -109,7 +109,7 @@ def test_classify_unknown_when_no_identity():
 
 
 def test_notes_are_warnings_not_errors():
-    # The model treats these proposed_issues tokens as fatal; the hints must
+    # The model treats these issues tokens as fatal; the hints must
     # avoid all of them so the row reads as a warning.
     err_tokens = ("suspected_abort", "required", "build_basename", "missing")
     notes = [

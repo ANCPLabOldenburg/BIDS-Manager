@@ -120,4 +120,26 @@ def round_menu(menu) -> None:
     menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
 
-__all__ = ["install", "round_menu"]
+def menu_section(menu, title: str):
+    """Start a titled group inside ``menu``, returning the header action.
+
+    A menu of sixteen verbs is a list, not a menu: nothing about "Index
+    widths" tells you it sits next to "Rename entity" rather than next to
+    "Deface". Grouping them by what they are FOR is the fix, and doing it
+    with headings rather than sub-menus keeps every tool one click away.
+
+    Implemented as a separator plus a **disabled action**, not Qt's
+    ``addSection``: this app styles ``QMenu::separator`` as a 1px rule, and
+    Qt draws a section's text into that separator, so the title would be
+    invisible. A disabled item picks up ``QMenu::item:disabled`` and renders
+    as muted text, which is the look the Properties panel already uses for
+    its sub-headings.
+    """
+    if not menu.isEmpty():
+        menu.addSeparator()
+    action = menu.addAction(title.upper())
+    action.setEnabled(False)
+    return action
+
+
+__all__ = ["install", "menu_section", "round_menu"]

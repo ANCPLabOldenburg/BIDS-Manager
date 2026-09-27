@@ -44,41 +44,74 @@ def _labels(panel: EditorPanel) -> list[str]:
 
 
 def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
+    """Grouped by PURPOSE, with headings rather than sub-menus.
+
+    Sixteen flat verbs had become a list nobody could scan: "Index widths"
+    sat next to "Put the face back" and the only thing that told you which
+    one you wanted was reading all sixteen. Headings answer "what am I
+    trying to do" first and keep every tool one click away, which a
+    sub-menu would not. Pinned because the grouping IS the claim.
+    """
     assert _labels(panel) == [
+        "LOOK AT THE DATASET",
         "Dashboard",
-        # A viewer action, not a repair: it sits with Dashboard, above the
-        # separator that starts the things which CHANGE the dataset.
         "Compare images...",
+
+        "CHECK AND REPAIR",
+        # All three answer "what is wrong with this dataset": coherence
+        # finds what disagrees, References finds what points at nothing,
+        # Fix ups fills what is missing.
+        "Check coherence...",
+        "References (IntendedFor, Sources...)...",
         "Fix ups...",
-        "Deface...",
-        "Remove the skull...",
-        # Directly under Deface, although it acts on a SELECTION and the rest
-        # of this group acts on the dataset. Removing faces and checking that
-        # the right ones went are two halves of one action, and a user who has
-        # just defaced looks for the check next to the thing they pressed.
-        "Compare with the original...",
-        "Put the face back...",
+
+        "NAMES AND STRUCTURE",
         "Rename entity...",
+        "Find and replace a value...",
+        "Index widths...",
         "Add or remove an entity...",
         "Sessions...",
+
+        "IDENTIFIABLE DATA",
+        "Deface...",
+        "Remove the skull...",
+        # Directly under the two that remove a face, because removing one
+        # and checking that the right thing went are two halves of one
+        # action, and a user who has just defaced looks for the check next
+        # to the thing they pressed.
+        "Compare with the original...",
+        "Put the face back...",
+
+        "REMOVE",
         "Delete...",
+
+        "HISTORY",
         "Track changes",
     ]
 
 
-def test_deface_sits_with_fix_ups_not_with_the_restructuring_actions(
-    panel: EditorPanel,
-) -> None:
-    """Placement is the claim, so it is pinned.
+def test_the_headings_are_not_clickable(panel: EditorPanel) -> None:
+    """They are labels. A heading that can be pressed is a broken menu item.
 
-    Rename, entities, sessions and delete all act on a SELECTION. Fix ups and
-    Deface act on the DATASET: both are repairs applied to the whole thing from
-    a dialog that previews and asks. Grouping by what a thing acts on is what
-    makes a menu readable, so Deface belongs above the separator with Fix ups.
+    Implemented as a disabled action rather than Qt's ``addSection``: this
+    app styles ``QMenu::separator`` as a 1px rule and Qt draws a section's
+    text into that separator, where it would be invisible.
     """
+    headings = [
+        a for a in panel._tools_menu.actions() if a.text().isupper()
+    ]
+    assert len(headings) == 6
+    assert not any(a.isEnabled() for a in headings)
+
+
+def test_defacing_sits_under_its_own_heading(panel: EditorPanel) -> None:
+    """Placement is the claim, so it is pinned. All four entries that touch
+    a face are together, and they are not mixed in with renaming."""
     labels = _labels(panel)
-    assert labels.index("Deface...") == labels.index("Fix ups...") + 1
-    assert labels.index("Deface...") < labels.index("Rename entity...")
+    face = labels.index("IDENTIFIABLE DATA")
+    assert labels.index("Deface...") == face + 1
+    assert labels.index("Put the face back...") == face + 4
+    assert labels.index("Rename entity...") < face
 
 
 def test_deface_is_disabled_rather_than_hidden_when_it_cannot_run(

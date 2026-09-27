@@ -140,9 +140,9 @@ class FilterPane(QWidget):
         groups: dict[tuple[str, str, str, str], list[tuple[int, str]]] = {}
         for i in df.index:
             ds = str(df.at[i, "dataset"]) if "dataset" in df.columns else ""
-            sub = str(df.at[i, "BIDS_name"]) if "BIDS_name" in df.columns else ""
+            sub = str(df.at[i, "participant_id"]) if "participant_id" in df.columns else ""
             ses = str(df.at[i, "session"]) if "session" in df.columns else ""
-            dt = str(df.at[i, "proposed_datatype"]) if "proposed_datatype" in df.columns else ""
+            dt = str(df.at[i, "datatype"]) if "datatype" in df.columns else ""
             key = (
                 ds or "(no dataset)",
                 sub or "(no subject)",
@@ -206,12 +206,12 @@ class FilterPane(QWidget):
     def _sequence_label(df, row_idx: int) -> str:
         """Pick the most informative label for a sequence leaf.
 
-        Prefers ``proposed_basename`` (the BIDS-shaped name the user is
+        Prefers ``bids_name`` (the BIDS-shaped name the user is
         about to commit to). Falls back to the original DICOM
         SeriesDescription (``sequence`` column for MRI), then the
         ``source_file`` stem for EEG/MEG rows without a basename yet.
         """
-        for col in ("proposed_basename", "sequence", "source_file"):
+        for col in ("bids_name", "sequence", "source_file"):
             if col not in df.columns:
                 continue
             raw = df.at[row_idx, col]

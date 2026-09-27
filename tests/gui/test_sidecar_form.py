@@ -28,6 +28,7 @@ from bidsmgr.editor.types import (
 )
 from PyQt6.QtWidgets import QFrame
 
+from .conftest import open_every_folder
 from bidsmgr.gui.editor_panel import EditorPanel
 from bidsmgr.gui.widgets.bids_tree_pane import PATH_ROLE
 from bidsmgr.gui.widgets.sidecar_form_pane import (
@@ -368,6 +369,7 @@ def test_tree_click_loads_form_without_validation(
     json_path_str = str(
         bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.json"
     )
+    open_every_folder(tree)
     target = None
 
     def visit(item) -> None:
@@ -434,3 +436,133 @@ def test_directory_click_clears_form(
     panel._on_file_selected(anat_path)
     assert panel._sidecar_form.current_file() is None
     assert panel._sidecar_form._rows == []
+
+
+class TestTheToolbarFitsInThePane:
+    """Eight controls in one row clipped the last of them off the edge.
+
+    The pane is a third of the window. A button you cannot see is a button
+    that does not exist, so the field verbs moved to a second row, which
+    costs nothing in BIDS view because it is not there.
+    """
+
+    def _pane(self, qtbot, bids_root: Path):
+        from bidsmgr.gui.widgets.sidecar_form_pane import SidecarFormPane
+
+        pane = SidecarFormPane()
+        qtbot.addWidget(pane)
+        pane.resize(560, 700)
+        pane.set_file(
+            bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.json",
+            bids_root, None,
+        )
+        return pane
+
+    def test_the_field_verbs_are_on_their_own_row(self, qtbot, bids_root):
+        """Ancestry, not direct parenthood: the wrapping bar sits between
+        them, which is an implementation detail of how the row reflows."""
+        pane = self._pane(qtbot, bids_root)
+        for name in ("_add_field_btn", "_add_subfield_btn", "_del_field_btn"):
+            button = getattr(pane, name)
+            ancestors = []
+            node = button.parentWidget()
+            while node is not None:
+                ancestors.append(node)
+                node = node.parentWidget()
+            assert pane._field_tools in ancestors, name
+
+    def test_that_row_is_absent_in_bids_view(self, qtbot, bids_root):
+        pane = self._pane(qtbot, bids_root)
+        pane._apply_view_mode("bids", persist=False)
+        # ``isVisibleTo``: the pane itself is not shown in a headless test,
+        # so ``isVisible`` would be False for everything in it.
+        assert not pane._field_tools.isVisibleTo(pane)
+
+    def test_and_present_in_tree_view(self, qtbot, bids_root):
+        pane = self._pane(qtbot, bids_root)
+        pane._apply_view_mode("tree", persist=False)
+        assert pane._field_tools.isVisibleTo(pane)
+
+    def test_nothing_is_clipped_at_a_realistic_width(self, qtbot, bids_root):
+        """The report was a screenshot with the last button cut in half."""
+        pane = self._pane(qtbot, bids_root)
+        pane.show()
+        pane._apply_view_mode("tree", persist=False)
+        qtbot.waitExposed(pane)
+        bar = pane._edit_toolbar
+        assert bar.sizeHint().width() <= pane.width(), (
+            "the toolbar still wants more room than the pane has"
+        )
+
+
+class TestThePaneCanBeDraggedNarrow:
+    """It could not go below 617 pixels. The content it exists to show
+    could have gone to 62.
+
+    Three things put that floor there, and each is a Qt rule that reads
+    backwards: a QHBoxLayout's minimum is the SUM of its children, a plain
+    QLabel reports its full text width as its MINIMUM, and a QComboBox
+    sizes itself to its longest entry. All three are now able to give.
+    """
+
+    def _pane(self, qtbot, bids_root: Path, mode: str):
+        from bidsmgr.gui.widgets.sidecar_form_pane import SidecarFormPane
+
+        pane = SidecarFormPane()
+        qtbot.addWidget(pane)
+        pane.set_file(
+            bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.json",
+            bids_root, None,
+        )
+        pane._apply_view_mode(mode, persist=False)
+        return pane
+
+    @pytest.mark.parametrize("mode", ["bids", "tree"])
+    def test_it_shrinks_well_under_what_it_used_to(self, qtbot, bids_root, mode):
+        pane = self._pane(qtbot, bids_root, mode)
+        assert pane.minimumSizeHint().width() <= 260, (
+            "the pane will not shrink; something in it reports a width as "
+            "its minimum"
+        )
+
+    @pytest.mark.parametrize("mode", ["bids", "tree"])
+    def test_asking_for_a_narrow_width_gets_one(self, qtbot, bids_root, mode):
+        pane = self._pane(qtbot, bids_root, mode)
+        pane.show()
+        qtbot.waitExposed(pane)
+        pane.resize(260, 600)
+        qtbot.wait(10)
+        assert pane.width() <= 260
+
+    def test_the_toolbar_wraps_instead_of_clipping(self, qtbot, bids_root):
+        """Its rows reflow, so a narrow pane grows the bar taller rather
+        than cutting a button off the right-hand edge."""
+        pane = self._pane(qtbot, bids_root, "tree")
+        pane.show()
+        qtbot.waitExposed(pane)
+        pane.resize(700, 600)
+        qtbot.wait(10)
+        wide = pane._edit_toolbar.height()
+        pane.resize(300, 600)
+        qtbot.wait(10)
+        narrow = pane._edit_toolbar.height()
+        assert narrow > wide, "the bar did not wrap"
+
+    def test_no_button_is_cut_off_when_narrow(self, qtbot, bids_root):
+        from PyQt6.QtWidgets import QPushButton
+
+        pane = self._pane(qtbot, bids_root, "tree")
+        pane.show()
+        qtbot.waitExposed(pane)
+        pane.resize(300, 600)
+        qtbot.wait(10)
+        bar = pane._edit_toolbar
+        for button in bar.findChildren(QPushButton):
+            if not button.isVisibleTo(pane):
+                continue
+            right = button.mapTo(bar, button.rect().topRight()).x()
+            assert right <= bar.width(), f"{button.text()!r} runs off the edge"
+
+    def test_the_footer_path_is_elided_not_a_floor(self, qtbot, bids_root):
+        pane = self._pane(qtbot, bids_root, "bids")
+        assert pane._footer_path.minimumSizeHint().width() < 60

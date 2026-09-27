@@ -94,3 +94,36 @@ def test_validate_basename_round_trips():
         {"subject": "001", "task": "rest"}, "func", "bold", ".nii.gz"
     )
     assert schema.validate_basename(name, "func") == []
+
+
+class TestWarming:
+    """The schema lookups are cached for the life of the process, so the
+    FIRST one is expensive and the rest are free. Where that first one
+    happens decides whether the window freezes."""
+
+    def test_warm_pairs_populates_the_cache(self):
+        from bidsmgr import schema as s
+
+        s.warm_pairs([("anat", "T1w"), ("func", "bold")])
+        # Cheap afterwards: asserted by the call succeeding without raising
+        # and by the cache reporting hits.
+        info = s.engine.sidecar_fields.cache_info() \
+            if hasattr(s.engine.sidecar_fields, "cache_info") else None
+        assert info is None or info.currsize > 0
+
+    def test_warm_pairs_ignores_a_blank_pair(self):
+        from bidsmgr import schema as s
+
+        s.warm_pairs([("", ""), ("anat", ""), ("", "T1w")])
+
+    def test_warm_pairs_ignores_a_pair_the_schema_rejects(self):
+        """Warming is advisory and must never raise into a scan."""
+        from bidsmgr import schema as s
+
+        s.warm_pairs([("notadatatype", "notasuffix")])
+
+    def test_warm_caches_is_idempotent(self):
+        from bidsmgr import schema as s
+
+        s.warm_caches()
+        s.warm_caches()

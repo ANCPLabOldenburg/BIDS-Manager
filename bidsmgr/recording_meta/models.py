@@ -372,7 +372,7 @@ class RecordingMetaSpec(_Model):
     # MEG sidecars claim it too. Anything stated here belongs to that datatype
     # alone; anything left blank falls back to ``defaults``, so a study with
     # one modality never has to say where it goes.
-    modality_defaults: dict[str, AcquisitionSpec] = {}
+    datatype_defaults: dict[str, AcquisitionSpec] = {}
     task_protocols: dict[str, TaskProtocol] = {}
     event_maps: dict[str, EventMap] = {}
     overrides: dict[str, AcquisitionSpec] = {}

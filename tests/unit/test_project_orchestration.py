@@ -25,11 +25,11 @@ from bidsmgr.project.orchestration import (
 
 def _inv_df(subject="001", task="rest", uid="UID1") -> pd.DataFrame:
     return pd.DataFrame([{
-        "BIDS_name": f"sub-{subject}", "session": "", "include": 1,
-        "modality": "mri", "proposed_datatype": "func",
-        "proposed_basename": f"sub-{subject}_task-{task}_bold",
+        "participant_id": f"sub-{subject}", "session": "", "include": 1,
+        "modality": "mri", "datatype": "func",
+        "bids_name": f"sub-{subject}_task-{task}_bold",
         "bids_guess_suffix": "bold", "bids_guess_skip": False,
-        "proposed_issues": "",
+        "issues": "",
         "entities": json.dumps({"subject": subject, "task": task}, sort_keys=True),
         "task": task, "run": "", "series_uid": uid, "dataset": "ds",
         "source_file": "",
@@ -55,7 +55,7 @@ def test_apply_project_state_replays_entity_cell_include(tmp_path):
 
     apply_project_state(df, proj.state())
     assert df.iloc[0]["task"] == "memory"
-    assert "task-memory" in df.iloc[0]["proposed_basename"]
+    assert "task-memory" in df.iloc[0]["bids_name"]
     assert str(df.iloc[0]["include"]) in ("0", "False", "false")
 
 
@@ -94,10 +94,10 @@ def test_version_dataframe_replays_edits(tmp_path):
     proj.append(UserSetEntity(row_id="U1", entity="subject", value="042", previous="001"))
 
     df = version_dataframe(latest_version(root), apply_edits=True)
-    assert df.iloc[0]["BIDS_name"] == "sub-042"
+    assert df.iloc[0]["participant_id"] == "sub-042"
     # Without replay the on-disk inventory is unchanged.
     raw = version_dataframe(latest_version(root), apply_edits=False)
-    assert raw.iloc[0]["BIDS_name"] == "sub-001"
+    assert raw.iloc[0]["participant_id"] == "sub-001"
 
 
 def test_find_version_by_id_and_index(tmp_path):

@@ -25,13 +25,14 @@ from bidsmgr.gui.theme_manager import ThemeManager
 pytestmark = pytest.mark.gui
 
 
-def test_logo_loads_bundled_pixmap(qapp) -> None:
+def test_logo_loads_bundled_pixmap(qapp, qtbot) -> None:
     """The brand logo now uses the bundled PNG asset; the label should
     carry a non-null QPixmap (not an inline-gradient stylesheet).
     """
     theme = ThemeManager(qapp)
     theme.apply("dark")
     win = MainWindow(theme)
+    qtbot.addWidget(win)
     qapp.processEvents()
 
     pix = win._header._logo.pixmap()
@@ -44,13 +45,14 @@ def test_logo_loads_bundled_pixmap(qapp) -> None:
     assert not win._header._logo.pixmap().isNull()
 
 
-def test_logo_inverts_in_dark_theme(qapp) -> None:
+def test_logo_inverts_in_dark_theme(qapp, qtbot) -> None:
     """Dark theme inverts the bundled PNG so the dark-on-transparent
     artwork reads as light-on-transparent against the dark surface.
     Sampled by hashing a center scanline of pixel RGB.
     """
     theme = ThemeManager(qapp)
     win = MainWindow(theme)
+    qtbot.addWidget(win)
 
     def _sample_pixel(pix) -> tuple[int, int, int, int]:
         # Convert to image and read a pixel that's likely opaque
@@ -83,10 +85,17 @@ def test_logo_inverts_in_dark_theme(qapp) -> None:
         assert abs((light_sum + dark_sum) - 3 * 255) < 6
 
 
-def test_converter_panel_repaint_listener_fires(qapp, monkeypatch) -> None:
+def test_converter_panel_repaint_listener_fires(
+    qapp, qtbot, monkeypatch,
+) -> None:
     theme = ThemeManager(qapp)
     theme.apply("dark")
     win = MainWindow(theme)
+    # Registered with qtbot so it is destroyed when the test ends. A
+    # MainWindow left to the garbage collector is freed at interpreter
+    # teardown, in an order Qt does not survive: pytest's own
+    # ``gc_collect_harder`` then segfaults with every test passing.
+    qtbot.addWidget(win)
     qapp.processEvents()
 
     calls: list = []
@@ -104,13 +113,14 @@ def test_converter_panel_repaint_listener_fires(qapp, monkeypatch) -> None:
     assert calls[0]["bg"] != calls[1]["bg"]
 
 
-def test_placeholder_labels_use_pane_hint_object_name(qapp) -> None:
+def test_placeholder_labels_use_pane_hint_object_name(qapp, qtbot) -> None:
     """The empty-state hints in panes are no longer hardcoded grey;
     they live under ``#pane-hint`` so QSS handles light/dark refresh.
     """
     theme = ThemeManager(qapp)
     theme.apply("dark")
     win = MainWindow(theme)
+    qtbot.addWidget(win)
     qapp.processEvents()
 
     hints = [

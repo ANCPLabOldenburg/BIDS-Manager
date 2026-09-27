@@ -162,6 +162,52 @@ def long_path(path: Path | str) -> str:
     # Sub-260 paths work unchanged on every Windows version we target.
     if len(p) < 248:
         return p
+    return _prefixed(p)
+
+
+def long_path_for_tree(path: Path | str) -> str:
+    """Like :func:`long_path`, but for a directory somebody else will WALK.
+
+    Use this for a directory handed to a tool that opens the files INSIDE it.
+    :func:`long_path` is for a path that is itself about to be opened.
+
+    The difference is the whole point, and it is easy to miss: ``long_path``
+    measures the string it is given, but the length that decides whether a
+    child can be opened belongs to the CHILD. A folder of Siemens DICOMs at
+    200 characters sits comfortably under the 248 threshold and is handed over
+    unprefixed, while its ~90-character filenames put every file at 290 —
+    thirty past the ceiling.
+
+    That is exactly how it presented: dcm2niix walked the folder, could open
+    nothing, and reported ``rc=2`` "Unable to find any DICOM images in ... (or
+    subfolders 5 deep)", which reads as "this is not DICOM" rather than "this
+    path is too long". The BidsGuess classifier contributed nothing, every
+    series fell through to the regex layer, and a gradient fieldmap came back
+    ``phasediff`` where macOS and Linux said ``magnitude1``.
+
+    Measured on the reporting dataset, same files and same binary: 0 sidecars
+    from the 290-character path, 15 from a short one.
+
+    So there is no threshold here. We cannot know the longest child without
+    walking the tree ourselves, and a wrong guess costs the entire
+    classification, so Windows always gets the prefix and pays a few bytes of
+    argument. The path is resolved first because ``\\\\?\\`` accepts only a
+    fully-qualified, normalised path: it switches OFF the normalisation that
+    would otherwise tidy up ``/`` and ``..``.
+
+    A no-op off Windows, exactly like its sibling: macOS and Linux return
+    ``str(path)`` and have no ceiling to work around.
+    """
+    if os.name != "nt":
+        return str(path)
+    p = os.fspath(path)
+    if p.startswith("\\\\?\\"):
+        return p
+    return _prefixed(os.fspath(Path(p).resolve()))
+
+
+def _prefixed(p: str) -> str:
+    """Add the Win32 long-path prefix, in the form UNC paths need."""
 
     # UNC paths (``\\server\share\...``) get the special ``UNC\`` form.
     if p.startswith("\\\\"):

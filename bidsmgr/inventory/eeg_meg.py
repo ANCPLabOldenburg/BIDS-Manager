@@ -6,9 +6,9 @@ mne can't read are silently skipped, so dropping a folder of mixed
 content produces a clean inventory of recordings only.
 
 Output rows match the **unified** TSV schema (see
-``cli/scan.py``): universal columns (subject, BIDS_name, session,
-dataset, include, modality, modality_bids, proposed_datatype,
-proposed_basename, "Proposed BIDS name", source_folder) plus the
+``cli/scan.py``): universal columns (subject, participant_id, session,
+dataset, include, modality, sequence_kind, datatype,
+bids_name, "bids_path", source_folder) plus the
 EEG/MEG-specific :data:`EEG_MEG_COLUMNS` group below. MRI-specific
 columns (``series_uid``, demographics, study-level, BidsGuess, probe)
 are left blank for EEG/MEG rows; the scan orchestrator fills them with
@@ -116,7 +116,7 @@ _BIDS_NATIVE_EXTS: frozenset[str] = frozenset({
     ".snirf",
 })
 
-# Tokens prepended to a row's ``proposed_issues`` so the GUI surfaces the
+# Tokens prepended to a row's ``issues`` so the GUI surfaces the
 # reason (warnings chip / Issues dialog / tooltip) and the CLI logs it. Kept
 # free of the model's error-token substrings (``required`` / ``missing`` /
 # ``build_basename`` / ``suspected_abort``) so the row reads as warn / skip,
@@ -782,7 +782,7 @@ def scan_eeg_meg(
         if sub_token not in bids_id_for_subject:
             bids_counter += 1
             bids_id_for_subject[sub_token] = f"sub-{bids_counter:03d}"
-        bids_name = bids_id_for_subject[sub_token]
+        participant = bids_id_for_subject[sub_token]
 
         probe = _probe(path)
         if probe is None:
@@ -798,18 +798,18 @@ def scan_eeg_meg(
                 f"first, then re-scan."
             )
             log.warning("EEG/MEG scan: %s (%s)", note, path)
-            rows.append(_unsupported_row(path, root, dataset, bids_name, sub_token, fmt, note))
+            rows.append(_unsupported_row(path, root, dataset, participant, sub_token, fmt, note))
             continue
 
         datatype = probe.datatype or "eeg"
         # Build the BIDS basename via the schema engine so the row's
-        # ``proposed_basename`` is canonical and consumable by both the
+        # ``bids_name`` is canonical and consumable by both the
         # converter and the metadata audit.
         # Use the schema's canonical entity names: ``subject`` and
         # ``session`` (not the short ``sub``/``ses`` BIDS tokens).
         # ``schema.build_basename`` expects these keys.
         entities: dict[str, str] = {}
-        sub_token_clean = bids_name[len("sub-"):] if bids_name.startswith("sub-") else bids_name
+        sub_token_clean = participant[len("sub-"):] if participant.startswith("sub-") else participant
         entities["subject"] = sub_token_clean
         if ses_hint:
             entities["session"] = ses_hint
@@ -826,10 +826,10 @@ def scan_eeg_meg(
         except Exception as exc:
             log.debug(
                 "schema.build_basename failed for %s (%s/%s): %s",
-                bids_name, datatype, suffix, exc,
+                participant, datatype, suffix, exc,
             )
             # Fallback: stitch manually so the row still has a useful name.
-            parts_for_name = [bids_name]
+            parts_for_name = [participant]
             if ses_hint:
                 parts_for_name.append(f"ses-{ses_hint}")
             if task_hint:
@@ -869,17 +869,19 @@ def scan_eeg_meg(
 
         rows.append({
             "subject": sub_token,
-            "BIDS_name": bids_name,
+            "participant_id": participant,
             "session": f"ses-{ses_hint}" if ses_hint else "",
-            "source_folder": str(path.parent.relative_to(root))
+            "source_folder": path.parent.relative_to(root).as_posix()
                 if path.parent != root else "",
             "include": 1,
+            # For EEG and MEG the datatype IS the modality, so these agree
+            # by nature rather than by duplication.
             "modality": datatype,
-            "modality_bids": datatype,
-            "proposed_datatype": datatype,
-            "proposed_basename": basename,
-            "Proposed BIDS name": f"{basename}",
-            "proposed_issues": nonnative_note,
+            "sequence_kind": "",
+            "datatype": datatype,
+            "bids_name": basename,
+            "bids_path": f"{basename}",
+            "issues": nonnative_note,
             "entities": json.dumps(entities_for_tsv, sort_keys=True),
             "task": task_hint,
             "run": run_hint,
@@ -952,7 +954,7 @@ def _infer_sessions_from_recording_time(df: pd.DataFrame) -> pd.DataFrame:
     * Skip subjects with only 0 or 1 distinct recording dates.
     * For subjects with 2+ distinct dates, assign ``ses-1, ses-2, …``
       ordered chronologically. Update both ``session`` AND
-      ``proposed_basename`` so the canonical BIDS name reflects it.
+      ``bids_name`` so the canonical BIDS name reflects it.
     """
     if df.empty or "recording_time" not in df.columns:
         return df
@@ -963,7 +965,7 @@ def _infer_sessions_from_recording_time(df: pd.DataFrame) -> pd.DataFrame:
     # Sentinel for missing — pandas will treat empty as a normal group.
     date_part = date_part.where(date_part.str.len() == 10, "")
 
-    for bids_name, idx in out.groupby("BIDS_name").groups.items():
+    for participant, idx in out.groupby("participant_id").groups.items():
         rows_idx = list(idx)
         # Don't touch rows the path-regex already gave a session.
         with_session = [
@@ -987,11 +989,11 @@ def _infer_sessions_from_recording_time(df: pd.DataFrame) -> pd.DataFrame:
                 continue
             out.at[i, "session"] = ses_label
             # Splice the session into the BIDS basename.
-            out.at[i, "proposed_basename"] = _splice_session_into_basename(
-                str(out.at[i, "proposed_basename"]),
+            out.at[i, "bids_name"] = _splice_session_into_basename(
+                str(out.at[i, "bids_name"]),
                 ses_label,
             )
-            out.at[i, "Proposed BIDS name"] = out.at[i, "proposed_basename"]
+            out.at[i, "bids_path"] = out.at[i, "bids_name"]
             # Keep the canonical ``entities`` JSON in sync — the rebuild
             # engine reads from here.
             ent_raw = str(out.at[i, "entities"]).strip()
@@ -1026,7 +1028,7 @@ def _unsupported_row(
     path: Path,
     root: Path,
     dataset: Optional[str],
-    bids_name: str,
+    participant: str,
     sub_token: str,
     fmt: str,
     note: str,
@@ -1045,19 +1047,19 @@ def _unsupported_row(
         rel_source = str(path)
     return {
         "subject": sub_token,
-        "BIDS_name": bids_name,
+        "participant_id": participant,
         "session": "",
-        "source_folder": str(path.parent.relative_to(root))
+        "source_folder": path.parent.relative_to(root).as_posix()
             if path.parent != root else "",
         "include": 0,
         "modality": "eeg",            # best-effort; we could not probe channels
-        "modality_bids": "eeg",
-        "proposed_datatype": "eeg",
-        "proposed_basename": "",
-        "Proposed BIDS name": "",
-        "proposed_issues": note,
-        "entities": json.dumps({"subject": bids_name[len("sub-"):]
-                                if bids_name.startswith("sub-") else bids_name},
+        "sequence_kind": "",
+        "datatype": "eeg",
+        "bids_name": "",
+        "bids_path": "",
+        "issues": note,
+        "entities": json.dumps({"subject": participant[len("sub-"):]
+                                if participant.startswith("sub-") else participant},
                                sort_keys=True),
         "task": "",
         "run": "",
@@ -1092,9 +1094,9 @@ def _unsupported_row(
 def _empty_dataframe() -> pd.DataFrame:
     """Return an empty DataFrame with the EEG/MEG row columns present."""
     cols = [
-        "subject", "BIDS_name", "session", "source_folder", "include",
-        "modality", "modality_bids", "proposed_datatype",
-        "proposed_basename", "Proposed BIDS name",
+        "subject", "participant_id", "session", "source_folder", "include",
+        "modality", "sequence_kind", "datatype",
+        "bids_name", "bids_path",
     ] + list(EEG_MEG_COLUMNS) + ["dataset"]
     return pd.DataFrame(columns=cols)
 

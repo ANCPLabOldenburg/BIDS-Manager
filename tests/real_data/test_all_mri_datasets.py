@@ -8,7 +8,7 @@ only the *invariants*:
 * The TSV is written and readable.
 * The 22-column v0.2.5 contract is preserved.
 * The 6 ``bids_guess_*`` columns are appended.
-* Every populated ``proposed_basename`` validates against the BIDS schema.
+* Every populated ``bids_name`` validates against the BIDS schema.
 
 This is intentionally lax about content (some datasets have only fMRI, some
 have no T1, ``Old_LNF`` has just one EPI per subject, …). The contract being
@@ -70,25 +70,25 @@ def test_scan_produces_valid_tsv(dataset: Path, tmp_path: Path):
     for col in BIDS_GUESS_COLUMNS:
         assert col in columns, f"missing BidsGuess column {col!r} on {dataset.name}"
 
-    # Every populated proposed_basename must validate against the BIDS
+    # Every populated bids_name must validate against the BIDS
     # schema, except:
-    #   - derivatives rows (``proposed_datatype`` starts with
+    #   - derivatives rows (``datatype`` starts with
     #     ``"derivatives/"``); these live outside the raw BIDS validation
     #     surface by design.
-    #   - rows whose ``proposed_issues`` already records the schema verdict
+    #   - rows whose ``issues`` already records the schema verdict
     #     (e.g. bold without task gets a placeholder + an issue note).
-    populated = written[written["proposed_basename"].astype(str) != ""]
+    populated = written[written["bids_name"].astype(str) != ""]
     for _, row in populated.iterrows():
-        if str(row.get("proposed_datatype") or "").startswith("derivatives/"):
+        if str(row.get("datatype") or "").startswith("derivatives/"):
             continue
         verdicts = bids_schema.validate_basename(
-            row["proposed_basename"], row["proposed_datatype"]
+            row["bids_name"], row["datatype"]
         )
         errors = [v for v in verdicts if v.severity is bids_schema.Severity.ERROR]
-        if errors and not str(row.get("proposed_issues") or ""):
+        if errors and not str(row.get("issues") or ""):
             pytest.fail(
-                f"schema rejected proposed basename {row['proposed_basename']!r} "
-                f"(datatype={row['proposed_datatype']!r}) on {dataset.name}: {errors}"
+                f"schema rejected proposed basename {row['bids_name']!r} "
+                f"(datatype={row['datatype']!r}) on {dataset.name}: {errors}"
             )
 
     # If no DICOMs were found at all, the rest of the assertions don't apply
@@ -98,8 +98,8 @@ def test_scan_produces_valid_tsv(dataset: Path, tmp_path: Path):
         return
 
     # Subject IDs must follow the v0.2.5 'sub-NNN' contract.
-    assert (written["BIDS_name"].str.startswith("sub-")).all(), (
-        f"non-conforming BIDS_name on {dataset.name}"
+    assert (written["participant_id"].str.startswith("sub-")).all(), (
+        f"non-conforming participant_id on {dataset.name}"
     )
 
 
@@ -126,12 +126,12 @@ def test_ppmi_longitudinal_sessions_split():
             pass
 
     # PPMI's two known patients should produce two subjects.
-    subjects = df["BIDS_name"].unique()
+    subjects = df["participant_id"].unique()
     assert len(subjects) == 2, f"expected 2 PPMI subjects, got {sorted(subjects)}"
 
     # Each subject should have at least 2 distinct sessions (ses-1, ses-2).
     for sub in subjects:
-        sub_df = df[df["BIDS_name"] == sub]
+        sub_df = df[df["participant_id"] == sub]
         sessions = {s for s in sub_df["session"] if s}
         assert len(sessions) >= 2, (
             f"{sub} has only {sessions} sessions — longitudinal split failed"
@@ -140,16 +140,16 @@ def test_ppmi_longitudinal_sessions_split():
         for s in sessions:
             assert s.startswith("ses-"), f"unexpected session label: {s!r}"
 
-    # The proposed_basename for at least one row must include the session token.
-    populated = df[df["proposed_basename"].astype(str) != ""]
-    assert any("_ses-" in name for name in populated["proposed_basename"]), (
-        "no proposed_basename includes a session token"
+    # The bids_name for at least one row must include the session token.
+    populated = df[df["bids_name"].astype(str) != ""]
+    assert any("_ses-" in name for name in populated["bids_name"]), (
+        "no bids_name includes a session token"
     )
 
 
 def test_rep_column_chronological_within_groups():
     """Rep column must be the chronological position within each
-    ``(BIDS_name, session, sequence, image_type)`` group of size > 1.
+    ``(participant_id, session, sequence, image_type)`` group of size > 1.
 
     PPMI ses-1 has 5 ``2D GRE-MT`` acquisitions of the same image_type
     in time order — they must be numbered ``1, 2, 3, 4, 5``.
@@ -170,7 +170,7 @@ def test_rep_column_chronological_within_groups():
             pass
 
     grp = df[
-        (df["BIDS_name"] == "sub-001")
+        (df["participant_id"] == "sub-001")
         & (df["session"] == "ses-1")
         & (df["sequence"] == "2D GRE-MT")
         & (df["image_type"] == "M")
@@ -234,7 +234,7 @@ def test_neuroimging_old_dwi_scanner_derivatives_classified_correctly():
         r = b0_row.iloc[0]
         assert r["bids_guess_datatype"] == "fmap"
         assert r["bids_guess_suffix"] == "epi"
-        assert "rerouted to fmap/epi" in r["proposed_issues"]
+        assert "rerouted to fmap/epi" in r["issues"]
 
 
 def test_repetition_type_column_present():

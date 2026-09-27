@@ -113,13 +113,16 @@ def _column(path: Path, column: str) -> list[str]:
 # What the schema allows
 
 
-def test_only_entities_valid_for_every_file_are_offered(flat: Path) -> None:
-    """The INTERSECTION, not the union.
+def test_an_entity_valid_for_any_file_is_offered(flat: Path) -> None:
+    """The UNION, not the intersection.
 
-    ``echo`` is valid for a ``_bold`` and meaningless for an EEG recording.
-    Offering it for a mixed selection would produce a name the standard
-    rejects for half of them, and showing that in a preview is not a
-    substitute for not offering it.
+    ``dir`` is valid for a ``_bold`` and not for a ``_T1w`` (it is the one
+    entity the schema allows on the first and not the second). A selection
+    holding both is still offered it, because the edit is applied file by
+    file: the files that may carry it change and the rest are left alone. The
+    intersection meant a selection spanning datatypes was offered almost
+    nothing, while the same selection could have an entity REMOVED file by
+    file.
     """
     anat = flat / "sub-001/anat/sub-001_T1w.nii.gz"
     func = flat / "sub-001/func/sub-001_task-rest_bold.nii.gz"
@@ -127,9 +130,32 @@ def test_only_entities_valid_for_every_file_are_offered(flat: Path) -> None:
     alone = {s.key for s in rs.addable_entities(flat, [anat])}
     together = {s.key for s in rs.addable_entities(flat, [anat, func])}
 
-    assert "echo" in alone
-    assert together <= alone
+    assert "dir" not in alone
+    assert "dir" in together, "func accepts dir, so the pair is offered it"
+    assert together >= alone
     assert "acq" in together, "both datatypes accept acq"
+
+
+def test_adding_it_changes_only_the_files_that_may_carry_it(flat: Path) -> None:
+    """The half of the rule that makes the union safe: offering an entity to
+    a mixed selection never produces a name the standard rejects."""
+    anat = flat / "sub-001/anat/sub-001_T1w.nii.gz"
+    func = flat / "sub-001/func/sub-001_task-rest_bold.nii.gz"
+
+    plan = rs.plan_entity_edit(flat, "dir", [anat, func], value="AP")
+
+    moved = {src.name for src, _dst in plan.file_moves}
+    assert any("bold" in name for name in moved), "the bold run takes it"
+    assert not any("T1w" in name for name in moved), "the T1w is left alone"
+    assert all("dir-AP" in dst.name for _src, dst in plan.file_moves)
+
+
+def test_adding_to_files_none_of_which_may_carry_it_is_refused(flat: Path) -> None:
+    """Skipping is per file, but a request that changes NOTHING is still
+    said to be one, rather than applied as an empty plan."""
+    anat = flat / "sub-001/anat/sub-001_T1w.nii.gz"
+    with pytest.raises(rs.RenameError):
+        rs.plan_entity_edit(flat, "dir", [anat], value="AP")
 
 
 def test_required_entities_are_not_offered_for_removal(flat: Path) -> None:

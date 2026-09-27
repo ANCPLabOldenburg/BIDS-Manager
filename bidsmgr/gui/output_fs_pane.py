@@ -51,6 +51,7 @@ from PyQt6.QtWidgets import (
 from . import icons
 from .theme_manager import CUR
 from .widgets import PaneHeader
+from .widgets.tree_click import toggle_on_click
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ log = logging.getLogger(__name__)
 # Deep enough to walk ``<bids_parent>/<dataset>/sub-X/ses-Y/<datatype>/file``
 # without dragging in absurdly nested derivatives.
 _MAX_DEPTH = 6
+
+#: Most directories to hand a ``QFileSystemWatcher``. See ``_sync_watcher``.
+_MAX_WATCHED_DIRS = 2000
 
 # Junk / scratch dirs the BIDS output may carry that we don't want to
 # clutter the visualisation with.
@@ -71,6 +75,10 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 # with, so theme toggles can re-color in place without re-walking disk.
 _COLOR_TOKEN_ROLE = Qt.ItemDataRole.UserRole + 1
 _IS_DIR_ROLE = Qt.ItemDataRole.UserRole + 2
+#: The worker-produced ``_TreeNode`` a folder item has not drawn yet.
+_NODE_ROLE = Qt.ItemDataRole.UserRole + 3
+#: Marks the single stand-in child that keeps the expander arrow alive.
+_PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 4
 
 
 def _color_token_for(path_name: str) -> str:
@@ -284,6 +292,8 @@ class OutputFsPane(QWidget):
         self._tree.setRootIsDecorated(True)
         self._tree.setIndentation(14)
         self._tree.setUniformRowHeights(True)
+        self._tree.itemExpanded.connect(self._on_item_expanded)
+        toggle_on_click(self._tree)
         from .theme_manager import scaled_px
         _tree_ico = scaled_px(icons.DEFAULT_TREE_ICON_SIZE)
         self._tree.setIconSize(QSize(_tree_ico, _tree_ico))
@@ -433,21 +443,19 @@ class OutputFsPane(QWidget):
         snap = self._snapshot_state() if had_content else None
 
         self._tree.clear()
-        self._clear_watcher()
-        if result.dirs_to_watch:
-            # ``addPaths`` is one syscall round-trip rather than one per dir.
-            self._watcher.addPaths(result.dirs_to_watch)
+        self._sync_watcher(result.dirs_to_watch)
 
         pal = CUR()
         root_item = _render_node(result.root, pal)
         self._tree.addTopLevelItem(root_item)
 
         if snap is None:
-            # First-time render: expand the root + first level so the user
-            # immediately sees the shape.
+            # First-time render: expand the root, which draws the subjects,
+            # and stop there. Expanding the first level as well used to be
+            # free because everything was drawn anyway; now that a folder is
+            # drawn when it is opened, opening all of them on a 200-subject
+            # dataset would put the cost straight back.
             root_item.setExpanded(True)
-            for i in range(root_item.childCount()):
-                root_item.child(i).setExpanded(True)
         else:
             # Subsequent rebuilds (watcher-triggered during convert, etc.) must
             # respect whatever the user had open -- including a collapsed root.
@@ -461,6 +469,38 @@ class OutputFsPane(QWidget):
         existing = self._watcher.directories()
         if existing:
             self._watcher.removePaths(existing)
+
+    def _sync_watcher(self, dirs: list[str]) -> None:
+        """Move the watch set to ``dirs`` by DIFFERENCE, not by rebuilding it.
+
+        This was ``removePaths(everything)`` followed by
+        ``addPaths(everything)``, and it is what actually froze the window
+        during a conversion. Each path is a real registration with the OS
+        (FSEvents, inotify, ``FindFirstChangeNotification``), so dropping and
+        re-taking all of them costs in proportion to the number of
+        DIRECTORIES in the dataset. Measured on a tree of 8,000 files in
+        2,668 directories: 199 ms to add plus 50 ms to remove, every 500 ms
+        for as long as the conversion kept writing files. The tree render
+        everyone assumed was the problem was 5 ms of it.
+
+        A conversion creates a handful of directories per tick, so the
+        difference is nearly always a few paths and costs nothing.
+
+        The cap is not tidiness: inotify has a per-user watch limit, and past
+        it the registration fails silently and live refresh stops working
+        with no message. Shallow directories are kept in preference to deep
+        ones, because a new subject, session or datatype folder appearing is
+        the change most worth seeing, and it appears near the top.
+        """
+        wanted = set(sorted(dirs, key=lambda p: (p.count(os.sep), p))
+                     [:_MAX_WATCHED_DIRS])
+        current = set(self._watcher.directories())
+        gone = sorted(current - wanted)
+        fresh = sorted(wanted - current)
+        if gone:
+            self._watcher.removePaths(gone)
+        if fresh:
+            self._watcher.addPaths(fresh)
 
     def _on_fs_changed(self, _path: str) -> None:
         """One or more watched dirs changed — schedule a debounced refresh.
@@ -491,6 +531,43 @@ class OutputFsPane(QWidget):
             parts.append(cur.text(0))
             cur = cur.parent()
         return tuple(reversed(parts))
+
+    def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
+        """Draw a folder the first time it is opened."""
+        _fill_children(item, CUR())
+
+    def _row_at(self, path: tuple) -> Optional[QTreeWidgetItem]:
+        """The row named by a snapshot path, drawing the folders on the way.
+
+        The target itself is NOT drawn here, and does not need to be: this
+        pane does not block the tree's signals while it rebuilds, so the
+        ``setExpanded`` that follows emits ``itemExpanded`` and the folder
+        draws itself. The Editor's tree blocks them, which is why the same
+        omission showed up there as a folder that came back empty.
+
+        Fold state is left alone, so this can restore a view without
+        changing one.
+        """
+        if not path:
+            return None
+        item = None
+        for i in range(self._tree.topLevelItemCount()):
+            if self._tree.topLevelItem(i).text(0) == path[0]:
+                item = self._tree.topLevelItem(i)
+                break
+        if item is None:
+            return None
+        for name in path[1:]:
+            _fill_children(item, CUR())
+            nxt = None
+            for i in range(item.childCount()):
+                if item.child(i).text(0) == name:
+                    nxt = item.child(i)
+                    break
+            if nxt is None:
+                return None
+            item = nxt
+        return item
 
     def _snapshot_state(self) -> dict:
         """Capture expanded paths + current selection + scroll position."""
@@ -523,6 +600,16 @@ class OutputFsPane(QWidget):
         expanded: set = snap["expanded"]
         selected = snap["selected"]
 
+        # Draw the rows the snapshot names, before touching any fold state.
+        # A folder is drawn when it is opened, so a row that was expanded
+        # under a CLOSED parent has no row to restore onto until its
+        # ancestors are built, and walking the tree could not reach it.
+        # Shallowest first, so each descent starts from rows that exist.
+        for path in sorted(expanded, key=len):
+            self._row_at(path)
+        if selected:
+            self._row_at(selected)
+
         def _walk(item: QTreeWidgetItem) -> None:
             path = self._item_path(item)
             if path in expanded:
@@ -538,20 +625,52 @@ class OutputFsPane(QWidget):
 
 
 def _render_node(node: _TreeNode, pal: dict) -> QTreeWidgetItem:
-    """Translate a worker-produced ``_TreeNode`` into a ``QTreeWidgetItem``.
+    """Translate ONE worker-produced ``_TreeNode`` into a ``QTreeWidgetItem``.
 
-    The palette token used is also stamped onto the item so
-    :meth:`OutputFsPane.repaint_for_palette` can re-color it later
-    without re-walking disk.
+    Only the node itself. A folder gets its ``_TreeNode`` stamped on the item
+    and a placeholder child, so the expander arrow is there and the real
+    children are built by :meth:`OutputFsPane._on_item_expanded` when it is
+    clicked.
+
+    It used to render the whole subtree here, which meant one
+    ``QTreeWidgetItem`` and one icon lookup per file in the dataset, on the
+    GUI thread. Measured: 96 ms at 3,000 files, 257 ms at 8,000. The walk was
+    already on the thread pool, so the pane LOOKED threaded; the part that
+    blocked was the part that cannot leave the GUI thread, because Qt widgets
+    may only be touched there. And the file watcher re-fires the whole render
+    every 500 ms for as long as a conversion keeps writing files, so that
+    cost was paid again and again exactly when the user was watching.
+
+    The palette token is stamped onto the item so
+    :meth:`OutputFsPane.repaint_for_palette` can re-color it later without
+    re-walking disk.
     """
     item = QTreeWidgetItem([node.name])
     item.setData(0, _COLOR_TOKEN_ROLE, node.color_token)
     item.setData(0, _IS_DIR_ROLE, bool(node.is_dir))
     item.setForeground(0, QColor(pal[node.color_token]))
     item.setIcon(0, icons.icon_for_path(node.name, is_dir=node.is_dir))
-    for child in node.children:
-        item.addChild(_render_node(child, pal))
+    if node.is_dir and node.children:
+        item.setData(0, _NODE_ROLE, node)
+        placeholder = QTreeWidgetItem([""])
+        placeholder.setData(0, _PLACEHOLDER_ROLE, True)
+        item.addChild(placeholder)
     return item
+
+
+def _fill_children(item: QTreeWidgetItem, pal: dict) -> None:
+    """Build one level under ``item``, if it is still a placeholder."""
+    if item.childCount() != 1:
+        return
+    child = item.child(0)
+    if child.data(0, _PLACEHOLDER_ROLE) is not True:
+        return
+    node = item.data(0, _NODE_ROLE)
+    item.removeChild(child)
+    if node is None:
+        return
+    for grandchild in node.children:
+        item.addChild(_render_node(grandchild, pal))
 
 
 def _recolor(item: QTreeWidgetItem, pal: dict) -> None:

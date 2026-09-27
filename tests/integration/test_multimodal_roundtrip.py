@@ -106,13 +106,13 @@ def converted(tmp_path_factory) -> dict:
 def test_the_scan_finds_every_modality(converted) -> None:
     """Four modalities in one folder is the shape that broke scans.tsv.
 
-    Asserted on ``proposed_datatype``, not on ``modality``: that column holds
+    Asserted on ``datatype``, not on ``modality``: that column holds
     the SERIES KIND (T1w, bold, fmap, scout, report, eeg, meg), which is a
     finer thing than the family and does not contain the word "mri" at all.
     """
     frame = pd.read_csv(converted["inventory"], sep="\t", dtype=str)
     datatypes = {
-        str(v).lower() for v in frame["proposed_datatype"].fillna("")
+        str(v).lower() for v in frame["datatype"].fillna("")
     } - {""}
     assert {"eeg", "meg"} <= datatypes, sorted(datatypes)
     assert datatypes & {"anat", "func", "fmap"}, sorted(datatypes)
@@ -130,7 +130,7 @@ def test_the_phoenix_report_is_excluded(converted) -> None:
     kinds = {str(v).lower() for v in frame.get("modality", [])}
     assert "report" in kinds, sorted(kinds)
     reports = frame[frame["modality"].str.lower() == "report"]
-    assert reports["proposed_datatype"].fillna("").eq("").all(), (
+    assert reports["datatype"].fillna("").eq("").all(), (
         "the PhoenixZIPReport was given a datatype to convert into"
     )
 

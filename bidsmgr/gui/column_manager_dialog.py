@@ -61,7 +61,13 @@ class ColumnManagerDialog(QDialog):
         bar = QHBoxLayout()
         all_btn = QPushButton("Select all")
         none_btn = QPushButton("Hide optional")
-        defaults_btn = QPushButton("Defaults")
+        defaults_btn = QPushButton("Reset defaults")
+        defaults_btn.setToolTip(
+            "Show the columns this table opens with, AND put the seven a "
+            "person reads first back at the front: subject, format, "
+            "session, datatype, suffix, BIDS name, sequence. A layout you "
+            "have arranged yourself is left alone until you press this."
+        )
         all_btn.clicked.connect(lambda: self._set_all(True))
         none_btn.clicked.connect(lambda: self._set_all(False))
         defaults_btn.clicked.connect(self._restore_defaults)
@@ -77,6 +83,7 @@ class ColumnManagerDialog(QDialog):
         holder = QWidget()
         hv = QVBoxLayout(holder)
         hv.setSpacing(8)
+        self._reset_order = False
         for spec in COLUMNS:
             hv.addWidget(self._build_row(spec, current))
         hv.addStretch(1)
@@ -122,7 +129,20 @@ class ColumnManagerDialog(QDialog):
             if key not in MANDATORY_COLUMN_KEYS:
                 cb.setChecked(visible)
 
+    def order_was_reset(self) -> bool:
+        """True when the user asked for the default ORDER as well.
+
+        Visibility and order are two different things and the dialog only
+        ever owned the first. Pressing Reset defaults means both, because a
+        user who wants the default columns back almost always means the
+        default arrangement of them too, and having to also find the
+        header and drag seven sections would make the button a half
+        measure.
+        """
+        return self._reset_order
+
     def _restore_defaults(self) -> None:
+        self._reset_order = True
         for spec in COLUMNS:
             if spec.key in MANDATORY_COLUMN_KEYS:
                 continue

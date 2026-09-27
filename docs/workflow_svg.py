@@ -97,9 +97,9 @@ PAD = 18            # inside every full-width card
 # What the scanner actually recognises. Kept in step with
 # ``inventory/eeg_meg._RECOGNISED_EXTS`` and ``inventory/pet_ecat``.
 SOURCES = [
-    ("MRI", "DICOM", "#4C9AFF"),
+    ("MRI", "DICOM, spectroscopy", "#4C9AFF"),
     ("PET", "DICOM, ECAT7", "#F2994A"),
-    ("EEG / iEEG", "EDF, BDF, BrainVision, EEGLAB", "#57C7A3"),
+    ("EEG", "EDF, BDF, BrainVision, EEGLAB", "#57C7A3"),
     ("MEG", "FIF, CTF, KIT", "#B39DDB"),
     ("Physio", "Siemens CMRR", "#8B949E"),
     ("Blood", "PMOD", "#E5534B"),
@@ -118,8 +118,8 @@ STAGES = [
                "requirement levels, come from the schema."),
     # The Editor is where a dataset is actually curated. The viewers are the
     # extra, not the point, so they come second in the sentence.
-    ("Curate", "Sidecars as schema-aware forms, tables as spreadsheets, and "
-               "viewers for volumes and signals."),
+    ("Curate", "Edit sidecars and tables, restructure, deface, and view "
+               "volumes, signals and spectra."),
     ("Validate", "Every finding names the schema rule it came from, and the "
                  "fix button opens the field that needs it."),
 ]
@@ -249,8 +249,8 @@ def build(c: dict) -> str:
     o.append(
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
         f'viewBox="0 0 {W} {H}" role="img" '
-        f'aria-label="BIDS Manager workflow: raw MRI, PET, EEG, MEG, iEEG, '
-        f'physio and blood recordings are scanned, reviewed, converted, '
+        f'aria-label="BIDS Manager workflow: raw MRI, MR spectroscopy, PET, '
+        f'EEG, MEG, physio and blood recordings are scanned, reviewed, converted, '
         f'enriched, curated and validated into one BIDS dataset, with every '
         f'step recorded in the project log.">'
     )

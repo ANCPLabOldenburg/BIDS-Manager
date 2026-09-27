@@ -247,3 +247,53 @@ def test_renaming_a_subject_carries_its_recordings(mixed: Path) -> None:
     assert "meg/sub-42_ses-01_task-rest_meg.fif" in rows
     assert "anat/sub-42_ses-01_T1w.nii.gz" in rows
     assert not [r for r in rows if "sub-01" in r], "no stale names"
+
+
+class TestJunkIsNotARecording:
+    """``_is_recording_file`` decided from the SHAPE of a name, so anything
+    whose last hyphen-free token was not a known companion counted as data.
+    ``.DS_Store`` went into ``*_scans.tsv`` on every macOS dataset."""
+
+    @pytest.mark.parametrize("name", [
+        ".DS_Store", "Thumbs.db", "desktop.ini", ".hidden", "._resource",
+        "notes.txt", "scratch.dat", "README",
+    ])
+    def test_rejected(self, name):
+        from pathlib import Path
+        from bidsmgr.metadata.engine import _is_recording_file
+
+        assert not _is_recording_file(Path(name))
+
+    @pytest.mark.parametrize("name", [
+        "sub-001_T1w.nii.gz", "sub-001_task-x_bold.nii.gz",
+        "sub-001_acq-fm2_phasediff.nii.gz", "sub-001_task-x_eeg.edf",
+        "sub-001_task-x_meg.ds",
+    ])
+    def test_real_recordings_still_accepted(self, name):
+        from pathlib import Path
+        from bidsmgr.metadata.engine import _is_recording_file
+
+        assert _is_recording_file(Path(name))
+
+    def test_a_non_image_suffix_the_schema_does_not_define_is_rejected(self):
+        """The rule for everything except an image is now "is this a suffix
+        the standard defines", rather than "is it absent from a list of
+        companions"."""
+        from pathlib import Path
+        from bidsmgr.metadata.engine import _is_recording_file
+
+        assert not _is_recording_file(Path("sub-001_task-x_notathing.edf"))
+
+    def test_an_image_is_still_taken_at_face_value(self):
+        """A ``.nii.gz`` keeps its row whatever the suffix says.
+
+        Deliberate: the bundled schema is one BIDS version, and refusing a
+        suffix it has not heard of would silently drop a real image from
+        the table on any dataset written against a newer one. The stricter
+        whole-name check belongs in front of a WRITE, and that is where the
+        coherence tool puts it (``coherence._is_bids_name``).
+        """
+        from pathlib import Path
+        from bidsmgr.metadata.engine import _is_recording_file
+
+        assert _is_recording_file(Path("sub-001_task-x_notathing.nii.gz"))

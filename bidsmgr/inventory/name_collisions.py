@@ -67,8 +67,8 @@ def destination_key(row) -> tuple:
     """
     return (
         str(row.get("dataset", "") or "").strip(),
-        str(row.get("proposed_datatype", "") or "").strip(),
-        str(row.get("proposed_basename", "") or "").strip(),
+        str(row.get("datatype", "") or "").strip(),
+        str(row.get("bids_name", "") or "").strip(),
     )
 
 

@@ -118,7 +118,7 @@ def test_error_proceeds_when_no_collision(tmp_path: Path):
 def test_preflight_summary_flags_existing_subjects(tmp_path: Path, caplog):
     bids_root = tmp_path / "ds"
     (bids_root / "sub-001").mkdir(parents=True)  # already present
-    df = pd.DataFrame({"BIDS_name": ["sub-001", "sub-002"]})
+    df = pd.DataFrame({"participant_id": ["sub-001", "sub-002"]})
     with caplog.at_level(logging.INFO, logger="bidsmgr.cli.convert"):
         _log_existing_subject_summary(bids_root, df, "skip")
     msg = " ".join(r.getMessage() for r in caplog.records)

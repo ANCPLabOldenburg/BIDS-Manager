@@ -1,31 +1,31 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="948" height="976" viewBox="0 0 948 976" role="img" aria-label="BIDS Manager workflow: raw MRI, PET, EEG, MEG, iEEG, physio and blood recordings are scanned, reviewed, converted, enriched, curated and validated into one BIDS dataset, with every step recorded in the project log.">
+<svg xmlns="http://www.w3.org/2000/svg" width="948" height="976" viewBox="0 0 948 976" role="img" aria-label="BIDS Manager workflow: raw MRI, MR spectroscopy, PET, EEG, MEG, physio and blood recordings are scanned, reviewed, converted, enriched, curated and validated into one BIDS dataset, with every step recorded in the project log.">
 <rect x="0.5" y="0.5" width="947.0" height="975.0" rx="18" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
 <text x="28.0" y="36.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#7d868f;font-weight:600;letter-spacing:1.5px">WHAT GOES IN</text>
 <rect x="28.0" y="48.0" width="892.0" height="90.0" rx="14" fill="#161c24" stroke="#3d444d" stroke-width="1"/>
-<rect x="46.0" y="66.0" width="87.1" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<rect x="46.0" y="66.0" width="156.3" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
 <circle cx="63.0" cy="86.0" r="4" fill="#4C9AFF"/>
 <text x="75.0" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">MRI</text>
-<text x="59.0" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">DICOM</text>
-<rect x="143.1" y="66.0" width="124.4" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
-<circle cx="160.1" cy="86.0" r="4" fill="#F2994A"/>
-<text x="172.1" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">PET</text>
-<text x="156.1" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">DICOM, ECAT7</text>
-<rect x="277.5" y="66.0" width="235.3" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
-<circle cx="294.5" cy="86.0" r="4" fill="#57C7A3"/>
-<text x="306.5" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">EEG / iEEG</text>
-<text x="290.5" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">EDF, BDF, BrainVision, EEGLAB</text>
-<rect x="522.9" y="66.0" width="130.9" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
-<circle cx="539.9" cy="86.0" r="4" fill="#B39DDB"/>
-<text x="551.9" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">MEG</text>
-<text x="535.9" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">FIF, CTF, KIT</text>
-<rect x="663.8" y="66.0" width="124.4" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
-<circle cx="680.8" cy="86.0" r="4" fill="#8B949E"/>
-<text x="692.8" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">Physio</text>
-<text x="676.8" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">Siemens CMRR</text>
-<rect x="798.2" y="66.0" width="103.8" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
-<circle cx="815.2" cy="86.0" r="4" fill="#E5534B"/>
-<text x="827.2" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">Blood</text>
-<text x="811.2" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">PMOD</text>
+<text x="59.0" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">DICOM, spectroscopy</text>
+<rect x="212.3" y="66.0" width="110.6" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<circle cx="229.3" cy="86.0" r="4" fill="#F2994A"/>
+<text x="241.3" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">PET</text>
+<text x="225.3" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">DICOM, ECAT7</text>
+<rect x="332.8" y="66.0" width="221.5" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<circle cx="349.8" cy="86.0" r="4" fill="#57C7A3"/>
+<text x="361.8" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">EEG</text>
+<text x="345.8" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">EDF, BDF, BrainVision, EEGLAB</text>
+<rect x="564.3" y="66.0" width="117.1" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<circle cx="581.3" cy="86.0" r="4" fill="#B39DDB"/>
+<text x="593.3" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">MEG</text>
+<text x="577.3" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">FIF, CTF, KIT</text>
+<rect x="691.5" y="66.0" width="110.6" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<circle cx="708.5" cy="86.0" r="4" fill="#8B949E"/>
+<text x="720.5" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">Physio</text>
+<text x="704.5" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">Siemens CMRR</text>
+<rect x="812.0" y="66.0" width="90.0" height="54.0" rx="10" fill="#0d1117" stroke="#3d444d" stroke-width="1"/>
+<circle cx="829.0" cy="86.0" r="4" fill="#E5534B"/>
+<text x="841.0" y="91.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#e6edf3;font-weight:600">Blood</text>
+<text x="825.0" y="109.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#a9b1ba">PMOD</text>
 <path d="M171.3 148.0 V203.0" stroke="#4a525c" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M164.3 203.0 L171.3 210.0 L178.3 203.0 Z" fill="#4a525c"/>
 <text x="28.0" y="194.0" text-anchor="start" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:12.5px;fill:#7d868f;font-weight:600;letter-spacing:1.5px">WHAT IT DOES</text>
 <path d="M171.3 236.0 H776.7" stroke="#4a525c" stroke-width="2" stroke-linecap="round"/>
@@ -67,9 +67,9 @@
 <circle cx="474.0" cy="470.0" r="16" fill="#4FC3F7" stroke="#0d1117" stroke-width="3"/>
 <text x="474.0" y="475.5" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#04222f;font-weight:600">5</text>
 <text x="474.0" y="526.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:18px;fill:#e6edf3;font-weight:600">Curate</text>
-<text x="474.0" y="554.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">Sidecars as schema-aware forms,</text>
-<text x="474.0" y="574.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">tables as spreadsheets, and viewers</text>
-<text x="474.0" y="594.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">for volumes and signals.</text>
+<text x="474.0" y="554.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">Edit sidecars and tables,</text>
+<text x="474.0" y="574.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">restructure, deface, and view</text>
+<text x="474.0" y="594.0" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:13.5px;fill:#a9b1ba">volumes, signals and spectra.</text>
 <rect x="633.3" y="486.0" width="286.7" height="144.0" rx="14" fill="#161c24" stroke="#3d444d" stroke-width="1"/>
 <circle cx="776.7" cy="470.0" r="16" fill="#4FC3F7" stroke="#0d1117" stroke-width="3"/>
 <text x="776.7" y="475.5" text-anchor="middle" style="font-family:-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif;font-size:14.5px;fill:#04222f;font-weight:600">6</text>

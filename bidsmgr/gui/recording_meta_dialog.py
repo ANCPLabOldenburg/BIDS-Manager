@@ -239,6 +239,8 @@ class RecordingMetaDialog(QDialog):
         self._eeg_box = self._build_eeg_group()
         bl.addWidget(self._eeg_box)
         bl.addWidget(self._build_event_group())
+        if any(dt == "pet" for dt, _sfx in self._present_pairs):
+            bl.addWidget(self._build_pet_dose_group())
         bl.addWidget(self._build_participants_group())
         bl.addWidget(self._build_phenotype_group())
         bl.addStretch(1)
@@ -502,6 +504,117 @@ class RecordingMetaDialog(QDialog):
         rows = sorted({i.row() for i in self._events.selectedIndexes()}, reverse=True)
         for r in rows:
             self._events.removeRow(r)
+
+    def _build_pet_dose_group(self) -> QGroupBox:
+        """Import a dose file into the template, rather than hiding it in a flag.
+
+        PET needs metadata no scanner records: what was injected, how much,
+        when, by what route. Most labs already keep that in a file, and most
+        of those files were written for pet2bids.
+
+        It is IMPORTED rather than merely passed through, and that is the
+        point. A path handed to the conversion is a promise about what will
+        happen; reading it here puts the values into the form, where they
+        can be seen, corrected and saved with everything else. Nothing is
+        converted until a human has looked at it, which is the posture the
+        whole tool takes, and a dose is exactly the number worth looking at.
+        """
+        box = QGroupBox("PET dose file")
+        box.setToolTip(
+            "Fills the PET fields below from a file, so they can be checked "
+            "before anything is converted."
+        )
+        v = QVBoxLayout(box)
+        v.setContentsMargins(8, 6, 8, 6)
+        v.setSpacing(4)
+        hint = QLabel(
+            "Optional. A JSON keyed by BIDS field names (TracerName, "
+            "InjectedRadioactivity, ModeOfAdministration, ...) applies to "
+            "every PET run; one keyed by sub-&lt;label&gt; applies per subject. "
+            "This is the shape pypet2bids accepts, nifti_json wrapper and "
+            "all, so a file written for that tool is read unmodified. A "
+            "spreadsheet with one row per scan works too. Values land in the "
+            "PET sections above, where you can correct them; keys BIDS does "
+            "not define for a PET sidecar are reported and never written."
+        )
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+        row = QHBoxLayout()
+        self._pet_dose_status = QLineEdit()
+        self._pet_dose_status.setObjectName("ent-input")
+        self._pet_dose_status.setReadOnly(True)
+        self._pet_dose_status.setPlaceholderText("(nothing imported)")
+        browse = QPushButton("Import…")
+        browse.clicked.connect(self._choose_pet_dose_file)
+        row.addWidget(self._pet_dose_status, 1)
+        row.addWidget(browse)
+        v.addLayout(row)
+        return box
+
+    def _choose_pet_dose_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select a PET dose file", "",
+            "PET metadata (*.json *.tsv *.csv *.xlsx *.ods);;All files (*)",
+        )
+        if not path:
+            return
+        self._import_pet_dose(Path(path))
+
+    def _import_pet_dose(self, path: Path) -> None:
+        """Fold a dose file into the template and say what it did."""
+        from ..metadata.pet_metadata_json import read_pet_metadata_json
+        from ..metadata.pet_spreadsheet import read_pet_spreadsheet
+        from ..recording_meta import merge_pet
+
+        if path.suffix.lower() == ".json":
+            blocks = read_pet_metadata_json(path)
+        else:
+            blocks = read_pet_spreadsheet(path)
+        if not blocks:
+            self._pet_dose_status.setText(
+                f"{path.name}: nothing readable"
+            )
+            return
+
+        default = blocks.pop("", None)
+        if default is not None:
+            current = self._spec.pet_defaults
+            self._spec.pet_defaults = (
+                merge_pet(current, default) if current is not None else default
+            )
+        for key, block in blocks.items():
+            existing = self._spec.pet_overrides.get(key)
+            self._spec.pet_overrides[key] = (
+                merge_pet(existing, block) if existing is not None else block
+            )
+
+        filled = set()
+        for block in ([default] if default else []) + list(blocks.values()):
+            filled |= {
+                name for name, value in block.model_dump().items()
+                # An empty list is a field with no answer, not an answer.
+                # Counting them told the user eight fields had arrived when
+                # five had.
+                if value not in (None, "", [], {})
+            }
+        scope = "every PET run" if default is not None else ""
+        if blocks:
+            scoped = f"{len(blocks)} subject block(s)"
+            scope = f"{scope}, {scoped}" if scope else scoped
+        self._pet_dose_status.setText(
+            f"{path.name}: {len(filled)} field(s) into {scope}"
+        )
+        # Rebuild so the imported values show in the PET sections, which is
+        # the whole reason for importing rather than passing a path through.
+        self._reload_template()
+
+    def _reload_template(self) -> None:
+        """Re-seed the tree from the spec, keeping what is open open."""
+        try:
+            self._collapsed_keys = self._template.collapsed_keys()
+        except Exception:  # noqa: BLE001 - a refresh is not worth a crash
+            pass
+        self._template.set_values(self._stored_template_values())
 
     def _build_participants_group(self) -> QGroupBox:
         box = QGroupBox("Participants spreadsheet")

@@ -118,9 +118,9 @@ def test_compute_psd_sits_with_the_line_frequency(qtbot):
     from PyQt6.QtWidgets import QPushButton
 
     df = pd.DataFrame([{
-        "include": "1", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
-        "proposed_basename": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
-        "BIDS_name": "sub-001", "line_freq": "", "montage": "",
+        "include": "1", "datatype": "eeg", "bids_guess_suffix": "eeg",
+        "bids_name": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
+        "participant_id": "sub-001", "line_freq": "", "montage": "",
         "eeg_reference": "", "eeg_ground": "",
     }])
     panel = PropertiesPanel()
@@ -259,9 +259,9 @@ def test_the_panel_lines_up_across_its_two_halves(qtbot):
     from bidsmgr.gui.widgets.template_form import FieldLabel
 
     df = pd.DataFrame([{
-        "include": "1", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
-        "proposed_basename": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
-        "BIDS_name": "sub-001", "line_freq": "", "montage": "",
+        "include": "1", "datatype": "eeg", "bids_guess_suffix": "eeg",
+        "bids_name": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
+        "participant_id": "sub-001", "line_freq": "", "montage": "",
         "eeg_reference": "", "eeg_ground": "",
     }])
     panel = PropertiesPanel()
@@ -438,9 +438,9 @@ def test_the_panel_has_the_settled_block_too(qtbot):
     from bidsmgr.gui.widgets.template_form import CollapsibleSection
 
     df = pd.DataFrame([{
-        "include": "1", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
-        "proposed_basename": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
-        "BIDS_name": "sub-001", "task": "rest", "line_freq": "", "montage": "",
+        "include": "1", "datatype": "eeg", "bids_guess_suffix": "eeg",
+        "bids_name": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
+        "participant_id": "sub-001", "task": "rest", "line_freq": "", "montage": "",
         "eeg_reference": "", "eeg_ground": "",
         "_derived_fields": _json.dumps({
             "SamplingFrequency": 500.0, "EEGChannelCount": 64,
@@ -462,9 +462,9 @@ def test_an_entity_the_row_already_carries_counts_as_answered(qtbot):
     """A task label on the row settles TaskName: the converter writes whatever
     the row says, so asking for it again is asking twice."""
     df = pd.DataFrame([{
-        "include": "1", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
-        "proposed_basename": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
-        "BIDS_name": "sub-001", "task": "rest", "line_freq": "", "montage": "",
+        "include": "1", "datatype": "eeg", "bids_guess_suffix": "eeg",
+        "bids_name": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
+        "participant_id": "sub-001", "task": "rest", "line_freq": "", "montage": "",
         "eeg_reference": "", "eeg_ground": "",
     }])
     model = InventoryTableModel(df)

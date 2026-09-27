@@ -50,6 +50,19 @@ def default_spec(power_line_freq: Optional[float] = None) -> RecordingMetaSpec:
     return RecordingMetaSpec(defaults=AcquisitionSpec(power_line_freq=power_line_freq))
 
 
+class ScaffoldVersionError(ValueError):
+    """A recording-metadata scaffold this version cannot read."""
+
+
+#: Keys an earlier version wrote, and what each is called now. Checked so a
+#: scaffold from before the rename fails with a sentence rather than being
+#: read as a spec with the block silently missing, which would drop dataset
+#: metadata somebody typed without saying anything.
+_RENAMED_KEYS: dict[str, str] = {
+    "modality_defaults": "datatype_defaults",
+}
+
+
 def load_spec(path: Path) -> RecordingMetaSpec:
     """Read and validate a recording-metadata JSON document.
 
@@ -58,6 +71,21 @@ def load_spec(path: Path) -> RecordingMetaSpec:
     """
     text = Path(path).read_text(encoding="utf-8")
     data = json.loads(text)
+    if isinstance(data, dict):
+        stale = [k for k in _RENAMED_KEYS if k in data]
+        if stale:
+            raise ScaffoldVersionError(
+                "This recording-metadata scaffold was written by an earlier "
+                "version of BIDS Manager and cannot be read: "
+                + ", ".join(
+                    f"{k!r} is now {_RENAMED_KEYS[k]!r}" for k in stale
+                )
+                + ". The block is keyed by DATATYPE (anat, eeg, meg, pet) "
+                "and was named for the modality, which is a different "
+                "thing. Delete "
+                f"{Path(path).name} and re-scan, or rename the key by hand "
+                "if you want to keep what you typed."
+            )
     return RecordingMetaSpec.model_validate(data)
 
 
@@ -66,4 +94,9 @@ def dump_spec(spec: RecordingMetaSpec) -> str:
     return json.dumps(spec.model_dump(exclude_none=True), indent=2) + "\n"
 
 
-__all__ = ["default_spec", "load_spec", "dump_spec"]
+__all__ = [
+    "ScaffoldVersionError",
+    "default_spec",
+    "dump_spec",
+    "load_spec",
+]

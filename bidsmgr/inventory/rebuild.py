@@ -3,7 +3,7 @@
 The unified inventory TSV's ``entities`` column is the **source of truth**
 for the BIDS basename: a JSON-encoded dict like
 ``{"subject": "001", "session": "pre", "task": "rest", "run": "1"}``.
-Display cells (``proposed_basename``, ``Proposed BIDS name``, ``session``,
+Display cells (``bids_name``, ``bids_path``, ``session``,
 ``task``, ``run``) are derived from it.
 
 Two reconciliation directions:
@@ -70,6 +70,18 @@ class RebuildReport:
         })
 
 
+class InventoryVersionError(ValueError):
+    """An inventory TSV this version of BIDS Manager cannot read."""
+
+
+#: Columns every rebuild path indexes directly. Checked up front so an
+#: inventory from an older version fails with a sentence instead of a
+#: ``KeyError`` on whichever one happened to be touched first.
+_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "datatype", "bids_name", "bids_guess_suffix",
+)
+
+
 # ---------------------------------------------------------------------------
 # entities → display cells
 # ---------------------------------------------------------------------------
@@ -80,7 +92,7 @@ def rebuild_from_entities(
     *,
     in_place: bool = False,
 ) -> tuple[pd.DataFrame, RebuildReport]:
-    """Recompute display cells (``proposed_basename``, mirror columns)
+    """Recompute display cells (``bids_name``, mirror columns)
     from each row's ``entities`` JSON.
 
     Rows with missing or malformed ``entities`` are skipped with a
@@ -99,6 +111,22 @@ def rebuild_from_entities(
         )
         return out, report
 
+    missing = [c for c in _REQUIRED_COLUMNS if c not in out.columns]
+    if missing:
+        # An inventory written before the columns were renamed to say what
+        # they hold. It cannot be read, and saying so IS the job here:
+        # indexing a column that is not there raises a bare ``KeyError``
+        # naming one of them, which tells the user nothing about what to do.
+        raise InventoryVersionError(
+            "This inventory was written by an earlier version of BIDS "
+            "Manager and cannot be read: it is missing "
+            + ", ".join(repr(c) for c in missing)
+            + ". The columns were renamed to say what they hold: "
+            "proposed_datatype is now datatype, proposed_basename is now "
+            "bids_name, BIDS_name is now participant_id. Re-scan the raw "
+            "data to produce a current one."
+        )
+
     for idx in out.index:
         raw = str(out.at[idx, "entities"]).strip()
         if not raw:
@@ -116,10 +144,10 @@ def rebuild_from_entities(
             )
             continue
 
-        datatype = str(out.at[idx, "proposed_datatype"]).strip()
+        datatype = str(out.at[idx, "datatype"]).strip()
         suffix = (
             str(out.at[idx, "bids_guess_suffix"]).strip()
-            or _suffix_from_basename(str(out.at[idx, "proposed_basename"]).strip())
+            or _suffix_from_basename(str(out.at[idx, "bids_name"]).strip())
         )
 
         row_changed = False
@@ -132,12 +160,12 @@ def rebuild_from_entities(
                     f"basename left as-is"
                 )
             else:
-                old_basename = str(out.at[idx, "proposed_basename"]).strip()
+                old_basename = str(out.at[idx, "bids_name"]).strip()
                 if new_basename != old_basename:
-                    out.at[idx, "proposed_basename"] = new_basename
-                    out.at[idx, "Proposed BIDS name"] = new_basename
+                    out.at[idx, "bids_name"] = new_basename
+                    out.at[idx, "bids_path"] = new_basename
                     report.add_diff(
-                        idx, "proposed_basename", old_basename, new_basename,
+                        idx, "bids_name", old_basename, new_basename,
                     )
                     report.basename_changes += 1
                     row_changed = True
@@ -193,6 +221,22 @@ def rebuild_from_columns(
         )
         return out, report
 
+    missing = [c for c in _REQUIRED_COLUMNS if c not in out.columns]
+    if missing:
+        # An inventory written before the columns were renamed to say what
+        # they hold. It cannot be read, and saying so IS the job here:
+        # indexing a column that is not there raises a bare ``KeyError``
+        # naming one of them, which tells the user nothing about what to do.
+        raise InventoryVersionError(
+            "This inventory was written by an earlier version of BIDS "
+            "Manager and cannot be read: it is missing "
+            + ", ".join(repr(c) for c in missing)
+            + ". The columns were renamed to say what they hold: "
+            "proposed_datatype is now datatype, proposed_basename is now "
+            "bids_name, BIDS_name is now participant_id. Re-scan the raw "
+            "data to produce a current one."
+        )
+
     for idx in out.index:
         raw = str(out.at[idx, "entities"]).strip()
         entities: dict = {}
@@ -207,12 +251,12 @@ def rebuild_from_columns(
                     f"row {idx}: malformed entities JSON; rebuilding from columns"
                 )
 
-        # Subject identity is locked at scan time — read from BIDS_name.
-        bids_name = str(out.at[idx, "BIDS_name"]).strip()
-        if bids_name.startswith("sub-"):
-            entities["subject"] = bids_name[len("sub-"):]
-        elif bids_name:
-            entities["subject"] = bids_name
+        # Subject identity is locked at scan time — read from participant_id.
+        participant = str(out.at[idx, "participant_id"]).strip()
+        if participant.startswith("sub-"):
+            entities["subject"] = participant[len("sub-"):]
+        elif participant:
+            entities["subject"] = participant
 
         # Mirror cells back into entities.
         for ent_key, col_name in _MIRROR.items():
@@ -256,6 +300,7 @@ def _suffix_from_basename(basename: str) -> str:
 
 
 __all__ = [
+    "InventoryVersionError",
     "RebuildReport",
     "rebuild_from_columns",
     "rebuild_from_entities",

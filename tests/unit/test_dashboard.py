@@ -69,14 +69,14 @@ def test_it_counts_what_is_there(dataset: Path) -> None:
     assert [s.label for s in board.subjects] == [
         "sub-01", "sub-02", "sub-03", "sub-04",
     ]
-    assert {m.datatype for m in board.modalities} == {"anat", "func", "eeg"}
+    assert {m.datatype for m in board.datatypes} == {"anat", "func", "eeg"}
     assert board.total_files == 16
     assert board.total_bytes > 0
 
 
 def test_a_modality_knows_how_many_subjects_have_it(dataset: Path) -> None:
     board = dash.build(dataset)
-    by_name = {m.datatype: m for m in board.modalities}
+    by_name = {m.datatype: m for m in board.datatypes}
     assert by_name["anat"].subjects == 4
     assert by_name["func"].subjects == 3
     assert by_name["eeg"].subjects == 1
@@ -84,14 +84,14 @@ def test_a_modality_knows_how_many_subjects_have_it(dataset: Path) -> None:
 
 def test_recordings_are_counted_apart_from_sidecars(dataset: Path) -> None:
     board = dash.build(dataset)
-    by_name = {m.datatype: m for m in board.modalities}
+    by_name = {m.datatype: m for m in board.datatypes}
     assert by_name["anat"].recordings == 4
     assert by_name["anat"].files == 8, "the sidecars are files too"
 
 
 def test_coverage_is_answered_over_declared(dataset: Path) -> None:
     board = dash.build(dataset)
-    for modality in board.modalities:
+    for modality in board.datatypes:
         assert modality.declared > 0
         assert 0 <= modality.answered <= modality.declared
         assert modality.coverage == modality.answered / modality.declared
@@ -110,7 +110,7 @@ def test_a_placeholder_counts_as_unanswered(tmp_path: Path) -> None:
         "NotAFieldAtAll": "TODO",
     }))
     board = dash.build(root)
-    func = next(m for m in board.modalities if m.datatype == "func")
+    func = next(m for m in board.datatypes if m.datatype == "func")
     assert func.placeholders == 2, "the two declared markers"
     assert func.answered == 1, "TaskName is a real answer"
 
@@ -241,3 +241,70 @@ def test_human_bytes_reads_as_a_size() -> None:
     assert dash.human_bytes(999) == "999 B"
     assert dash.human_bytes(1536) == "1.5 KB"
     assert dash.human_bytes(5 * 1024 ** 3).endswith("GB")
+
+
+class TestSuffixesAreReportedToo:
+    """The datatype is the folder a recording lands in; the suffix is what
+    the recording IS.
+
+    ``anat`` holds T1w, T2w and FLAIR, so a summary that stops at the folder
+    cannot tell a dataset with three anatomicals per subject from one with
+    three subjects' worth of T1w. Both words are the standard's own and it
+    uses them for different things.
+    """
+
+    def _dataset(self, tmp_path: Path) -> Path:
+        root = tmp_path / "ds"
+        (root / "dataset_description.json").parent.mkdir(parents=True)
+        (root / "dataset_description.json").write_text(
+            json.dumps({"Name": "d", "BIDSVersion": "1.10.0"})
+        )
+        for subject in ("sub-001", "sub-002"):
+            anat = root / subject / "anat"
+            anat.mkdir(parents=True)
+            for suffix in ("T1w", "T2w"):
+                (anat / f"{subject}_{suffix}.nii.gz").write_bytes(b"x")
+                (anat / f"{subject}_{suffix}.json").write_text("{}")
+        func = root / "sub-001" / "func"
+        func.mkdir(parents=True)
+        (func / "sub-001_task-rest_bold.nii.gz").write_bytes(b"x")
+        (func / "sub-001_task-rest_bold.json").write_text("{}")
+        return root
+
+    def test_each_suffix_is_its_own_row(self, tmp_path):
+        board = dash.build(self._dataset(tmp_path))
+        assert [(r.datatype, r.suffix) for r in board.suffixes] == [
+            ("anat", "T1w"), ("anat", "T2w"), ("func", "bold"),
+        ]
+
+    def test_it_counts_recordings_not_sidecars(self, tmp_path):
+        """Two files per recording; the sidecar is not a second T1w."""
+        board = dash.build(self._dataset(tmp_path))
+        by_suffix = {r.suffix: r for r in board.suffixes}
+        assert by_suffix["T1w"].recordings == 2
+
+    def test_it_counts_the_subjects_that_have_each(self, tmp_path):
+        board = dash.build(self._dataset(tmp_path))
+        by_suffix = {r.suffix: r for r in board.suffixes}
+        assert by_suffix["T1w"].subjects == 2
+        assert by_suffix["bold"].subjects == 1
+
+    def test_the_datatype_table_is_still_there(self, tmp_path):
+        """Both, not one instead of the other."""
+        board = dash.build(self._dataset(tmp_path))
+        assert [r.datatype for r in board.datatypes] == ["anat", "func"]
+
+    def test_only_suffixes_the_schema_knows_are_counted(self, tmp_path):
+        """A stray file must not become a datatype's third suffix."""
+        root = self._dataset(tmp_path)
+        (root / "sub-001" / "anat" / "notes.txt").write_text("hand notes")
+        (root / "sub-001" / "anat" / "sub-001_scribble.nii.gz").write_bytes(b"x")
+        board = dash.build(root)
+        assert "scribble" not in {r.suffix for r in board.suffixes}
+        assert "notes" not in {r.suffix for r in board.suffixes}
+
+    def test_a_name_with_no_suffix_at_all_is_skipped(self, tmp_path):
+        root = self._dataset(tmp_path)
+        (root / "sub-001" / "anat" / "sub-001.nii.gz").write_bytes(b"x")
+        board = dash.build(root)
+        assert "sub-001" not in {r.suffix for r in board.suffixes}

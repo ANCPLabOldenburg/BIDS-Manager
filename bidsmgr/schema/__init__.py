@@ -51,6 +51,8 @@ from .engine import (
     required_entities,
     required_sidecar_fields,
     sidecar_fields,
+    warm_caches,
+    warm_pairs,
 )
 from .loader import (
     active_version,
@@ -103,6 +105,8 @@ __all__ = [
     "deprecated_sidecar_fields",
     "dataset_description_fields",
     "sidecar_fields",
+    "warm_caches",
+    "warm_pairs",
     "field_applies",
     "field_metadata",
     # name building

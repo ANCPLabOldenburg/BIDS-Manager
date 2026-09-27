@@ -86,10 +86,10 @@ def test_user_set_entity_delete_is_preserved_as_none() -> None:
 
 def test_user_set_cell_accumulates() -> None:
     state = replay([
-        UserSetCell(row_id="r1", column="BIDS_name", value="002"),
+        UserSetCell(row_id="r1", column="participant_id", value="002"),
         UserSetCell(row_id="r1", column="session", value="pre"),
     ])
-    assert state.cell_overrides["r1"] == {"BIDS_name": "002", "session": "pre"}
+    assert state.cell_overrides["r1"] == {"participant_id": "002", "session": "pre"}
 
 
 def test_user_toggle_include_keeps_last_value() -> None:

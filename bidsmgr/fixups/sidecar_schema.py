@@ -333,6 +333,18 @@ def _rewrite_each_sidecar(root: Path, apply) -> int:
     return changed
 
 
+def drop_stringified_nulls(data: dict) -> int:
+    """Remove keys whose value is the literal string ``"None"``. Count removed.
+
+    A stringified null, not a value. See :func:`repair_converter_output` for
+    where it comes from and why it is worth removing rather than tolerating.
+    """
+    dead = [key for key, value in data.items() if value == "None"]
+    for key in dead:
+        del data[key]
+    return len(dead)
+
+
 def repair_converter_output(staging: Path) -> int:
     """Fix what the CONVERTER wrote. Returns files changed.
 
@@ -345,7 +357,15 @@ def repair_converter_output(staging: Path) -> int:
     * a bare scalar where the schema declares an array, which dcm2niix writes
       for a single-frame acquisition;
     * an acquisition time whose seconds field is not zero-padded, which
-      dcm2niix also writes and which no validator will accept as a date-time.
+      dcm2niix also writes and which no validator will accept as a date-time;
+    * a value that is the literal string ``"None"``, which dcm2niix
+      v1.0.20260724 writes for ``InstitutionalDepartmentName``,
+      ``MatrixCoilMode`` and ``ScatterCorrectionMethod`` when the DICOM says
+      nothing. It appeared in 39 sidecars in one real run. That matters more
+      than it looks: ``InstitutionalDepartmentName`` is a real BIDS field, so
+      an absent value and the four-character string ``None`` are not the same
+      claim, and the second one also reaches the metadata form as an ANSWER,
+      where it reads as a department actually called None.
 
     What the USER stated is applied by the metadata step instead: see
     :func:`apply_stated_metadata`. Keeping the two apart means ``bidsmgr-convert``
@@ -357,6 +377,7 @@ def repair_converter_output(staging: Path) -> int:
             repair_key_names(data, datatype, suffix)
             + repair_array_types(data, datatype, suffix)
             + repair_datetimes(data, datatype, suffix)
+            + drop_stringified_nulls(data)
         ),
     )
 
@@ -439,7 +460,7 @@ def _rows_from_inventory(inventory) -> tuple[dict[str, str], dict[str, dict]]:
     by_basename: dict[str, str] = {}
     cells: dict[str, dict] = {}
     for _, row in inventory.iterrows():
-        basename = str(row.get("proposed_basename", "") or "").strip()
+        basename = str(row.get("bids_name", "") or "").strip()
         row_id = str(
             row.get("source_file", "") or row.get("series_uid", "") or ""
         ).strip()

@@ -107,7 +107,7 @@ def _wait_loaded(viewer, qapp, timeout_ms: int = 10000) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_read_tsv_plain(tmp_path: Path) -> None:
+def test_read_tsv_plain(qtbot, tmp_path: Path) -> None:
     p = tmp_path / "x.tsv"
     p.write_text("a\tb\n1\t2\n3\t4\n")
     header, rows, total = _read_tsv(p)
@@ -116,7 +116,7 @@ def test_read_tsv_plain(tmp_path: Path) -> None:
     assert total == 2
 
 
-def test_read_tsv_gzipped(tmp_path: Path) -> None:
+def test_read_tsv_gzipped(qtbot, tmp_path: Path) -> None:
     p = tmp_path / "x.tsv.gz"
     with gzip.open(p, "wt", encoding="utf-8") as f:
         f.write("a\tb\n1\t2\n")
@@ -125,7 +125,7 @@ def test_read_tsv_gzipped(tmp_path: Path) -> None:
     assert rows == [["1", "2"]]
 
 
-def test_read_tsv_empty_returns_no_header(tmp_path: Path) -> None:
+def test_read_tsv_empty_returns_no_header(qtbot, tmp_path: Path) -> None:
     p = tmp_path / "empty.tsv"
     p.write_text("")
     header, rows, total = _read_tsv(p)
@@ -134,13 +134,13 @@ def test_read_tsv_empty_returns_no_header(tmp_path: Path) -> None:
     assert total == 0
 
 
-def test_read_tsv_handles_unreadable_file(tmp_path: Path) -> None:
+def test_read_tsv_handles_unreadable_file(qtbot, tmp_path: Path) -> None:
     header, rows, _ = _read_tsv(tmp_path / "does-not-exist.tsv")
     assert header == []
     assert rows == []
 
 
-def test_read_tsv_caps_preview_rows(tmp_path: Path) -> None:
+def test_read_tsv_caps_preview_rows(qtbot, tmp_path: Path) -> None:
     p = tmp_path / "big.tsv"
     buf = io.StringIO()
     buf.write("a\n")
@@ -158,15 +158,17 @@ def test_read_tsv_caps_preview_rows(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pane_starts_with_empty_hint(qapp) -> None:
+def test_pane_starts_with_empty_hint(qapp, qtbot) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     assert pane.current_file() is None
     assert pane._stack.currentIndex() == 0  # hint visible
     assert pane._model.rowCount() == 0
 
 
-def test_set_file_populates_table(qapp, bids_root: Path) -> None:
+def test_set_file_populates_table(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -189,6 +191,7 @@ def test_set_file_populates_table(qapp, bids_root: Path) -> None:
 
 def test_set_file_handles_tsv_gz(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     gz = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_physio.tsv.gz"
@@ -201,8 +204,9 @@ def test_set_file_handles_tsv_gz(qapp, qtbot, bids_root: Path) -> None:
     assert pane._model.rowCount() == 2
 
 
-def test_set_file_none_clears(qapp, bids_root: Path) -> None:
+def test_set_file_none_clears(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -214,8 +218,9 @@ def test_set_file_none_clears(qapp, bids_root: Path) -> None:
     assert pane._model.rowCount() == 0
 
 
-def test_footer_summary_reports_dimensions(qapp, bids_root: Path) -> None:
+def test_footer_summary_reports_dimensions(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -225,9 +230,10 @@ def test_footer_summary_reports_dimensions(qapp, bids_root: Path) -> None:
     assert "3 rows" in text and "3 columns" in text
 
 
-def test_table_cells_are_editable(qapp, bids_root: Path) -> None:
+def test_table_cells_are_editable(qapp, qtbot, bids_root: Path) -> None:
     from PyQt6.QtWidgets import QAbstractItemView
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -245,6 +251,7 @@ def test_edit_cell_marks_pane_dirty(
     """Editing a cell flips the dirty state and enables Save/Revert.
     Disk is untouched until Save."""
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -268,6 +275,7 @@ def test_save_flushes_cells_to_disk(
     qapp, qtbot, bids_root: Path,
 ) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -290,8 +298,9 @@ def test_save_flushes_cells_to_disk(
     assert not pane._save_btn.isEnabled()
 
 
-def test_add_row_appends_blank_row(qapp, bids_root: Path) -> None:
+def test_add_row_appends_blank_row(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -306,8 +315,9 @@ def test_add_row_appends_blank_row(qapp, bids_root: Path) -> None:
     assert pane.is_dirty()
 
 
-def test_delete_row_removes_selected_row(qapp, bids_root: Path) -> None:
+def test_delete_row_removes_selected_row(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -322,7 +332,7 @@ def test_delete_row_removes_selected_row(qapp, bids_root: Path) -> None:
 
 
 def test_add_column_appends_with_user_name(
-    qapp, bids_root: Path, monkeypatch,
+    qapp, qtbot, bids_root: Path, monkeypatch,
 ) -> None:
     """``Add column`` pops a QInputDialog for the name; the new column
     appends to the right with the user-provided header."""
@@ -335,6 +345,8 @@ def test_add_column_appends_with_user_name(
     )
 
     pane = TsvViewerPane()
+
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -353,7 +365,7 @@ def test_add_column_appends_with_user_name(
 
 
 def test_add_column_cancel_is_noop(
-    qapp, bids_root: Path, monkeypatch,
+    qapp, qtbot, bids_root: Path, monkeypatch,
 ) -> None:
     from PyQt6.QtWidgets import QInputDialog
 
@@ -364,6 +376,8 @@ def test_add_column_cancel_is_noop(
     )
 
     pane = TsvViewerPane()
+
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -375,8 +389,9 @@ def test_add_column_cancel_is_noop(
     assert not pane.is_dirty()
 
 
-def test_delete_column_removes_selected_column(qapp, bids_root: Path) -> None:
+def test_delete_column_removes_selected_column(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -395,8 +410,9 @@ def test_delete_column_removes_selected_column(qapp, bids_root: Path) -> None:
     assert pane.is_dirty()
 
 
-def test_revert_reloads_from_disk(qapp, bids_root: Path) -> None:
+def test_revert_reloads_from_disk(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -420,6 +436,7 @@ def test_revert_reloads_from_disk(qapp, bids_root: Path) -> None:
 
 def test_save_handles_tsv_gz(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     gz = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_physio.tsv.gz"
@@ -441,6 +458,7 @@ def test_save_failed_signal_on_io_error(
     qapp, qtbot, bids_root: Path, monkeypatch,
 ) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -462,8 +480,9 @@ def test_save_failed_signal_on_io_error(
     assert pane.is_dirty()
 
 
-def test_save_with_no_dirty_state_is_noop(qapp, bids_root: Path) -> None:
+def test_save_with_no_dirty_state_is_noop(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -475,9 +494,10 @@ def test_save_with_no_dirty_state_is_noop(qapp, bids_root: Path) -> None:
 
 
 def test_switching_files_discards_unsaved_edits(
-    qapp, bids_root: Path,
+    qapp, qtbot, bids_root: Path,
 ) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = (
         bids_root / "sub-01" / "ses-01" / "func"
         / "sub-01_ses-01_task-rest_events.tsv"
@@ -494,7 +514,7 @@ def test_switching_files_discards_unsaved_edits(
     assert "99" not in events.read_text()
 
 
-def test_large_tsv_reports_total_and_caps(qapp, tmp_path: Path) -> None:
+def test_large_tsv_reports_total_and_caps(qapp, qtbot, tmp_path: Path) -> None:
     """A big TSV reads its real total but caps the preview - and (with the
     pandas C parser) loads on the worker without freezing the GUI."""
     from bidsmgr.gui.widgets.tsv_viewer_pane import _MAX_PREVIEW_ROWS
@@ -506,15 +526,17 @@ def test_large_tsv_reports_total_and_caps(qapp, tmp_path: Path) -> None:
         for i in range(_MAX_PREVIEW_ROWS + extra):
             f.write(f"{i}\t{i * 2}\n")
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     _load(pane, p, tmp_path, qapp)
     assert pane._model.rowCount() == _MAX_PREVIEW_ROWS
     assert str(_MAX_PREVIEW_ROWS + extra) in pane._footer_summary.text()
 
 
-def test_ragged_row_is_padded_to_header_width(qapp, tmp_path: Path) -> None:
+def test_ragged_row_is_padded_to_header_width(qapp, qtbot, tmp_path: Path) -> None:
     p = tmp_path / "ragged.tsv"
     p.write_text("a\tb\tc\n1\t2\n3\t4\t5\n")
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     _load(pane, p, tmp_path, qapp)
     # Header has 3 columns; first data row has 2 cells but is padded.
     assert pane._model.columnCount() == 3
@@ -530,7 +552,7 @@ def test_ragged_row_is_padded_to_header_width(qapp, tmp_path: Path) -> None:
 
 
 def test_clicking_tsv_swaps_center_pane_to_table(
-    qapp, isolated_settings, bids_root: Path,
+    qapp, qtbot, isolated_settings, bids_root: Path,
 ) -> None:
     panel = EditorPanel()
     panel._set_root(bids_root, persist=False)
@@ -550,7 +572,7 @@ def test_clicking_tsv_swaps_center_pane_to_table(
 
 
 def test_clicking_json_swaps_back_to_sidecar(
-    qapp, isolated_settings, bids_root: Path,
+    qapp, qtbot, isolated_settings, bids_root: Path,
 ) -> None:
     panel = EditorPanel()
     panel._set_root(bids_root, persist=False)
@@ -575,7 +597,7 @@ def test_clicking_json_swaps_back_to_sidecar(
 
 
 def test_clicking_directory_returns_to_sidecar_view(
-    qapp, isolated_settings, bids_root: Path,
+    qapp, qtbot, isolated_settings, bids_root: Path,
 ) -> None:
     panel = EditorPanel()
     panel._set_root(bids_root, persist=False)
@@ -596,7 +618,7 @@ def test_clicking_directory_returns_to_sidecar_view(
 
 
 def test_root_swap_clears_tsv_viewer(
-    qapp, isolated_settings, bids_root: Path, tmp_path: Path,
+    qapp, qtbot, isolated_settings, bids_root: Path, tmp_path: Path,
 ) -> None:
     panel = EditorPanel()
     panel._set_root(bids_root, persist=False)
@@ -615,8 +637,9 @@ def test_root_swap_clears_tsv_viewer(
     assert panel._center_stack.currentWidget() is panel._sidecar_form
 
 
-def test_tsv_undo_redo(qapp, bids_root: Path) -> None:
+def test_tsv_undo_redo(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = bids_root / "sub-01" / "ses-01" / "func" / "sub-01_ses-01_task-x_events.tsv"
     events.parent.mkdir(parents=True, exist_ok=True)
     events.write_text("onset\tduration\n0\t1\n", encoding="utf-8")
@@ -636,8 +659,9 @@ def test_tsv_undo_redo(qapp, bids_root: Path) -> None:
     assert pane.is_dirty()
 
 
-def test_tsv_new_edit_clears_redo(qapp, bids_root: Path) -> None:
+def test_tsv_new_edit_clears_redo(qapp, qtbot, bids_root: Path) -> None:
     pane = TsvViewerPane()
+    qtbot.addWidget(pane)
     events = bids_root / "e.tsv"
     events.write_text("a\tb\n1\t2\n", encoding="utf-8")
     _load(pane, events, bids_root, qapp)

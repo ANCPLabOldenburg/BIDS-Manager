@@ -85,7 +85,7 @@ def test_phenotype_auto_discovered_from_scaffold(tmp_path):
     bids_root = tmp_path / "ds"
     (bids_root / "sub-001").mkdir(parents=True)
     inv = tmp_path / "inv.tsv"
-    inv.write_text("BIDS_name\nsub-001\n", encoding="utf-8")
+    inv.write_text("participant_id\nsub-001\n", encoding="utf-8")
     pheno = tmp_path / "edinburgh.tsv"
     pheno.write_text("participant_id\tehi\nsub-001\t80\n", encoding="utf-8")
 

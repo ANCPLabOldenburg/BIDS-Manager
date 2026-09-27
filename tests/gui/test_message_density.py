@@ -50,12 +50,12 @@ def _captions(widget) -> list[str]:
 
 def _inventory_row(**overrides) -> dict:
     base = {
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "ses-pre",
         "include": 1,
         "modality": "mri",
-        "proposed_datatype": "func",
-        "proposed_basename": (
+        "datatype": "func",
+        "bids_name": (
             "sub-001_ses-pre_task-restingstate_acq-highres_run-01_bold"
         ),
         "bids_guess_classifier": "dcm2niix_bidsguess",
@@ -63,7 +63,7 @@ def _inventory_row(**overrides) -> dict:
         "bids_guess_suffix": "bold",
         "bids_guess_confidence": "0.97",
         "bids_guess_skip": False,
-        "proposed_issues": "",
+        "issues": "",
         "entities": json.dumps(
             {"subject": "001", "session": "pre", "task": "restingstate"},
             sort_keys=True,
@@ -182,12 +182,12 @@ def test_the_elided_button_recovers_the_text_in_its_tooltip(qapp) -> None:
 def _warn_dialog(qtbot) -> IssuesDialog:
     df = pd.DataFrame([
         _inventory_row(
-            proposed_issues=(
+            issues=(
                 "rerouted to fmap/epi: smaller than its DWI peer | "
                 "fmap multi-output: more than one file for this series"
             ),
             series_uid="2.2",
-            BIDS_name="sub-002",
+            participant_id="sub-002",
             entities=json.dumps(
                 {"subject": "002", "session": "pre", "task": "restingstate"},
                 sort_keys=True,

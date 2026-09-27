@@ -20,7 +20,7 @@ from typing import Optional
 _SUBNUM_RE = re.compile(r"^sub-(\d+)$")
 
 # Stable marker prefixed to every incremental-collision note written into
-# ``proposed_issues``. It lets the GUI find and strip a stale collision note so
+# ``issues``. It lets the GUI find and strip a stale collision note so
 # the warning can be recomputed against the CURRENT subject id + on-disk state
 # (e.g. after the user renames sub-001 -> sub-002 to resolve the clash). The
 # wording after the token deliberately avoids the model's error-token

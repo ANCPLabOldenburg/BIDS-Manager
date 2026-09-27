@@ -60,8 +60,9 @@ from PyQt6.QtWidgets import (
 )
 
 from ...editor.types import FieldLevel, FileVerdict, SidecarField
+from .flow_layout import flow
 from .json_tree_view import JsonTreeView
-from .primitives import PaneHeader
+from .primitives import ElidedLabel, PaneHeader
 from .sidecar_row import SidecarRow
 
 log = logging.getLogger(__name__)
@@ -383,15 +384,27 @@ class SidecarFormPane(QWidget):
         v.addWidget(PaneHeader("Sidecar"))
 
         # --- Edit toolbar ----------------------------------------------
-        # View-mode pills (BIDS / Tree) on the left, then Add / Delete
-        # field buttons (Tree mode only), then a stretch, the unsaved
-        # chip, Revert + Save. The toolbar is hidden when the bound
-        # file isn't editable JSON.
+        # TWO rows. The first is what applies to the pane whatever it is
+        # showing: the view pills, which fields to offer, and Revert / Save.
+        # The second holds the field verbs, which exist only in Tree view.
+        #
+        # One row could not hold them. Eight controls in a pane that is a
+        # third of the window clipped the last of them off the right edge,
+        # and a button you cannot see is a button that does not exist. The
+        # second row also costs nothing in BIDS view, where it is hidden.
         self._edit_toolbar = QFrame()
         self._edit_toolbar.setObjectName("sidecar-toolbar")
-        et = QHBoxLayout(self._edit_toolbar)
-        et.setContentsMargins(14, 6, 14, 6)
-        et.setSpacing(8)
+        etv = QVBoxLayout(self._edit_toolbar)
+        etv.setContentsMargins(14, 6, 14, 6)
+        etv.setSpacing(6)
+
+        # A WRAPPING row, not a fixed one. A QHBoxLayout's minimum width is
+        # the sum of its children, so eight controls put a 617-pixel floor
+        # under a pane whose content could have gone to 62, and the pane is
+        # one the user is meant to be able to drag narrow.
+        top_row = QWidget()
+        et = flow(top_row, h_spacing=8, v_spacing=6)
+        etv.addWidget(top_row)
 
         # View-mode pills — re-uses the ``#view-pill`` QSS rules the
         # top-header view switcher already ships, so dark/light is
@@ -435,44 +448,27 @@ class SidecarFormPane(QWidget):
             "validated file knows its datatype, so the form can offer what "
             "the standard declares for it. Nothing was added to the file."
         )
+        # Let it narrow. A QComboBox sizes itself to its LONGEST entry, so
+        # "Only what is in the file" alone was a 220-pixel floor under the
+        # whole pane. The text elides; the full wording is one click away in
+        # the popup and already spelled out in the tooltip.
+        self._scope_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._scope_combo.setMinimumContentsLength(8)
         idx = self._scope_combo.findData(self._field_scope)
         if idx >= 0:
             self._scope_combo.setCurrentIndex(idx)
         self._scope_combo.currentIndexChanged.connect(self._on_scope_changed)
         et.addWidget(self._scope_combo)
 
-        # Add / Delete field — tree-only. Both are visible in tree mode
-        # and hidden in BIDS mode (the BIDS form's notion of "add field"
-        # is the validator-surfaced missing-field row).
-        # ``+ Add field`` always inserts at root.
-        self._add_field_btn = QPushButton("+ Add field")
-        self._add_field_btn.setObjectName("tb-btn")
-        self._add_field_btn.setVisible(False)
-        self._add_field_btn.clicked.connect(self._on_add_field_clicked)
-        et.addWidget(self._add_field_btn)
-        # ``+ Add subfield`` inserts inside the currently-selected
-        # container. Enabled state is synced from the tree's selection.
-        self._add_subfield_btn = QPushButton("+ Add subfield")
-        self._add_subfield_btn.setObjectName("tb-btn")
-        self._add_subfield_btn.setVisible(False)
-        self._add_subfield_btn.setEnabled(False)
-        self._add_subfield_btn.setToolTip(
-            "Add a new field inside the selected field. "
-            "Promotes a leaf into a container if needed."
-        )
-        self._add_subfield_btn.clicked.connect(self._on_add_subfield_clicked)
-        et.addWidget(self._add_subfield_btn)
-        self._del_field_btn = QPushButton("− Delete field")
-        self._del_field_btn.setObjectName("tb-btn")
-        self._del_field_btn.setVisible(False)
-        self._del_field_btn.clicked.connect(self._on_delete_field_clicked)
-        et.addWidget(self._del_field_btn)
-
         self._dirty_chip = QLabel("")
         self._dirty_chip.setObjectName("sidecar-dirty-chip")
         self._dirty_chip.setVisible(False)
         et.addWidget(self._dirty_chip)
-        et.addStretch(1)
+        # No stretch: a wrapping row has no right-hand edge to push
+        # against, because where the edge is depends on how many rows there
+        # turn out to be. Revert and Save simply follow.
         self._revert_btn = QPushButton("Revert")
         self._revert_btn.setObjectName("tb-btn")
         self._revert_btn.setEnabled(False)
@@ -483,6 +479,35 @@ class SidecarFormPane(QWidget):
         self._save_btn.setEnabled(False)
         self._save_btn.clicked.connect(self.save)
         et.addWidget(self._save_btn)
+
+        # Second row: the field verbs. Tree view only, because the BIDS
+        # form's notion of "add a field" is the missing-field row the schema
+        # already puts in front of you.
+        self._field_tools = QWidget()
+        ft = flow(self._field_tools, h_spacing=8, v_spacing=6)
+        # ``+ Add field`` always inserts at root.
+        self._add_field_btn = QPushButton("+ Add field")
+        self._add_field_btn.setObjectName("tb-btn")
+        self._add_field_btn.clicked.connect(self._on_add_field_clicked)
+        ft.addWidget(self._add_field_btn)
+        # ``+ Add subfield`` inserts inside the currently-selected
+        # container. Enabled state is synced from the tree's selection.
+        self._add_subfield_btn = QPushButton("+ Add subfield")
+        self._add_subfield_btn.setObjectName("tb-btn")
+        self._add_subfield_btn.setEnabled(False)
+        self._add_subfield_btn.setToolTip(
+            "Add a new field inside the selected field. "
+            "Promotes a leaf into a container if needed."
+        )
+        self._add_subfield_btn.clicked.connect(self._on_add_subfield_clicked)
+        ft.addWidget(self._add_subfield_btn)
+        self._del_field_btn = QPushButton("− Delete field")
+        self._del_field_btn.setObjectName("tb-btn")
+        self._del_field_btn.clicked.connect(self._on_delete_field_clicked)
+        ft.addWidget(self._del_field_btn)
+        self._field_tools.setVisible(False)
+        etv.addWidget(self._field_tools)
+
         self._edit_toolbar.setVisible(False)
         v.addWidget(self._edit_toolbar)
 
@@ -492,9 +517,10 @@ class SidecarFormPane(QWidget):
         # re-apply. No need to rebuild on theme change.
         self._legend = QFrame()
         self._legend.setObjectName("schema-legend")
-        self._legend_layout = QHBoxLayout(self._legend)
+        self._legend_layout = flow(
+            self._legend, h_spacing=14, v_spacing=4,
+        )
         self._legend_layout.setContentsMargins(14, 6, 14, 6)
-        self._legend_layout.setSpacing(14)
         self._build_legend_once()
         v.addWidget(self._legend)
 
@@ -551,9 +577,13 @@ class SidecarFormPane(QWidget):
         fl = QHBoxLayout(self._footer)
         fl.setContentsMargins(14, 6, 14, 6)
         fl.setSpacing(10)
-        self._footer_path = QLabel("")
+        # ELIDED, both of them. A plain QLabel reports its full text width
+        # as its MINIMUM, so the footer's relative path put a 386-pixel
+        # floor under a pane the user is meant to be able to drag narrow.
+        # The whole string stays on the tooltip.
+        self._footer_path = ElidedLabel("", mode=Qt.TextElideMode.ElideLeft)
         self._footer_path.setObjectName("sidecar-footer-path")
-        self._footer_summary = QLabel("")
+        self._footer_summary = ElidedLabel("")
         self._footer_summary.setObjectName("sidecar-footer-summary")
         fl.addWidget(self._footer_path, 1)
         fl.addWidget(self._footer_summary)
@@ -723,7 +753,6 @@ class SidecarFormPane(QWidget):
             t.setObjectName("legend-text")
             ch.addWidget(t)
             self._legend_layout.addWidget(chip)
-        self._legend_layout.addStretch(1)
         self._legend_context = QLabel("")
         self._legend_context.setObjectName("legend-text")
         self._legend_layout.addWidget(self._legend_context)
@@ -1084,9 +1113,9 @@ class SidecarFormPane(QWidget):
         # Swap the stack.
         self._view_stack.setCurrentIndex(1 if mode == "tree" else 0)
         # Toggle the tree-only toolbar buttons.
-        self._add_field_btn.setVisible(mode == "tree")
-        self._add_subfield_btn.setVisible(mode == "tree")
-        self._del_field_btn.setVisible(mode == "tree")
+        # One row, not three buttons: hiding them individually left the
+        # row's own spacing behind.
+        self._field_tools.setVisible(mode == "tree")
         if mode == "tree":
             self._sync_subfield_btn_enabled()
         # Re-render the now-visible view from the working cache so any

@@ -7,7 +7,7 @@ Three concerns:
   and emits ``row_selected`` with the inventory row index on
   double-click.
 * :class:`PropertiesPanel` renders one ``ValMessage`` per
-  scanner-detected issue on the selected row's ``proposed_issues``.
+  scanner-detected issue on the selected row's ``issues``.
 """
 
 from __future__ import annotations
@@ -36,19 +36,19 @@ pytestmark = pytest.mark.gui
 
 def _func_row(**overrides) -> dict:
     base = {
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "ses-pre",
         "include": 1,
         "modality": "mri",
-        "proposed_datatype": "func",
-        "proposed_basename": "sub-001_ses-pre_task-rest_bold",
-        "Proposed BIDS name": "sub-001_ses-pre_task-rest_bold",
+        "datatype": "func",
+        "bids_name": "sub-001_ses-pre_task-rest_bold",
+        "bids_path": "sub-001_ses-pre_task-rest_bold",
         "bids_guess_classifier": "dcm2niix_bidsguess",
         "bids_guess_datatype": "func",
         "bids_guess_suffix": "bold",
         "bids_guess_confidence": "0.97",
         "bids_guess_skip": False,
-        "proposed_issues": "",
+        "issues": "",
         "entities": json.dumps(
             {"subject": "001", "session": "pre", "task": "rest"},
             sort_keys=True,
@@ -72,10 +72,10 @@ def _warn_row(**overrides) -> dict:
     # which cannot happen in real data and now reads as the name clash it
     # literally is, outranking the warn state this test is about.
     base = dict(
-        proposed_issues="rerouted to fmap/epi: smaller than DWI peer",
+        issues="rerouted to fmap/epi: smaller than DWI peer",
         series_uid="2.2.2",
-        BIDS_name="sub-002",
-        proposed_basename="sub-002_ses-pre_task-rest_bold",
+        participant_id="sub-002",
+        bids_name="sub-002_ses-pre_task-rest_bold",
         # The entities are the source of truth: the model rebuilds the
         # basename from them, so overriding the display cell alone leaves this
         # row still calling itself sub-001.
@@ -90,11 +90,11 @@ def _warn_row(**overrides) -> dict:
 
 def _err_row(**overrides) -> dict:
     return _func_row(
-        proposed_basename="",
-        proposed_datatype="",
-        proposed_issues="task entity required for func/bold",
+        bids_name="",
+        datatype="",
+        issues="task entity required for func/bold",
         series_uid="9.9.9",
-        BIDS_name="sub-003",
+        participant_id="sub-003",
         **overrides,
     )
 
@@ -102,10 +102,10 @@ def _err_row(**overrides) -> dict:
 def _skip_row(**overrides) -> dict:
     return _func_row(
         include=0,
-        proposed_issues="",
+        issues="",
         series_uid="8.8.8",
-        BIDS_name="sub-004",
-        proposed_basename="sub-004_ses-pre_task-rest_bold",
+        participant_id="sub-004",
+        bids_name="sub-004_ses-pre_task-rest_bold",
         entities=json.dumps(
             {"subject": "004", "session": "pre", "task": "rest"},
             sort_keys=True,
@@ -197,7 +197,7 @@ def test_issues_dialog_emits_row_selected_on_activation(qtbot) -> None:
 def test_issues_dialog_renders_one_valmessage_per_pipe_separated_issue(qtbot) -> None:
     from bidsmgr.gui.issues_dialog import _RowCard
     df = make_df([_warn_row(
-        proposed_issues="rerouted to fmap/epi: foo | fmap multi-output: bar",
+        issues="rerouted to fmap/epi: foo | fmap multi-output: bar",
     )])
     model = InventoryTableModel(df)
     dlg = IssuesDialog(model, severity="warn")
@@ -215,7 +215,7 @@ def test_issues_dialog_renders_one_valmessage_per_pipe_separated_issue(qtbot) ->
 
 def test_properties_panel_shows_one_valmessage_per_issue(qtbot) -> None:
     df = make_df([_warn_row(
-        proposed_issues="rerouted to fmap/epi: first reason | fmap multi-output: second reason",
+        issues="rerouted to fmap/epi: first reason | fmap multi-output: second reason",
     )])
     model = InventoryTableModel(df)
     panel = PropertiesPanel()
@@ -245,7 +245,7 @@ def test_properties_panel_omits_issue_section_when_no_issues(qtbot) -> None:
     panel.set_selected_row(0)
 
     # Only the schema-validation ValMessage should be present; no
-    # scanner-issue messages because proposed_issues is empty.
+    # scanner-issue messages because issues is empty.
     from PyQt6.QtWidgets import QLabel
     vmsgs = panel.findChildren(ValMessage)
     bodies = []
@@ -303,7 +303,7 @@ def _mixed_study_note() -> str:
 
 
 def test_mixed_study_note_reads_as_warn_in_model(qtbot) -> None:
-    df = make_df([_func_row(proposed_issues=_mixed_study_note())])
+    df = make_df([_func_row(issues=_mixed_study_note())])
     model = InventoryTableModel(df)
     # The scan's mixed-study note must classify as a warning (not err/skip),
     # so it counts toward the warnings chip.
@@ -315,7 +315,7 @@ def test_mixed_study_row_lists_in_warn_issues_dialog(qtbot) -> None:
     from bidsmgr.gui.issues_dialog import _RowCard
     from PyQt6.QtWidgets import QLabel
 
-    df = make_df([_func_row(proposed_issues=_mixed_study_note())])
+    df = make_df([_func_row(issues=_mixed_study_note())])
     model = InventoryTableModel(df)
     dlg = IssuesDialog(model, severity="warn")
     qtbot.addWidget(dlg)

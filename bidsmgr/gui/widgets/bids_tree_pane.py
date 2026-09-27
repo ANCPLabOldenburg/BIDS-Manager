@@ -64,6 +64,7 @@ from ..delegates.bids_tree import (
 )
 from ..theme_manager import CUR
 from .panel_frame import HEADER_EXTRAS
+from .tree_click import toggle_on_click
 from .primitives import PaneHeader
 
 # Severity ordering for folder rollup — pick the worst of any descendant.
@@ -76,6 +77,9 @@ log = logging.getLogger(__name__)
 # ``<root>/sub-X/ses-Y/<datatype>/<file>`` (4 levels deep from root),
 # plus a few extra for derivatives subtrees. Eight is a generous cap.
 _MAX_DEPTH = 8
+
+#: Most directories to hand a ``QFileSystemWatcher``. See ``_watch``.
+_MAX_WATCHED_DIRS = 2000
 
 # Junk / scratch dirs we never want to expose in the tree.
 _SKIP_DIRS: frozenset[str] = frozenset({
@@ -91,6 +95,12 @@ _FOLDER_RECORDING_SUFFIXES: tuple[str, ...] = (".ds", ".mff")
 # Item data roles.
 PATH_ROLE = Qt.ItemDataRole.UserRole          # absolute path string
 COLOR_TOKEN_ROLE = Qt.ItemDataRole.UserRole + 1  # palette token for foreground
+#: Whether the row is a directory. Explicit, because a folder that has not
+#: been opened yet has no children to infer it from.
+IS_DIR_ROLE = Qt.ItemDataRole.UserRole + 6
+#: Marks the single stand-in child that keeps a folder's expander arrow
+#: alive until the folder is drawn.
+PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 7
 # COUNT_ROLE and ISSUE_ROLE are defined by the delegate that paints them and
 # re-exported here, because every role the tree uses should be reachable from
 # the tree.
@@ -205,85 +215,118 @@ def _can_restructure(path: Path) -> bool:
     return any(part.startswith("sub-") for part in parts)
 
 
-def _walk(
+def _sweep(
     folder: Path,
-    parent_item: QTreeWidgetItem,
     *,
     depth: int,
-    dirs: Optional[list[str]] = None,
-    show_hidden: bool = False,
-) -> None:
-    """Populate ``parent_item`` with the contents of ``folder``.
+    dirs: list[str],
+    counts: dict[str, tuple[int, int, int]],
+    show_hidden: bool,
+) -> tuple[int, int]:
+    """One scandir pass: every directory, and what is inside each.
 
-    When ``dirs`` is supplied, every directory recursed into is appended to it
-    so the caller can register them with a ``QFileSystemWatcher`` for live
-    refresh (mirrors the Converter's output tree).
+    Returns ``(sessions, files)`` for ``folder`` and records
+    ``(sessions, files, entries)`` in ``counts`` for every directory it
+    meets. Creates no Qt objects at all, which is the point: the structure
+    of the dataset is worth knowing in full, and the ROWS are not, because
+    nobody reads eight thousand of them.
+
+    ``entries`` is how many rows the folder would DRAW, which is not the
+    same as how many files are under it: it decides whether the folder gets
+    an expander arrow at all. Without it a folder holding nothing but
+    dotfiles offered an arrow that opened onto an empty folder, which looks
+    exactly like the bug where an open folder came back blank.
+
+    A directory with nothing visible inside counts as one file, and a
+    folder-recording (a CTF ``.ds``, an EGI ``.mff``) counts as one file
+    rather than being descended into. Both match what the tree draws.
     """
     if depth >= _MAX_DEPTH:
-        return
+        return (0, 1)
     try:
-        entries = sorted(
-            os.scandir(folder),
-            # Directories before files; within each group, case-insensitive.
-            key=lambda e: (not e.is_dir(), e.name.lower()),
-        )
+        entries = list(os.scandir(folder))
     except (PermissionError, FileNotFoundError) as exc:
         log.debug("scandir failed for %s: %s", folder, exc)
-        return
+        return (0, 1)
 
-    pal = CUR()
+    sessions = 0
+    files = 0
+    seen = 0
     for entry in entries:
-        hidden = is_hidden_name(entry.name)
-        if hidden and not show_hidden:
+        if is_hidden_name(entry.name) and not show_hidden:
             continue
-        is_dir = entry.is_dir()
-        item = QTreeWidgetItem([entry.name])
-        token = _color_token_for(entry.name, is_dir)
-        item.setData(0, PATH_ROLE, entry.path)
-        item.setData(0, COLOR_TOKEN_ROLE, token)
-        if hidden:
-            # Shown but dimmed. A dataset carries .bidsmgr/, .git/ and
-            # .bidsignore, and none of them are the data: they should be
-            # reachable without competing with the tree proper.
-            item.setData(0, COLOR_TOKEN_ROLE, "muted")
-            item.setForeground(0, QColor(pal["muted"]))
-        else:
-            item.setForeground(0, QColor(pal[token]))
-        item.setIcon(0, icons.icon_for_path(entry.name, is_dir=is_dir))
-        parent_item.addChild(item)
-        # Recurse only into real directories that are not folder-recordings.
-        if is_dir and not _is_folder_recording(entry.name):
-            if dirs is not None:
-                dirs.append(entry.path)
-            _walk(
-                Path(entry.path), item, depth=depth + 1, dirs=dirs,
+        seen += 1
+        if entry.is_dir() and not _is_folder_recording(entry.name):
+            dirs.append(entry.path)
+            sub_sessions, sub_files = _sweep(
+                Path(entry.path), depth=depth + 1, dirs=dirs, counts=counts,
                 show_hidden=show_hidden,
             )
-            _annotate_folder(item, entry.name)
+            sessions += sub_sessions
+            files += sub_files
+            if entry.name.startswith("ses-") and sub_files:
+                sessions += 1
+        else:
+            files += 1
+    if not seen:
+        files = 1
+    counts[str(folder)] = (sessions, files, seen)
+    return (sessions, files)
 
 
-def _annotate_folder(item: QTreeWidgetItem, name: str) -> None:
+def _rollup(
+    leaf_map: dict[str, str], count_map: dict[str, tuple[int, int]],
+) -> tuple[dict[str, str], dict[str, tuple[int, int]]]:
+    """Per-DIRECTORY worst severity and finding totals, from the file maps.
+
+    Each finding is walked up its own ancestry, so a folder's answer does not
+    depend on whether the folder has been drawn. A folder gets the SUM over
+    its descendants and not the worst of them, because the point of a number
+    is to say how much work is in there: a subject with one missing
+    recommended field should not look like a subject with ninety.
+    """
+    badges: dict[str, str] = {}
+    totals: dict[str, tuple[int, int]] = {}
+
+    def ancestors(key: str):
+        parent = os.path.dirname(key)
+        while parent and parent != os.path.dirname(parent):
+            yield parent
+            parent = os.path.dirname(parent)
+
+    for key, severity in leaf_map.items():
+        rank = _SEVERITY_RANK.get(severity)
+        if rank is None:
+            continue
+        for parent in ancestors(key):
+            current = badges.get(parent)
+            if current is None or rank > _SEVERITY_RANK[current]:
+                badges[parent] = severity
+
+    for key, (errors, warnings) in count_map.items():
+        for parent in ancestors(key):
+            have = totals.get(parent, (0, 0))
+            totals[parent] = (have[0] + errors, have[1] + warnings)
+
+    return badges, totals
+
+
+def _annotate_folder(
+    item: QTreeWidgetItem, name: str, counts: dict[str, tuple[int, int, int]],
+) -> None:
     """Put what is inside a folder on the folder's own row.
 
     A subject with three sessions and forty-seven files is a fact a reader
     wants without expanding anything, and it is the difference between a tree
-    you scan and a tree you excavate. Counted from the children already built,
-    so it costs nothing extra.
+    you scan and a tree you excavate.
+
+    Read from the sweep rather than counted from the children, because the
+    children are no longer there: a folder is drawn when it is opened, and
+    the whole value of the count is that it is on a folder you have NOT
+    opened.
     """
-    sessions = 0
-    files = 0
-    stack = [item]
-    while stack:
-        node = stack.pop()
-        for i in range(node.childCount()):
-            child = node.child(i)
-            child_name = child.text(0)
-            if child.childCount():
-                if child_name.startswith("ses-"):
-                    sessions += 1
-                stack.append(child)
-            else:
-                files += 1
+    path = item.data(0, PATH_ROLE)
+    sessions, files, _entries = counts.get(str(path), (0, 0, 0))
     if not files:
         return
     bits = []
@@ -334,6 +377,8 @@ class BidsTreePane(QWidget):
     strip_requested = pyqtSignal(list)
     #: Put the clicked images side by side. ``list[Path]``, one or two.
     compare_requested = pyqtSignal(list)
+    #: Open the references tool on the clicked file. ``list[Path]``, one file.
+    links_requested = pyqtSignal(list)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -345,6 +390,14 @@ class BidsTreePane(QWidget):
         self._last_badges: dict[str, str] = {}
         # (errors, warnings) per file, kept for the same reason.
         self._last_counts: dict[str, tuple[int, int]] = {}
+        # The same two, rolled up per DIRECTORY, so a folder drawn later gets
+        # its badge without another pass over the tree.
+        self._dir_badges: dict[str, str] = {}
+        self._dir_counts: dict[str, tuple[int, int]] = {}
+        # (sessions, files, entries) per directory, from the sweep: the
+        # first two are the row label, the third decides the expander arrow.
+        self._counts: dict[str, tuple[int, int, int]] = {}
+        self._show_hidden = False
 
         # Live refresh: every visible directory is registered with a
         # ``QFileSystemWatcher`` so files created / deleted / renamed under the
@@ -449,6 +502,8 @@ class BidsTreePane(QWidget):
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self._tree.itemExpanded.connect(self._on_item_expanded)
+        toggle_on_click(self._tree)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_show_context_menu)
 
@@ -601,7 +656,6 @@ class BidsTreePane(QWidget):
         if self._root is None:
             return
         snap = self._snapshot_state()
-        self._clear_watcher()
         # Block selection signals so re-selecting the same row after the rebuild
         # does not spuriously reload the center viewer on every disk tick.
         self._tree.blockSignals(True)
@@ -622,7 +676,16 @@ class BidsTreePane(QWidget):
             self._apply_badge_map(self._last_badges, self._last_counts)
 
     def _populate(self, path: Path) -> list[str]:
-        """Build the tree under ``path`` and return the dirs to watch."""
+        """Sweep ``path``, draw its first level, return the dirs to watch.
+
+        The sweep is the whole dataset and costs one scandir pass. The
+        DRAWING is one level, and the rest is drawn as folders are opened.
+
+        It used to build every row up front: one ``QTreeWidgetItem``, one
+        icon lookup and two ``setData`` calls per file, on the GUI thread.
+        Measured on 8,000 files: 259 ms to open a dataset and the same again
+        every time the file watcher fired.
+        """
         pal = CUR()
         # Top-level item carries the dataset name. We do NOT colour it
         # as a directory — the dataset root is the user's anchor, so
@@ -630,27 +693,171 @@ class BidsTreePane(QWidget):
         top = QTreeWidgetItem([path.name or str(path)])
         top.setData(0, PATH_ROLE, str(path))
         top.setData(0, COLOR_TOKEN_ROLE, "text")
+        top.setData(0, IS_DIR_ROLE, True)
         top.setForeground(0, QColor(pal["text"]))
         top.setIcon(0, icons.icon_for_path(path.name or str(path), is_dir=True))
         self._tree.addTopLevelItem(top)
+
         dirs: list[str] = [str(path)]
+        counts: dict[str, tuple[int, int, int]] = {}
         # Read the preference at build time rather than caching it, so a
         # change in Settings shows on the next refresh without extra wiring.
         from ..app_settings import AppSettings
-        _walk(
-            path, top, depth=0, dirs=dirs,
-            show_hidden=AppSettings.load().editor_show_hidden,
+        self._show_hidden = AppSettings.load().editor_show_hidden
+        _sweep(
+            path, depth=0, dirs=dirs, counts=counts,
+            show_hidden=self._show_hidden,
         )
+        self._counts = counts
+        self._fill_level(top)
         self._stack.setCurrentIndex(1)
         return dirs
+
+    def _fill_level(self, parent_item: QTreeWidgetItem) -> None:
+        """Draw the contents of one folder, with the next level stubbed."""
+        folder = parent_item.data(0, PATH_ROLE)
+        if not folder:
+            return
+        try:
+            entries = sorted(
+                os.scandir(folder),
+                # Directories before files; within each group, insensitive.
+                key=lambda e: (not e.is_dir(), e.name.lower()),
+            )
+        except (PermissionError, FileNotFoundError) as exc:
+            log.debug("scandir failed for %s: %s", folder, exc)
+            return
+
+        pal = CUR()
+        for entry in entries:
+            hidden = is_hidden_name(entry.name)
+            if hidden and not self._show_hidden:
+                continue
+            is_dir = entry.is_dir()
+            item = QTreeWidgetItem([entry.name])
+            token = _color_token_for(entry.name, is_dir)
+            item.setData(0, PATH_ROLE, entry.path)
+            item.setData(0, COLOR_TOKEN_ROLE, token)
+            item.setData(0, IS_DIR_ROLE, is_dir)
+            if hidden:
+                # Shown but dimmed. A dataset carries .bidsmgr/, .git/ and
+                # .bidsignore, and none of them are the data: they should be
+                # reachable without competing with the tree proper.
+                item.setData(0, COLOR_TOKEN_ROLE, "muted")
+                item.setForeground(0, QColor(pal["muted"]))
+            else:
+                item.setForeground(0, QColor(pal[token]))
+            item.setIcon(0, icons.icon_for_path(entry.name, is_dir=is_dir))
+            parent_item.addChild(item)
+            if is_dir and not _is_folder_recording(entry.name):
+                _annotate_folder(item, entry.name, self._counts)
+                # No arrow on a folder with nothing to draw. Defaults to
+                # offering one when the sweep has no answer (past its depth
+                # cap, or unreadable), because hiding real content would be
+                # worse than an arrow that opens onto nothing.
+                if self._counts.get(entry.path, (0, 0, 1))[2]:
+                    placeholder = QTreeWidgetItem([""])
+                    placeholder.setData(0, PLACEHOLDER_ROLE, True)
+                    item.addChild(placeholder)
+            self._stamp_badge(item)
+
+    def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
+        """Draw a folder the first time it is opened."""
+        self._ensure_children(item)
+
+    def _ensure_children(self, item: QTreeWidgetItem) -> None:
+        """Replace a folder's placeholder with its real contents.
+
+        Called directly, never only through ``itemExpanded``. ``refresh``
+        blocks the tree's signals while it rebuilds, so an expansion done in
+        there emits nothing, and a tree restored under a blocked signal
+        would come back as a row of stubs that never fill.
+        """
+        if item.childCount() != 1:
+            return
+        child = item.child(0)
+        if child.data(0, PLACEHOLDER_ROLE) is not True:
+            return
+        item.removeChild(child)
+        self._fill_level(item)
+
+    def _row_for(self, target: str) -> Optional[QTreeWidgetItem]:
+        """The row for ``target``, drawing the folders on the way to it.
+
+        Needed because a folder is drawn when it is OPENED: a row deep in
+        the dataset does not exist until something walks down to it. This
+        creates the rows on the path and nothing else, and leaves every
+        folder's fold state alone, so it can be used to restore a view
+        without changing one.
+        """
+        if not target or self._tree.topLevelItemCount() == 0:
+            return None
+        item = self._tree.topLevelItem(0)
+        root = str(item.data(0, PATH_ROLE) or "")
+        if not root or not (target == root or target.startswith(root + os.sep)):
+            return None
+        while True:
+            if str(item.data(0, PATH_ROLE) or "") == target:
+                # The TARGET is drawn too, not only the folders on the way to
+                # it. Stopping one short left a folder that was open before a
+                # refresh expanded over its placeholder, which is a blank row,
+                # and the only way to see the contents again was to close it
+                # and open it. A file has nothing to draw, so this is a no-op
+                # for the ``reveal`` case.
+                self._ensure_children(item)
+                return item
+            self._ensure_children(item)
+            nxt = None
+            for i in range(item.childCount()):
+                child = item.child(i)
+                key = str(child.data(0, PATH_ROLE) or "")
+                if key and (target == key or target.startswith(key + os.sep)):
+                    nxt = child
+                    break
+            if nxt is None:
+                return None
+            item = nxt
+
+    def reveal(self, path: Path) -> Optional[QTreeWidgetItem]:
+        """Open the folders down to ``path`` and return its row."""
+        item = self._row_for(str(Path(path)))
+        if item is None:
+            return None
+        parent = item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        return item
 
     # ------------------------------------------------------------------
     # Live refresh (QFileSystemWatcher)
     # ------------------------------------------------------------------
 
     def _watch(self, dirs: list[str]) -> None:
-        if dirs:
-            self._watcher.addPaths(dirs)
+        """Move the watch set to ``dirs`` by DIFFERENCE, not by rebuilding it.
+
+        A refresh used to drop every watch and take them all again. Each
+        path is a real registration with the OS, so that cost in proportion
+        to the number of DIRECTORIES in the dataset, on the GUI thread,
+        every time anything on disk changed. Measured in the Converter's
+        output pane, which had the identical pattern: 199 ms to add plus
+        50 ms to remove on a tree of 2,668 directories.
+
+        The cap is not tidiness. inotify has a per-user watch limit, and
+        past it registration fails silently and live refresh stops working
+        with no message. Shallow directories are preferred, because a new
+        subject, session or datatype folder is the change most worth
+        seeing and it appears near the top.
+        """
+        wanted = set(sorted(dirs, key=lambda p: (p.count(os.sep), p))
+                     [:_MAX_WATCHED_DIRS])
+        current = set(self._watcher.directories())
+        gone = sorted(current - wanted)
+        fresh = sorted(wanted - current)
+        if gone:
+            self._watcher.removePaths(gone)
+        if fresh:
+            self._watcher.addPaths(fresh)
 
     def _clear_watcher(self) -> None:
         existing = self._watcher.directories()
@@ -696,6 +903,16 @@ class BidsTreePane(QWidget):
         """Re-apply expansion / selection / scroll captured by a snapshot."""
         expanded: set = snap["expanded"]
         selected = snap["selected"]
+
+        # Draw the rows the snapshot names, before touching any fold state.
+        # A folder is drawn when it is opened, so a row that was expanded
+        # under a CLOSED parent has no row to restore onto until its
+        # ancestors are built, and walking the tree could not reach it.
+        # Shallowest first, so each descent starts from rows that exist.
+        for key in sorted(expanded, key=lambda k: k.count(os.sep)):
+            self._row_for(key)
+        if selected:
+            self._row_for(selected)
 
         def _walk_items(item: QTreeWidgetItem) -> None:
             key = self._item_key(item)
@@ -744,43 +961,46 @@ class BidsTreePane(QWidget):
         leaf_map: dict[str, str],
         count_map: Optional[dict[str, tuple[int, int]]] = None,
     ) -> None:
-        """Stamp a normalised path -> severity map onto the current tree."""
-        count_map = count_map or {}
+        """Stamp a normalised path -> severity map onto the current tree.
 
-        def visit(item: QTreeWidgetItem) -> tuple[str | None, int, int]:
-            """Set this item's badge and counts; return them rolled up."""
-            children_worst: str | None = None
-            errors = warnings = 0
+        The folder rollup is computed from the MAP, by walking each finding's
+        ancestors, and not from the tree's own children. It used to be the
+        other way round, which stopped working the moment a folder was drawn
+        only when opened: a closed subject has no children, so it would have
+        rolled up to nothing, and a folder showing no findings because it has
+        not been opened is precisely the wrong answer. Doing it from the map
+        also means a row gets its badge as it is created, without another
+        pass over the tree.
+        """
+        count_map = count_map or {}
+        self._dir_badges, self._dir_counts = _rollup(leaf_map, count_map)
+
+        def visit(item: QTreeWidgetItem) -> None:
+            self._stamp_badge(item)
             for i in range(item.childCount()):
-                child_sev, child_err, child_warn = visit(item.child(i))
-                errors += child_err
-                warnings += child_warn
-                if child_sev is not None:
-                    if children_worst is None or \
-                            _SEVERITY_RANK[child_sev] > _SEVERITY_RANK[children_worst]:
-                        children_worst = child_sev
-            if item.childCount() > 0:
-                # Directory: rollup-only badge (file-level wins over
-                # implicit "ok" because we have no leaf severity to
-                # represent the folder itself).
-                badge = children_worst
-            else:
-                # Leaf: look up by absolute path (normalised).
-                path_str = item.data(0, PATH_ROLE)
-                key = _norm_path(path_str) if path_str else None
-                badge = leaf_map.get(key) if key else None
-                errors, warnings = count_map.get(key, (0, 0)) if key else (0, 0)
-            item.setData(0, BADGE_ROLE, badge or None)
-            item.setData(
-                0, ISSUE_ROLE,
-                (errors, warnings) if (errors or warnings) else None,
-            )
-            return badge, errors, warnings
+                visit(item.child(i))
 
         for i in range(self._tree.topLevelItemCount()):
             visit(self._tree.topLevelItem(i))
         # Force the delegate to repaint with the new badge data.
         self._tree.viewport().update()
+
+    def _stamp_badge(self, item: QTreeWidgetItem) -> None:
+        """Put the badge and finding counts on one row, from the cached maps."""
+        path_str = item.data(0, PATH_ROLE)
+        if not path_str:
+            return
+        key = _norm_path(path_str)
+        if item.data(0, IS_DIR_ROLE):
+            badge = self._dir_badges.get(key)
+            errors, warnings = self._dir_counts.get(key, (0, 0))
+        else:
+            badge = self._last_badges.get(key)
+            errors, warnings = self._last_counts.get(key, (0, 0))
+        item.setData(0, BADGE_ROLE, badge or None)
+        item.setData(
+            0, ISSUE_ROLE, (errors, warnings) if (errors or warnings) else None,
+        )
 
     def clear_badges(self) -> None:
         """Remove every badge from the tree (and forget the cached map)."""
@@ -867,18 +1087,13 @@ class BidsTreePane(QWidget):
             return
 
         menu = QMenu(self)
-        from ..combo_popup import round_menu
+        from ..combo_popup import menu_section, round_menu
         round_menu(menu)
 
-        copy_path_action = menu.addAction("Copy Path")
-        copy_path_action.triggered.connect(
-            lambda: QApplication.clipboard().setText(str(path))
-        )
-
-        copy_rel_path_action = menu.addAction("Copy Relative Path")
-        copy_rel_path_action.triggered.connect(
-            lambda: self._copy_relative_path(path)
-        )
+        # Same groups, same order and same words as the Tools menu, so the
+        # two ways of reaching a tool teach the same thing about what it is
+        # for. A heading is only drawn when its group has an entry for what
+        # was clicked, which is what keeps a right-click on a .json short.
 
         # Comparing is offered on ANY NIfTI, including one under
         # derivatives/, because putting a derivative beside the scan it came
@@ -892,6 +1107,7 @@ class BidsTreePane(QWidget):
             if p.is_file() and p.name.lower().endswith((".nii", ".nii.gz"))
         ]
         if images:
+            menu_section(menu, "Look at this")
             pair = len(images) > 1
             compare_images = menu.addAction(
                 "Compare these two images..." if pair
@@ -905,14 +1121,33 @@ class BidsTreePane(QWidget):
             compare_images.triggered.connect(
                 lambda _c=False, s=images[:2]: self.compare_requested.emit(s)
             )
-            menu.addSeparator()
+
+        # References, offered only where a link field is worth having: on a
+        # fieldmap, an MEG recording, a derivative. Offering it on every
+        # file would be true and useless.
+        if self._root is not None and clicked_path.is_file():
+            from ...editor import linkage as lk
+            if lk.fields_for(self._root, clicked_path):
+                menu_section(menu, "Check and repair")
+                links = menu.addAction("References...")
+                links.setToolTip(
+                    "What this file points at, and what points at it. Opens "
+                    "on this file with the rest of the dataset beside it, so "
+                    "a link is made by ticking a file rather than typing a "
+                    "path."
+                )
+                links.triggered.connect(
+                    lambda _c=False, p=clicked_path:
+                        self.links_requested.emit([p])
+                )
 
         # Every entity the clicked row actually carries, so the menu offers
         # renaming exactly what is in front of the user. A folder named
         # sub-01 offers the subject; a func file offers task, run and echo.
         renames = _renameable_entities(Path(path))
+        if renames or _can_restructure(Path(path)):
+            menu_section(menu, "Names and structure")
         if renames:
-            menu.addSeparator()
             for entity, value, label in renames:
                 action = menu.addAction(f"Rename {label} {entity}-{value}...")
                 action.setToolTip(
@@ -934,7 +1169,6 @@ class BidsTreePane(QWidget):
         clicked = Path(path)
         scope = chosen if clicked in chosen and len(chosen) > 1 else [clicked]
         if _can_restructure(clicked):
-            menu.addSeparator()
             add_entity = menu.addAction("Add or change an entity...")
             add_entity.setToolTip(
                 "Give these files an entity the schema allows them, placed "
@@ -971,7 +1205,7 @@ class BidsTreePane(QWidget):
                     self.entities_requested.emit(s, m, True)
             )
 
-            menu.addSeparator()
+            menu_section(menu, "Identifiable data")
 
             deface = menu.addAction("Remove faces...")
             deface.setToolTip(
@@ -1013,7 +1247,7 @@ class BidsTreePane(QWidget):
                 lambda _c=False, s=scope: self.deface_revert_requested.emit(s)
             )
 
-            menu.addSeparator()
+            menu_section(menu, "Remove")
             what = (
                 f"{len(scope)} items" if len(scope) > 1
                 else ("this folder and everything in it" if clicked.is_dir()
@@ -1029,9 +1263,22 @@ class BidsTreePane(QWidget):
                 lambda _c=False, s=scope: self.delete_requested.emit(s)
             )
 
-        menu.addSeparator()
+        # Last, and grouped, because these three are about the path rather
+        # than about the dataset. Every file manager and editor puts them
+        # here for the same reason.
+        menu_section(menu, "This file")
 
-        open_in_folder_action = menu.addAction("Open in Folder")
+        copy_path_action = menu.addAction("Copy path")
+        copy_path_action.triggered.connect(
+            lambda: QApplication.clipboard().setText(str(path))
+        )
+
+        copy_rel_path_action = menu.addAction("Copy relative path")
+        copy_rel_path_action.triggered.connect(
+            lambda: self._copy_relative_path(path)
+        )
+
+        open_in_folder_action = menu.addAction("Open in folder")
         open_in_folder_action.triggered.connect(
             lambda: self._open_in_folder(path)
         )

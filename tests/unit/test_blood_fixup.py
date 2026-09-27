@@ -428,7 +428,7 @@ def _inventory(companions=None):
 
     return pd.DataFrame([{
         "include": "1",
-        "proposed_datatype": "pet",
+        "datatype": "pet",
         "bids_guess_suffix": "pet",
         "companion_files": json.dumps(companions) if companions else "",
     }])

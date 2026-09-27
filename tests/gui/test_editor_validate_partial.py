@@ -20,6 +20,7 @@ import pytest
 
 from bidsmgr.editor.types import FileVerdict, Severity, ValidationReport
 from bidsmgr.editor.validator import validate_file, validate_folder
+from .conftest import open_every_folder
 from bidsmgr.gui.editor_panel import EditorPanel
 from bidsmgr.gui.widgets.bids_tree_pane import PATH_ROLE
 from bidsmgr.workers import FileReportWorker, FolderReportWorker
@@ -59,7 +60,7 @@ def bids_root(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_validate_file_returns_a_single_verdict(bids_root: Path) -> None:
+def test_validate_file_returns_a_single_verdict(qtbot, bids_root: Path) -> None:
     json_path = (
         bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.json"
     )
@@ -71,7 +72,7 @@ def test_validate_file_returns_a_single_verdict(bids_root: Path) -> None:
     assert verdict.suffix == "T1w"
 
 
-def test_validate_file_detects_todo_in_sidecar(bids_root: Path) -> None:
+def test_validate_file_detects_todo_in_sidecar(qtbot, bids_root: Path) -> None:
     """The T2w sidecar has a TODO Manufacturer — should warn."""
     json_path = (
         bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T2w.json"
@@ -81,7 +82,7 @@ def test_validate_file_detects_todo_in_sidecar(bids_root: Path) -> None:
     assert any(i.rule_id == "bidsmgr.todo_placeholder" for i in verdict.issues)
 
 
-def test_validate_folder_walks_recursively(bids_root: Path) -> None:
+def test_validate_folder_walks_recursively(qtbot, bids_root: Path) -> None:
     folder = bids_root / "sub-01" / "ses-01" / "anat"
     verdicts = validate_folder(bids_root, folder)
     # 2 .nii.gz + 2 .json = 4 files in this folder.
@@ -91,7 +92,7 @@ def test_validate_folder_walks_recursively(bids_root: Path) -> None:
     assert any("T2w.json" in p for p in paths)
 
 
-def test_validate_folder_skips_dot_dirs(bids_root: Path) -> None:
+def test_validate_folder_skips_dot_dirs(qtbot, bids_root: Path) -> None:
     # Drop a .bidsmgr scratch tree — must be ignored.
     junk = bids_root / "sub-01" / ".bidsmgr"
     junk.mkdir()
@@ -140,6 +141,8 @@ def test_folder_report_worker_emits_all_verdicts(
 
 
 def _find_tree_item(tree, path_str: str):
+    open_every_folder(tree)
+
     def visit(item):
         if item.data(0, PATH_ROLE) == path_str:
             return item
@@ -156,9 +159,10 @@ def _find_tree_item(tree, path_str: str):
 
 
 def test_validate_file_button_enables_on_file_selection(
-    qapp, isolated_settings, bids_root: Path,
+    qapp, qtbot, isolated_settings, bids_root: Path,
 ) -> None:
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     panel._set_root(bids_root, persist=False)
     # Buttons start disabled — nothing selected.
     assert not panel._validate_file_btn.isEnabled()
@@ -177,9 +181,10 @@ def test_validate_file_button_enables_on_file_selection(
 
 
 def test_validate_folder_button_enables_on_folder_selection(
-    qapp, isolated_settings, bids_root: Path,
+    qapp, qtbot, isolated_settings, bids_root: Path,
 ) -> None:
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     panel._set_root(bids_root, persist=False)
 
     folder = bids_root / "sub-01" / "ses-01" / "anat"
@@ -196,6 +201,7 @@ def test_start_file_validation_merges_into_existing_report(
     qapp, qtbot, isolated_settings, bids_root: Path,
 ) -> None:
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     panel._set_root(bids_root, persist=False)
     # Pre-seed an in-memory report with a stale verdict for T2w.json.
     t2w_rel = (
@@ -237,6 +243,7 @@ def test_start_folder_validation_appends_new_verdicts(
     qapp, qtbot, isolated_settings, bids_root: Path,
 ) -> None:
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     panel._set_root(bids_root, persist=False)
     panel._report = ValidationReport(bids_root=bids_root)  # empty
 
@@ -257,18 +264,20 @@ def test_start_folder_validation_appends_new_verdicts(
 
 
 def test_start_file_validation_noop_without_root(
-    qapp, isolated_settings,
+    qapp, qtbot, isolated_settings,
 ) -> None:
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     # No root — must not raise.
     panel.start_file_validation()
     panel.start_folder_validation()
 
 
 def test_start_file_validation_noop_without_selection(
-    qapp, isolated_settings, bids_root: Path,
+    qapp, qtbot, isolated_settings, bids_root: Path,
 ) -> None:
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     panel._set_root(bids_root, persist=False)
     # No selection → button is disabled and the method is a noop.
     panel.start_file_validation()

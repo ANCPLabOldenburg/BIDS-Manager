@@ -32,11 +32,11 @@ pytestmark = pytest.mark.gui
 def _inventory_df(subject: str = "001", task: str = "rest", uid: str = "UID1") -> pd.DataFrame:
     return pd.DataFrame([
         {
-            "BIDS_name": f"sub-{subject}", "session": "", "include": 1,
-            "modality": "mri", "proposed_datatype": "func",
-            "proposed_basename": f"sub-{subject}_task-{task}_bold",
+            "participant_id": f"sub-{subject}", "session": "", "include": 1,
+            "modality": "mri", "datatype": "func",
+            "bids_name": f"sub-{subject}_task-{task}_bold",
             "bids_guess_suffix": "bold", "bids_guess_confidence": "0.9",
-            "bids_guess_skip": False, "proposed_issues": "",
+            "bids_guess_skip": False, "issues": "",
             "entities": json.dumps({"subject": subject, "task": task}, sort_keys=True),
             "task": task, "run": "", "series_uid": uid, "dataset": "ds",
             "source_file": "",
@@ -100,7 +100,7 @@ def test_resume_replays_subject_rename(qtbot, isolated_settings, tmp_path):
     qtbot.addWidget(panel)
     panel.set_project(proj, root)
 
-    assert panel._model.dataframe().iloc[0]["BIDS_name"] == "sub-042"
+    assert panel._model.dataframe().iloc[0]["participant_id"] == "sub-042"
 
 
 def test_two_versions_coexist_and_picker_switches(qtbot, isolated_settings, tmp_path):
@@ -116,7 +116,7 @@ def test_two_versions_coexist_and_picker_switches(qtbot, isolated_settings, tmp_
     # Both versions exist; resume lands on the latest (v2 / source_b).
     assert len(workspace.list_versions(root)) == 2
     assert panel._active_version_dir == v2
-    assert panel._model.dataframe().iloc[0]["BIDS_name"] == "sub-002"
+    assert panel._model.dataframe().iloc[0]["participant_id"] == "sub-002"
     # isHidden() reflects the explicit setVisible flag without needing the whole
     # window shown (offscreen). The picker lists both versions.
     assert not panel._scans_combo.isHidden() and panel._scans_combo.count() == 2
@@ -127,7 +127,7 @@ def test_two_versions_coexist_and_picker_switches(qtbot, isolated_settings, tmp_
     panel._scans_combo.setCurrentIndex(idx_v1)
     panel._on_scans_combo_activated(idx_v1)
     assert panel._active_version_dir == v1
-    assert panel._model.dataframe().iloc[0]["BIDS_name"] == "sub-001"
+    assert panel._model.dataframe().iloc[0]["participant_id"] == "sub-001"
 
 
 def test_undo_reverts_last_edit(qtbot, isolated_settings, tmp_path):
@@ -232,14 +232,14 @@ def test_fresh_scan_flags_rows_whose_subject_already_exists(
     panel.set_project(proj, root)
 
     df = pd.DataFrame([
-        {"BIDS_name": "sub-001", "proposed_issues": ""},  # collides with on-disk
-        {"BIDS_name": "sub-002", "proposed_issues": ""},  # new
+        {"participant_id": "sub-001", "issues": ""},  # collides with on-disk
+        {"participant_id": "sub-002", "issues": ""},  # new
     ])
     panel._flag_existing_subject_rows(df)
     # No participants.tsv identity -> generic heads-up, tagged with the token.
-    assert "already in the dataset" in df.iloc[0]["proposed_issues"]
-    assert "existing-subject" in df.iloc[0]["proposed_issues"]
-    assert df.iloc[1]["proposed_issues"] == ""  # new subject not flagged
+    assert "already in the dataset" in df.iloc[0]["issues"]
+    assert "existing-subject" in df.iloc[0]["issues"]
+    assert df.iloc[1]["issues"] == ""  # new subject not flagged
 
 
 def test_flag_existing_subject_rows_is_idempotent_after_rename(
@@ -254,14 +254,14 @@ def test_flag_existing_subject_rows_is_idempotent_after_rename(
     qtbot.addWidget(panel)
     panel.set_project(proj, root)
 
-    df = pd.DataFrame([{"BIDS_name": "sub-001", "proposed_issues": ""}])
+    df = pd.DataFrame([{"participant_id": "sub-001", "issues": ""}])
     panel._flag_existing_subject_rows(df)
-    assert "existing-subject" in df.iloc[0]["proposed_issues"]
+    assert "existing-subject" in df.iloc[0]["issues"]
 
     # User renames to a free id, then re-flags: the warning is gone (no double).
-    df.at[0, "BIDS_name"] = "sub-002"
+    df.at[0, "participant_id"] = "sub-002"
     panel._flag_existing_subject_rows(df)
-    assert df.iloc[0]["proposed_issues"] == ""
+    assert df.iloc[0]["issues"] == ""
 
 
 def test_revalidate_clears_collision_after_bulk_rename(
@@ -283,7 +283,7 @@ def test_revalidate_clears_collision_after_bulk_rename(
     panel._model.revalidate_all()
     assert panel._model.row_state(0) == "warn"  # collides with on-disk sub-001
 
-    # Rename via the bulk-edit code path (id -> subject entity + BIDS_name).
+    # Rename via the bulk-edit code path (id -> subject entity + participant_id).
     panel._model.bulk_set([0], "id", "002")
     # Live edit alone leaves the stale note (manual revalidation is by design).
     assert panel._model.row_state(0) == "warn"
@@ -291,7 +291,7 @@ def test_revalidate_clears_collision_after_bulk_rename(
     # Re-validate recomputes the collision against the new id + disk -> cleared.
     panel._on_revalidate_clicked()
     assert panel._model.row_state(0) == ""
-    issues = panel._model.dataframe().at[0, "proposed_issues"]
+    issues = panel._model.dataframe().at[0, "issues"]
     assert "existing-subject" not in issues and "sub-001" not in issues
 
 

@@ -29,19 +29,19 @@ pytestmark = pytest.mark.gui
 
 def _row(**overrides) -> dict:
     base = {
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "ses-pre",
         "include": 1,
         "modality": "mri",
-        "proposed_datatype": "func",
-        "proposed_basename": "sub-001_ses-pre_task-rest_bold",
-        "Proposed BIDS name": "sub-001_ses-pre_task-rest_bold",
+        "datatype": "func",
+        "bids_name": "sub-001_ses-pre_task-rest_bold",
+        "bids_path": "sub-001_ses-pre_task-rest_bold",
         "bids_guess_classifier": "dcm2niix_bidsguess",
         "bids_guess_datatype": "func",
         "bids_guess_suffix": "bold",
         "bids_guess_confidence": "0.97",
         "bids_guess_skip": False,
-        "proposed_issues": "",
+        "issues": "",
         "repetition_type": "",
         "entities": json.dumps(
             {"subject": "001", "session": "pre", "task": "rest"},

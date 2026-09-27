@@ -105,7 +105,7 @@ def _row(*, series_description: str, n_files: int = 50,
         n_files=n_files,
         series_description=series_description,
         image_type=image_type,
-        fine_modality="dwi",
+        sequence_kind="dwi",
     )
 
 

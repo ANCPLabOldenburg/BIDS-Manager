@@ -64,7 +64,7 @@ def test_user_set_entity_roundtrips_with_delete() -> None:
 
 def test_user_set_cell_roundtrips() -> None:
     _roundtrip(UserSetCell(
-        row_id="r1", column="BIDS_name", value="002", previous="",
+        row_id="r1", column="participant_id", value="002", previous="",
     ))
 
 

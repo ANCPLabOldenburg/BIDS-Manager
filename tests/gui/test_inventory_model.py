@@ -50,22 +50,22 @@ pytestmark = pytest.mark.gui
 def _ok_row(**overrides) -> dict:
     """A valid MRI row that should pass through with row_state=''."""
     base = {
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "ses-pre",
         "include": 1,
         "modality": "mri",
-        "modality_bids": "anat",
+        "sequence_kind": "anat",
         "sequence": "t1w_mprage",
         "series_uid": "1.2.3.4",
-        "proposed_datatype": "anat",
-        "proposed_basename": "sub-001_ses-pre_T1w",
-        "Proposed BIDS name": "anat/sub-001_ses-pre_T1w.nii.gz",
+        "datatype": "anat",
+        "bids_name": "sub-001_ses-pre_T1w",
+        "bids_path": "anat/sub-001_ses-pre_T1w.nii.gz",
         "bids_guess_classifier": "dcm2niix_bidsguess",
         "bids_guess_datatype": "anat",
         "bids_guess_suffix": "T1w",
         "bids_guess_confidence": "0.97",
         "bids_guess_skip": False,
-        "proposed_issues": "",
+        "issues": "",
         "entities": json.dumps(
             {"subject": "001", "session": "pre"},
             sort_keys=True,
@@ -80,9 +80,9 @@ def _ok_row(**overrides) -> dict:
 
 def _func_row(**overrides) -> dict:
     return _ok_row(
-        modality_bids="func",
-        proposed_datatype="func",
-        proposed_basename="sub-001_ses-pre_task-rest_bold",
+        sequence_kind="func",
+        datatype="func",
+        bids_name="sub-001_ses-pre_task-rest_bold",
         Proposed_BIDS_name="func/sub-001_ses-pre_task-rest_bold.nii.gz",
         bids_guess_datatype="func",
         bids_guess_suffix="bold",
@@ -98,13 +98,13 @@ def _func_row(**overrides) -> dict:
 
 def _physio_row(**overrides) -> dict:
     return _ok_row(
-        modality_bids="physio",
-        proposed_datatype="func",
-        proposed_basename="sub-002_ses-post_task-mb_physio",
+        sequence_kind="physio",
+        datatype="func",
+        bids_name="sub-002_ses-post_task-mb_physio",
         bids_guess_suffix="physio",
         bids_guess_confidence="0.99",
         series_uid="5.6.7.8",
-        BIDS_name="sub-002",
+        participant_id="sub-002",
         session="ses-post",
         task="mb",
         # func/physio requires a task entity; keep the entities JSON in sync
@@ -121,9 +121,9 @@ def _physio_row(**overrides) -> dict:
 def _eeg_row(**overrides) -> dict:
     return _ok_row(
         modality="eeg",
-        modality_bids="eeg",
-        proposed_datatype="eeg",
-        proposed_basename="sub-001_task-rest_eeg",
+        sequence_kind="eeg",
+        datatype="eeg",
+        bids_name="sub-001_task-rest_eeg",
         bids_guess_datatype="eeg",
         bids_guess_suffix="eeg",
         source_file="/data/raw/sub-001/eeg/sub-001_task-rest_eeg.edf",
@@ -138,13 +138,13 @@ def _eeg_row(**overrides) -> dict:
 
 def _err_row(**overrides) -> dict:
     return _ok_row(
-        proposed_basename="",
-        proposed_datatype="",
-        proposed_issues="task entity required for func/bold",
+        bids_name="",
+        datatype="",
+        issues="task entity required for func/bold",
         bids_guess_confidence="0.61",
         bids_guess_suffix="bold",
         series_uid="9.10.11.12",
-        BIDS_name="sub-003",
+        participant_id="sub-003",
         session="",
         **overrides,
     )
@@ -154,8 +154,8 @@ def _skip_row(**overrides) -> dict:
     return _ok_row(
         include=0,
         bids_guess_skip=True,
-        proposed_basename="localizer_20ch_head-coil",
-        proposed_datatype="",
+        bids_name="localizer_20ch_head-coil",
+        datatype="",
         bids_guess_confidence="",
         series_uid="13.14.15",
         **overrides,
@@ -219,9 +219,9 @@ def test_modality_scoped_columns_are_editable_where_they_apply() -> None:
     """The other half: an anatomical scan has no power line frequency, but an
     EEG recording does, and the same column must accept the edit there."""
     df = make_df([_ok_row(
-        modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+        modality="eeg", sequence_kind="eeg", datatype="eeg",
         bids_guess_datatype="eeg", bids_guess_suffix="eeg",
-        proposed_basename="sub-001_ses-pre_task-rest_eeg",
+        bids_name="sub-001_ses-pre_task-rest_eeg",
     )])
     model = InventoryTableModel(df)
     for key in ("line_freq", "montage", "eeg_reference", "eeg_ground"):
@@ -234,21 +234,21 @@ def test_bulk_edit_does_not_reach_scanner_derivatives() -> None:
     """REGRESSION: a bulk edit put a line frequency on Siemens localisers.
 
     A scout, a PhoenixZIPReport and a TENSOR map are excluded from conversion
-    and carry NO ``proposed_datatype``, only the classifier's guess. Reading
+    and carry NO ``datatype``, only the classifier's guess. Reading
     the proposed value alone made them look like blank slates, and blank was
     being treated as "every column applies".
     """
     df = make_df([
-        _ok_row(BIDS_name="sub-001", proposed_datatype="eeg", line_freq="",
+        _ok_row(participant_id="sub-001", datatype="eeg", line_freq="",
                 bids_guess_datatype="eeg", bids_guess_suffix="eeg",
-                proposed_basename="sub-001_task-rest_eeg"),
+                bids_name="sub-001_task-rest_eeg"),
         # A localiser: no proposed datatype, guess says anat, not converted.
-        _ok_row(BIDS_name="sub-001", sequence="AAHead_Scout_64ch", line_freq="",
-                proposed_datatype="", bids_guess_datatype="anat",
+        _ok_row(participant_id="sub-001", sequence="AAHead_Scout_64ch", line_freq="",
+                datatype="", bids_guess_datatype="anat",
                 bids_guess_suffix="localizer", include=0),
         # A scanner derivative routed away from the BIDS tree entirely.
-        _ok_row(BIDS_name="sub-001", sequence="dwi_TENSOR", line_freq="",
-                proposed_datatype="", bids_guess_datatype="derivatives",
+        _ok_row(participant_id="sub-001", sequence="dwi_TENSOR", line_freq="",
+                datatype="", bids_guess_datatype="derivatives",
                 bids_guess_suffix="TENSOR", include=0),
     ])
     model = InventoryTableModel(df)
@@ -287,7 +287,7 @@ def test_an_inapplicable_cell_renders_blank_not_inherited() -> None:
 
 
 def test_id_strips_sub_prefix() -> None:
-    df = make_df([_ok_row(BIDS_name="sub-042")])
+    df = make_df([_ok_row(participant_id="sub-042")])
     model = InventoryTableModel(df)
     col = next(i for i, c in enumerate(COLUMNS) if c.key == "id")
     assert model.data(model.index(0, col), Qt.ItemDataRole.DisplayRole) == "042"
@@ -370,7 +370,7 @@ def test_row_state_noimg_for_nonimage_series() -> None:
     df = make_df([_ok_row(
         include=0,
         bids_guess_skip=True,
-        proposed_issues=(
+        issues=(
             "non-image series: the DICOM headers carry no pixel data "
             "(Rows/Columns absent), so dcm2niix cannot convert it. "
             "Excluded from conversion."
@@ -383,7 +383,7 @@ def test_row_state_noimg_for_nonimage_series() -> None:
 def test_status_kind_noimg_for_nonimage_series() -> None:
     df = make_df([_ok_row(
         include=0, bids_guess_skip=True,
-        proposed_issues="non-image series: no pixel data; excluded.",
+        issues="non-image series: no pixel data; excluded.",
     )])
     model = InventoryTableModel(df)
     status_col = next(i for i, c in enumerate(COLUMNS) if c.key == "status")
@@ -455,22 +455,22 @@ def test_live_validation_preserves_static_scan_notes() -> None:
     (suspected_abort, B0 reroute, collision hints, ...)."""
     note = "rerouted to fmap/epi: SeriesDescription contains a B0 marker"
     row = _func_row_missing_task()
-    row["proposed_issues"] = note
+    row["issues"] = note
     df = make_df([row])
     model = InventoryTableModel(df)
     # Loaded: static note + fresh "task required" error coexist.
-    issues = model.dataframe().at[0, "proposed_issues"]
+    issues = model.dataframe().at[0, "issues"]
     assert note in issues and "required" in issues.lower()
     # After the user supplies the task, only the static note remains.
     model.setData(model.index(0, _task_col()), "rest")
-    issues = model.dataframe().at[0, "proposed_issues"]
+    issues = model.dataframe().at[0, "issues"]
     assert issues == note
 
 
 def test_tooltip_surfaces_proposed_issues() -> None:
     """Hovering any cell of a flagged row shows the scanner's reason."""
     df = make_df([_ok_row(
-        proposed_issues="non-image series: no pixel data | trivial: few files",
+        issues="non-image series: no pixel data | trivial: few files",
     )])
     model = InventoryTableModel(df)
     tip = model.data(model.index(0, 1), Qt.ItemDataRole.ToolTipRole)
@@ -480,7 +480,7 @@ def test_tooltip_surfaces_proposed_issues() -> None:
 
 
 def test_no_tooltip_when_no_issues() -> None:
-    df = make_df([_ok_row(proposed_issues="")])
+    df = make_df([_ok_row(issues="")])
     model = InventoryTableModel(df)
     assert model.data(model.index(0, 1), Qt.ItemDataRole.ToolTipRole) is None
 
@@ -534,10 +534,10 @@ def test_editing_task_preserves_run_entity() -> None:
     """
     # Mirror cells deliberately blank, entities holds run+task (real scan shape).
     row = _ok_row(
-        proposed_datatype="func",
+        datatype="func",
         bids_guess_datatype="func",
         bids_guess_suffix="bold",
-        proposed_basename="sub-001_task-dmaging_run-1_bold",
+        bids_name="sub-001_task-dmaging_run-1_bold",
         task="",   # blank mirror cell, as a fresh scan TSV leaves it
         run="",
         session="",
@@ -565,10 +565,10 @@ def test_bulk_edit_task_preserves_run_across_rows() -> None:
     """The same guarantee via the bulk-edit path (``bulk_set``)."""
     rows = [
         _ok_row(
-            proposed_datatype="func",
+            datatype="func",
             bids_guess_datatype="func",
             bids_guess_suffix="bold",
-            proposed_basename=f"sub-001_task-dmaging_run-{n}_bold",
+            bids_name=f"sub-001_task-dmaging_run-{n}_bold",
             task="", run="", session="", series_uid=f"uid-{n}",
             entities=json.dumps(
                 {"subject": "001", "task": "dmaging", "run": str(n)},
@@ -666,6 +666,20 @@ def test_overlay_with_no_matching_row_id_is_safe(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Integration: model inside a real QTableView
 # ---------------------------------------------------------------------------
+#
+# A view does NOT own its model: ``QAbstractItemView::setModel`` takes no
+# ownership, and neither does PyQt. A model held only by a local name is
+# therefore deleted the moment the test function returns, while the view
+# that is still pointing at it lives on under ``qtbot``. pytest-qt then
+# processes the events left over from the test, one of which is the paint
+# the ``show()`` queued, and the delegate asks a destroyed model for its
+# data. That is a segmentation fault in ``CellTextDelegate.paint``, about
+# one run in six, with every test in the file reported as passed first.
+#
+# So the model is made a CHILD of the view. Qt then keeps it alive exactly
+# as long as the thing using it, and destroys them in an order it survives.
+# This is a hazard of holding a model in a local, not of the model: the
+# Converter keeps its own in ``self._model`` and is not affected.
 
 
 def test_checkbox_delegate_toggle_on_click(qtbot) -> None:
@@ -674,8 +688,8 @@ def test_checkbox_delegate_toggle_on_click(qtbot) -> None:
     from PyQt6.QtGui import QMouseEvent
 
     df = make_df([_ok_row(include=1)])
-    model = InventoryTableModel(df)
     view = QTableView()
+    model = InventoryTableModel(df, parent=view)
     view.setModel(model)
     qtbot.addWidget(view)
 
@@ -698,9 +712,9 @@ def test_checkbox_delegate_toggle_on_click(qtbot) -> None:
 
 def test_model_renders_in_real_qtableview(qtbot) -> None:
     df = make_df([_ok_row(), _func_row(), _physio_row(), _err_row(), _skip_row()])
-    model = InventoryTableModel(df)
 
     view = QTableView()
+    model = InventoryTableModel(df, parent=view)
     view.setModel(model)
     qtbot.addWidget(view)
 
@@ -728,12 +742,12 @@ def test_model_renders_in_real_qtableview(qtbot) -> None:
 
 def _eeg_inherit_df() -> pd.DataFrame:
     return pd.DataFrame([
-        {"BIDS_name": "sub-001", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
-         "source_file": "a.edf", "proposed_basename": "sub-001_task-rest_eeg",
+        {"participant_id": "sub-001", "datatype": "eeg", "bids_guess_suffix": "eeg",
+         "source_file": "a.edf", "bids_name": "sub-001_task-rest_eeg",
          "entities": json.dumps({"subject": "001", "task": "rest"}),
          "line_freq": "", "montage": "", "eeg_reference": "", "eeg_ground": "", "include": 1},
-        {"BIDS_name": "sub-002", "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
-         "source_file": "b.edf", "proposed_basename": "sub-002_task-rest_eeg",
+        {"participant_id": "sub-002", "datatype": "eeg", "bids_guess_suffix": "eeg",
+         "source_file": "b.edf", "bids_name": "sub-002_task-rest_eeg",
          "entities": json.dumps({"subject": "002", "task": "rest"}),
          "line_freq": "60", "montage": "", "eeg_reference": "", "eeg_ground": "", "include": 1},
     ])
@@ -886,10 +900,10 @@ def test_four_states_render_distinctly() -> None:
     spec.defaults.eeg_reference = VARIES    # differs per recording
 
     df = make_df([
-        _ok_row(modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+        _ok_row(modality="eeg", sequence_kind="eeg", datatype="eeg",
                 bids_guess_datatype="eeg", bids_guess_suffix="eeg",
                 line_freq="", eeg_reference="",
-                proposed_basename="sub-001_task-rest_eeg"),
+                bids_name="sub-001_task-rest_eeg"),
         _ok_row(line_freq="", eeg_reference=""),  # an anat/T1w row
     ])
     model = InventoryTableModel(df)
@@ -917,9 +931,9 @@ def test_answering_a_varies_field_clears_the_prompt() -> None:
     spec = RecordingMetaSpec()
     spec.defaults.eeg_reference = VARIES
     df = make_df([_ok_row(
-        modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+        modality="eeg", sequence_kind="eeg", datatype="eeg",
         bids_guess_datatype="eeg", bids_guess_suffix="eeg", eeg_reference="",
-        proposed_basename="sub-001_task-rest_eeg",
+        bids_name="sub-001_task-rest_eeg",
     )])
     model = InventoryTableModel(df)
     model.set_global_spec(spec)
@@ -937,11 +951,11 @@ def test_backend_column_names_the_tool_that_will_run() -> None:
     source file and is converted by EcatDirect through nibabel, so the table
     named the wrong tool for every ECAT row."""
     df = make_df([
-        _ok_row(proposed_datatype="pet", bids_guess_datatype="pet",
+        _ok_row(datatype="pet", bids_guess_datatype="pet",
                 bids_guess_suffix="pet", format="ECAT", source_file="Hoffman.v"),
-        _ok_row(proposed_datatype="pet", bids_guess_datatype="pet",
+        _ok_row(datatype="pet", bids_guess_datatype="pet",
                 bids_guess_suffix="pet", format="DICOM", source_file=""),
-        _ok_row(proposed_datatype="eeg", bids_guess_datatype="eeg",
+        _ok_row(datatype="eeg", bids_guess_datatype="eeg",
                 bids_guess_suffix="eeg", format="EEGLAB", source_file="a.set"),
         _ok_row(format="DICOM", source_file=""),                    # anat
         _ok_row(bids_guess_suffix="physio", format="DICOM", source_file=""),
@@ -964,15 +978,15 @@ def test_a_cell_says_which_layer_its_value_came_from() -> None:
 
     spec = RecordingMetaSpec()
     spec.defaults.montage = "standard_1020"
-    spec.modality_defaults["eeg"] = AcquisitionSpec(power_line_freq=50)
+    spec.datatype_defaults["eeg"] = AcquisitionSpec(power_line_freq=50)
     spec.sequence_templates = {"eeg/eeg": {"EEGReference": "Cz"}}
     spec.defaults.eeg_ground = VARIES
 
     df = make_df([_ok_row(
-        modality="eeg", modality_bids="eeg", proposed_datatype="eeg",
+        modality="eeg", sequence_kind="eeg", datatype="eeg",
         bids_guess_datatype="eeg", bids_guess_suffix="eeg", task="rest",
         line_freq="", eeg_reference="", montage="", eeg_ground="",
-        proposed_basename="sub-001_task-rest_eeg",
+        bids_name="sub-001_task-rest_eeg",
     )])
     model = InventoryTableModel(df)
     model.set_global_spec(spec)
@@ -1006,14 +1020,14 @@ def test_the_properties_panel_resolves_per_modality() -> None:
     from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
 
     spec = RecordingMetaSpec()
-    spec.modality_defaults["eeg"] = AcquisitionSpec(manufacturer="Brain Products")
-    spec.modality_defaults["meg"] = AcquisitionSpec(manufacturer="Elekta")
+    spec.datatype_defaults["eeg"] = AcquisitionSpec(manufacturer="Brain Products")
+    spec.datatype_defaults["meg"] = AcquisitionSpec(manufacturer="Elekta")
     spec.sequence_templates = {"eeg/eeg": {"ManufacturersModelName": "actiCHamp"}}
 
     df = make_df([
-        _ok_row(proposed_datatype="eeg", bids_guess_datatype="eeg",
+        _ok_row(datatype="eeg", bids_guess_datatype="eeg",
                 bids_guess_suffix="eeg", source_file="a.set"),
-        _ok_row(proposed_datatype="meg", bids_guess_datatype="meg",
+        _ok_row(datatype="meg", bids_guess_datatype="meg",
                 bids_guess_suffix="meg", source_file="a.fif"),
     ])
     model = InventoryTableModel(df)
@@ -1042,12 +1056,12 @@ def _colliding_rows() -> pd.DataFrame:
     """
     return pd.DataFrame([
         {
-            "BIDS_name": "sub-001", "include": 1, "modality": "eeg",
-            "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
-            "proposed_basename": "sub-001_task-CLV002_eeg",
-            "Proposed BIDS name": "sub-001_task-CLV002_eeg",
+            "participant_id": "sub-001", "include": 1, "modality": "eeg",
+            "datatype": "eeg", "bids_guess_suffix": "eeg",
+            "bids_name": "sub-001_task-CLV002_eeg",
+            "bids_path": "sub-001_task-CLV002_eeg",
             "entities": json.dumps({"subject": "001", "task": "CLV002"}),
-            "proposed_issues": "", "dataset": "study",
+            "issues": "", "dataset": "study",
             "source_file": f"sub-001/{where}/CLV002.set",
             "bids_guess_skip": False, "bids_guess_confidence": "0.9",
             "task": "CLV002", "run": "", "session": "", "series_uid": "",
@@ -1107,7 +1121,7 @@ def test_excluding_one_side_clears_it_too(qtbot) -> None:
 def test_a_new_clash_appears_without_a_rescan(qtbot) -> None:
     """Derived live, so it works in both directions."""
     df = _colliding_rows()
-    df.at[1, "proposed_basename"] = "sub-001_task-video_eeg"
+    df.at[1, "bids_name"] = "sub-001_task-video_eeg"
     df.at[1, "entities"] = json.dumps({"subject": "001", "task": "video"})
     m = InventoryTableModel(df)
     assert m.colliding_rows() == set()
@@ -1123,7 +1137,7 @@ def test_unique_names_are_not_flagged(qtbot) -> None:
     # The entities are the source of truth; the model rebuilds the basename
     # from them, so changing the display cell alone would be undone.
     df.at[1, "entities"] = json.dumps({"subject": "001", "task": "video"})
-    df.at[1, "proposed_basename"] = "sub-001_task-video_eeg"
+    df.at[1, "bids_name"] = "sub-001_task-video_eeg"
     m = InventoryTableModel(df)
     assert m.colliding_rows() == set()
     assert m._row_states[0] != "err"

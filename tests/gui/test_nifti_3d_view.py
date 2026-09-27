@@ -102,8 +102,14 @@ def test_request_gl_format_is_33_core(qapp) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_3d_button_disabled_before_load(qapp, isolated_settings) -> None:
+def test_3d_button_disabled_before_load(qtbot, qapp, isolated_settings) -> None:
     pane = NiftiViewerPane()
+    # Registered with qtbot so Qt destroys it when the test ends.
+    # A widget left to the garbage collector is freed at
+    # interpreter teardown in an order Qt does not survive, and
+    # pytest's own ``gc_collect_harder`` then segfaults with every
+    # test in the file passing.
+    qtbot.addWidget(pane)
     assert pane._td_btn.isEnabled() is False
 
 
@@ -111,6 +117,7 @@ def test_3d_button_enabled_for_3d(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     assert pane._td_btn.isEnabled() is True
 
@@ -119,6 +126,7 @@ def test_3d_button_enabled_for_4d(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _bold(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     assert pane._td_btn.isEnabled() is True
 
@@ -132,6 +140,7 @@ def test_3d_toggle_switches_stack_and_disables_2d_controls(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
 
     pane._td_btn.click()
@@ -163,6 +172,7 @@ def test_3d_toggle_feeds_volume_to_gl_view(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     pane._td_btn.click()
     qapp.processEvents()
@@ -177,6 +187,7 @@ def test_ras_and_radiological_drive_shared_render(
     """The RAS and Radiological toggles fold into one display flip that reaches
     both the 2-D labels and the shared 3-D render."""
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     pane._td_btn.click()
     qapp.processEvents()
@@ -219,6 +230,7 @@ def test_colour_fa_is_3d_capable(
     nib.save(nib.Nifti1Image(rgb, np.diag([2.0, 2.0, 2.0, 1.0])), str(path))
 
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, path, tmp_path, qtbot)
     assert pane._is_rgb is True
     assert pane._is_3d_capable is True
@@ -232,29 +244,45 @@ def test_colour_fa_is_3d_capable(
     assert pane._gl.is_rgb_volume() is True      # uploaded as colour
 
 
-def test_first_scan_opens_in_default_view(
+def test_every_scan_opens_in_the_remembered_view(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
-    """The first volume of a session opens in Multi-Planar 3D with a GPU (plain
-    Multi-Planar without one); later scans keep whatever view the user is in."""
+    """A volume opens in the layout the user last chose. Every volume.
+
+    With nothing remembered yet the pane offers the best this machine can
+    show: the three planes plus the render when there is a GPU. Once the
+    user picks something else, the NEXT volume opens in that instead.
+
+    It used to apply the preference to the first scan of a session only and
+    leave later ones in whatever the pane happened to be in, which is not
+    the same thing as keeping the user's choice: :meth:`_clear` drops the
+    pane back to a single plane between files to free the GPU textures, so
+    "whatever it happened to be in" was a single axial slice.
+    """
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     pane._gpu_ok = True
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
-    assert pane._combo_view is True                 # landed in Multi-Planar 3D
+    assert pane._combo_view is True                 # nothing remembered yet
 
-    # The user picks a different view; a later scan must not override it.
-    pane._set_view_mode("single")
+    # Clicking the toggle is what stores the choice: the preference is
+    # written as the user switches, not at shut-down.
+    pane._tri_btn.click()
     qapp.processEvents()
-    _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
+    assert pane._tri_view is True
     assert pane._combo_view is False
-    assert pane._tri_view is False                  # user's choice persisted
+
+    _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
+    assert pane._tri_view is True                   # honoured by the next scan
+    assert pane._combo_view is False
 
 
-def test_first_scan_default_view_without_gpu(
+def test_default_view_without_gpu(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
     """Without a GPU the default is the 2-D three-plane Multi-Planar view."""
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     pane._gpu_ok = False
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     assert pane._tri_view is True
@@ -265,6 +293,7 @@ def test_3d_and_multiview_mutually_exclusive(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
 
     # Multi view on, then 3D on → Multi view turns off.
@@ -290,6 +319,7 @@ def test_volume_slider_repushes_in_3d(
 ) -> None:
     """Changing the 4-D volume while 3-D is open re-feeds the GL view."""
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _bold(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     pane._td_btn.click()
     qapp.processEvents()
@@ -303,6 +333,7 @@ def test_set_file_none_clears_3d(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     pane._td_btn.click()
     qapp.processEvents()
@@ -321,6 +352,7 @@ def test_orientation_shortcut_exits_3d(
     from bidsmgr.gui.widgets.nifti_viewer_pane import _AXIS_SAGITTAL
 
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     pane._td_btn.click()
     qapp.processEvents()
@@ -410,6 +442,7 @@ def test_slicer_shortcuts(
 ) -> None:
     """Shift+Y/A/S/C/X drive the clip plane and stay in sync with the panel."""
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     pane._td_btn.click()
     qapp.processEvents()
@@ -801,7 +834,7 @@ def test_render_background_is_black(qapp) -> None:
     assert w._bg == (0.0, 0.0, 0.0)
 
 
-def test_controls_column_is_opaque(qapp, isolated_settings) -> None:
+def test_controls_column_is_opaque(qtbot, qapp, isolated_settings) -> None:
     """Regression: the black image canvas showed through the 3-D controls
     scroll gutter as a stripe. Every layer of that column must be nameable by
     the stylesheet so it paints the panel colour."""
@@ -813,6 +846,7 @@ def test_controls_column_is_opaque(qapp, isolated_settings) -> None:
     assert controls.objectName() == "nifti-3d-controls"
 
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     if not pane._gpu_ok:
         return                                    # 3-D pages are not built
     pane._ensure_gl()
@@ -855,6 +889,7 @@ def test_ortho3d_enabled_for_3d(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     assert pane._quad_btn.isEnabled() is True
 
@@ -863,6 +898,7 @@ def test_ortho3d_toggle_shows_grid_and_keeps_slice_controls(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     # The first scan of a session lands in a GPU-dependent default view; start
     # from a known state so clicking the toggle below always turns it ON.
@@ -890,6 +926,7 @@ def test_three_3d_modes_mutually_exclusive(
     qapp, qtbot, bids_root_with_nifti, isolated_settings,
 ) -> None:
     pane = NiftiViewerPane()
+    qtbot.addWidget(pane)
     _load_and_wait(pane, _t1(bids_root_with_nifti), bids_root_with_nifti, qtbot)
     # Known starting point — see the session-default view above.
     pane._set_view_mode("single")

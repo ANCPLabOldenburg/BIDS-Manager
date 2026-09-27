@@ -258,6 +258,36 @@ class TestPathBudget:
         assert "%j" not in basename
         assert len(basename) < 12
 
+    def test_the_bidsguess_classifier_does_not_spend_a_uid_either(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The third call site, and the one that was missed.
+
+        ``converter/backends/dcm2niix_direct`` and ``inventory/probe_convert``
+        both avoid ``%j``; ``classifier/dcm2niix_bidsguess`` still passed it,
+        so on Windows the classifier is the one that dies. It reads
+        ``SeriesInstanceUID`` from INSIDE the JSON, so the filename never
+        needed to carry it.
+        """
+        from bidsmgr.classifier import dcm2niix_bidsguess
+
+        captured: dict = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(dcm2niix_bidsguess.subprocess, "run", fake_run)
+        dcm2niix_bidsguess._run_dcm2niix_sidecars(
+            tmp_path, tmp_path, dcm2niix_bin=Path("dcm2niix"),
+        )
+
+        cmd = captured["cmd"]
+        basename = cmd[cmd.index("-f") + 1]
+        assert "%j" not in basename
+        assert len(basename) < 12
+
+
     def test_probe_rows_builds_a_hashed_series_directory(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ):
@@ -272,7 +302,7 @@ class TestPathBudget:
         monkeypatch.setattr(probe_convert, "find_dcm2niix", lambda: Path("dcm2niix"))
 
         row = SimpleNamespace(
-            modality="mri", series_uid=self.UID, fine_modality="bold",
+            modality="mri", series_uid=self.UID, sequence_kind="bold",
             subject_hint="001",
         )
         probe_convert.probe_rows(
@@ -299,3 +329,54 @@ def test_os_is_imported_for_the_windows_branch():
     """``find_dcm2niix`` reads ``os.name``; a missing import would only show on
     the branch that runs on Windows, which no CI runner exercises."""
     assert dcm2niix_bidsguess.os is os
+
+
+class TestADeadConverterIsLoud:
+    """The failure mode CROSS_PLATFORM_RULES names first: silence.
+
+    dcm2niix dying past MAX_PATH writes nothing to stderr, so an empty
+    sidecar list reached the classifier chain, which reads "no results" as
+    "no opinion". The scan then reported success having classified nothing,
+    and the user saw a feature that had stopped working with no error
+    anywhere to point at.
+    """
+
+    def test_no_sidecars_for_rows_is_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog,
+    ):
+        import logging
+
+        from bidsmgr.classifier import dcm2niix_bidsguess
+        from bidsmgr.inventory.types import InventoryRow
+
+        monkeypatch.setattr(
+            dcm2niix_bidsguess, "_run_dcm2niix_sidecars",
+            lambda *a, **k: SimpleNamespace(
+                returncode=3221226505, stdout="", stderr="",
+            ),
+        )
+        rows = [InventoryRow(modality="mri", source=tmp_path, series_uid="1.2.3")]
+        with caplog.at_level(logging.WARNING):
+            out = dcm2niix_bidsguess.classify_dicom_folder(tmp_path, rows)
+
+        assert out == []
+        assert caplog.records, "a dead dcm2niix must not pass unremarked"
+        message = caplog.text
+        assert "NO sidecars" in message
+        assert "0xC0000409" in message, "the exit code is named, not just printed"
+
+    def test_a_clean_run_with_no_rows_says_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog,
+    ):
+        """Only a folder that HAD series to classify is worth a warning."""
+        import logging
+
+        from bidsmgr.classifier import dcm2niix_bidsguess
+
+        monkeypatch.setattr(
+            dcm2niix_bidsguess, "_run_dcm2niix_sidecars",
+            lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        )
+        with caplog.at_level(logging.WARNING):
+            dcm2niix_bidsguess.classify_dicom_folder(tmp_path, [])
+        assert not caplog.records

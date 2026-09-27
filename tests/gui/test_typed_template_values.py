@@ -199,7 +199,7 @@ def test_a_typed_sequence_template_field_reaches_the_sidecar(
     inventory_frame = pd.DataFrame([{
         "source_file": "raw/a.edf", "modality": "eeg", "datatype": "eeg",
         "suffix": "eeg", "task": "rest", "include": "1",
-        "proposed_basename": "sub-01_task-rest_eeg",
+        "bids_name": "sub-01_task-rest_eeg",
     }])
     spec = RecordingMetaSpec()
     spec.sequence_templates = dict(tree.values_by_key())

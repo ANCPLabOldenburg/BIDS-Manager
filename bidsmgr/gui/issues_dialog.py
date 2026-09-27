@@ -253,8 +253,8 @@ class IssuesDialog(QDialog):
                 label = f"{label}  ·  {bn}"
 
             issues_text = ""
-            if "proposed_issues" in df.columns:
-                issues_text = str(df.at[row, "proposed_issues"] or "").strip()
+            if "issues" in df.columns:
+                issues_text = str(df.at[row, "issues"] or "").strip()
             parts = [p.strip() for p in issues_text.split(" | ") if p.strip()]
 
             card = _RowCard(row, label, parts, severity)

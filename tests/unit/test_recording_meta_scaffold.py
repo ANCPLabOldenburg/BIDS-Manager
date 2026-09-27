@@ -15,14 +15,14 @@ def _eeg_df(event_codes, manufacturer="", model=""):
     return pd.DataFrame([
         {
             "source_file": "sub-001/rec.edf",
-            "proposed_datatype": "eeg",
+            "datatype": "eeg",
             "_event_codes": json.dumps(event_codes),
             "_manufacturer": manufacturer,
             "_model": model,
         },
         {
             "source_file": "sub-002/rec.edf",
-            "proposed_datatype": "eeg",
+            "datatype": "eeg",
             "_event_codes": json.dumps(event_codes),
             "_manufacturer": manufacturer,
             "_model": model,

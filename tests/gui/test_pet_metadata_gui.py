@@ -42,9 +42,9 @@ def _dialog(tmp_path, present):
 
 def _pet_row(**extra) -> dict:
     row = {
-        "BIDS_name": "sub-001", "subject": "phantom", "include": 1,
+        "participant_id": "sub-001", "subject": "phantom", "include": 1,
         "sequence": "PET_Brain_AC_TOF", "series_uid": "1.2.3",
-        "proposed_datatype": "pet", "proposed_basename": "sub-001_pet",
+        "datatype": "pet", "bids_name": "sub-001_pet",
         "bids_guess_datatype": "pet", "bids_guess_suffix": "pet",
         "entities": '{"subject": "001"}',
         "tracer_suggestion": "FDG", "radionuclide_suggestion": "F18",
@@ -167,8 +167,8 @@ def test_properties_panel_renders_a_pet_row(qtbot) -> None:
 
 def test_properties_panel_still_renders_an_mri_row(qtbot) -> None:
     """REGRESSION: the PET branch must not disturb the MRI path."""
-    row = _pet_row(proposed_datatype="anat", bids_guess_datatype="anat",
-                   bids_guess_suffix="T1w", proposed_basename="sub-001_T1w")
+    row = _pet_row(datatype="anat", bids_guess_datatype="anat",
+                   bids_guess_suffix="T1w", bids_name="sub-001_T1w")
     model = InventoryTableModel(pd.DataFrame([row]))
     panel = PropertiesPanel()
     qtbot.addWidget(panel)

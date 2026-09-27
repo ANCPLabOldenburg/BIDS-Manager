@@ -53,3 +53,32 @@ def isolated_settings(tmp_path: Path) -> Iterator[None]:
         QCoreApplication.setOrganizationName(orig_org)
         QCoreApplication.setApplicationName(orig_app)
         QSettings.setDefaultFormat(orig_default)
+
+
+def open_every_folder(tree) -> None:
+    """Draw every row in a lazy tree, then put the folds back as they were.
+
+    Both file trees draw a folder's contents when the folder is OPENED, so a
+    test that wants to see a deep row has to open its way down, as a user
+    does. ``QTreeWidget.expandAll`` is not enough on its own: it expands the
+    rows that exist when it is called, and the rows it creates by doing so
+    are left folded.
+
+    The fold state is restored because several tests assert that what the
+    user had open survived a refresh, and a helper that left the tree
+    expanded would be answering its own question.
+    """
+    was_open: list = []
+
+    def visit(item) -> None:
+        if item.childCount():
+            if not item.isExpanded():
+                was_open.append(item)
+            item.setExpanded(True)
+        for i in range(item.childCount()):
+            visit(item.child(i))
+
+    for i in range(tree.topLevelItemCount()):
+        visit(tree.topLevelItem(i))
+    for item in was_open:
+        item.setExpanded(False)

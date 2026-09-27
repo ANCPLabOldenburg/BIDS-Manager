@@ -62,6 +62,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..inventory.rebuild import InventoryVersionError
 from ..project import Project, ScanImported, StageCompleted
 from ..workers import ConvertWorker, MetadataWorker, ScanWorker, ValidateWorker
 from . import icons
@@ -82,6 +83,13 @@ from .raw_fs_pane import RawFsPane
 from .widgets import BusySpinner, Chip, PaneHeader, PanelFrame, PathBar, VSep
 
 log = logging.getLogger(__name__)
+
+
+#: Room a header needs beyond its text: the cell margins either side plus
+#: the sort indicator Qt draws inside the section. In pixels because Qt
+#: section widths are, but the TEXT is measured with font metrics, so this
+#: stays right at any font scale (see cross-platform rule 4.1).
+_HEADER_PADDING_PX = 26
 
 
 def _repolish_combo(combo: QComboBox) -> None:
@@ -500,7 +508,17 @@ class ConverterPanel(QWidget):
                 )
         # The model is rebuilt with this version's project, so its event overlay
         # (cell / entity / include edits) replays automatically.
-        self.load_inventory(df, output_tsv=version.inventory)
+        try:
+            self.load_inventory(df, output_tsv=version.inventory)
+        except InventoryVersionError as exc:
+            # A scan saved before the columns were renamed. Say what to do
+            # rather than letting a KeyError out of a slot, which PyQt turns
+            # into an abort.
+            self.log_message.emit(str(exc))
+            QMessageBox.information(
+                self, "This scan needs re-running", str(exc),
+            )
+            return
         self.log_message.emit(f"Resumed scan '{version.version_id}'")
 
     def _refresh_scans_combo(self) -> None:
@@ -681,6 +699,7 @@ class ConverterPanel(QWidget):
         skip_bids_guess: bool = False,
         user_hints=None,
         exclusions=None,
+        index_widths=None,
     ) -> ScanWorker:
         """Kick off a background scan.
 
@@ -721,6 +740,7 @@ class ConverterPanel(QWidget):
             skip_bids_guess=skip_bids_guess,
             user_hints=user_hints,
             exclusions=exclusions,
+            index_widths=index_widths,
             parent=self,
         )
         worker.progress.connect(self._on_progress)
@@ -892,10 +912,10 @@ class ConverterPanel(QWidget):
         self._meta_btn = QPushButton("  Dataset metadata…")
         self._meta_btn.setObjectName("tb-btn")
         self._meta_btn.setToolTip(
-            "Edit dataset-wide metadata grouped by destination: modality-agnostic "
-            "sections (events -> events.tsv, phenotype -> phenotype/) plus "
-            "EEG/MEG-specific acquisition defaults (-> the datatype sidecar). "
-            "Saved beside the inventory."
+            "Edit dataset-wide metadata grouped by where it is written: the "
+            "parts that apply to every datatype (events -> events.tsv, "
+            "phenotype -> phenotype/) plus the EEG/MEG acquisition defaults "
+            "(-> the datatype sidecar). Saved beside the inventory."
         )
         self._meta_btn.clicked.connect(self._open_recording_meta)
         # Disabled until a scan loads EEG/MEG rows (it is EEG/MEG-only metadata).
@@ -1048,13 +1068,36 @@ class ConverterPanel(QWidget):
         header = self._table.horizontalHeader()
         # Every column Interactive (user-resizable); seed a sensible width.
         # No per-column Stretch mode -- ``stretchLastSection`` fills any
-        # leftover space, so each column (incl. the predicted-basename one)
-        # can be freely shrunk or widened.
+        # leftover space, so each column (incl. the BIDS-name one) can be
+        # freely shrunk or widened.
         for col, spec in enumerate(COLUMNS):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
-            self._table.setColumnWidth(col, spec.width)
+            self._table.setColumnWidth(col, self._seed_width(spec))
         self._apply_column_visibility()
         self._restore_column_order()
+
+    def _seed_width(self, spec) -> int:
+        """A column's start width, never narrower than its own header.
+
+        The widths were written as numbers, and a number cannot know how
+        wide the text will be: at the app's 1.15x font scale, and on a
+        Windows or Linux desktop with a different default font and DPI, half
+        the headers came up clipped to two or three letters. A column whose
+        title you cannot read is a column you cannot use.
+
+        Measured with the header's own font metrics rather than assumed, so
+        it is right at any font scale on any platform, and taken as a FLOOR
+        so the hand-picked widths still win wherever they are wider.
+        """
+        header = self._table.horizontalHeader()
+        text = spec.header
+        if not text:
+            return spec.width          # the checkbox and status columns
+        metrics = header.fontMetrics()
+        # Padding for the cell margins plus room for the sort indicator,
+        # which Qt draws inside the section.
+        needed = metrics.horizontalAdvance(text) + _HEADER_PADDING_PX
+        return max(spec.width, needed)
 
     def _table_resize_column_to_contents(self, logical_index: int) -> None:
         """Auto-fit a column to its contents on header-handle double-click.
@@ -1102,7 +1145,7 @@ class ConverterPanel(QWidget):
             # (Qt collapses hidden interactive sections). Re-seed its width
             # so it shows up draggable rather than as a hairline.
             if visible and self._table.columnWidth(col) <= 0:
-                self._table.setColumnWidth(col, spec.width)
+                self._table.setColumnWidth(col, self._seed_width(spec))
 
     def set_column_visible(self, key: str, visible: bool) -> None:
         """Toggle a column's visibility + persist the choice."""
@@ -1130,12 +1173,15 @@ class ConverterPanel(QWidget):
         dlg = ColumnManagerDialog(dict(self._column_visible), self)
         if dlg.exec() == dlg.DialogCode.Accepted:
             self.set_columns_visible(dlg.result_visibility())
+            if dlg.order_was_reset():
+                self.reset_column_order()
 
     def _open_recording_meta(self) -> None:
         """Open the dataset-level recording-metadata editor.
 
-        Covers EEG/MEG and PET plus the modality-agnostic sections; the dialog
-        shows only the blocks whose modality the scan actually found.
+        Covers EEG/MEG and PET plus the sections that apply to every
+        datatype; the dialog shows only the blocks whose datatype the scan
+        actually found.
 
         Edits the scaffold beside the inventory TSV (the same file the scan
         seeds and the convert verb auto-discovers). Requires a loaded scan so
@@ -1225,13 +1271,13 @@ class ConverterPanel(QWidget):
             log.warning("could not persist recording-metadata scaffold", exc_info=True)
 
     def _present_datatypes(self) -> set[str]:
-        """The set of ``proposed_datatype`` values across the loaded model."""
+        """The set of ``datatype`` values across the loaded model."""
         if self._model is None:
             return set()
         df = self._model.dataframe()
-        if "proposed_datatype" not in df.columns:
+        if "datatype" not in df.columns:
             return set()
-        return {str(v).strip().lower() for v in df["proposed_datatype"] if str(v).strip()}
+        return {str(v).strip().lower() for v in df["datatype"] if str(v).strip()}
 
     def _montage_suggestions(self) -> list[str]:
         """Distinct per-recording montage suggestions found at scan (for the
@@ -1277,7 +1323,8 @@ class ConverterPanel(QWidget):
     def _update_meta_button_state(self) -> None:
         """Enable the Dataset-metadata button whenever an inventory is loaded.
 
-        The dialog has modality-agnostic sections (events, phenotype) that
+        The dialog has sections that apply to every datatype (events,
+        phenotype) that
         apply to any dataset; the EEG/MEG-specific sections inside it are gated
         by the scanned datatypes.
         """
@@ -1302,18 +1349,54 @@ class ConverterPanel(QWidget):
         keys = [COLUMNS[logical].key for logical in ordered]
         self._settings().setValue("inspector/column_order", ",".join(keys))
 
+    def default_column_order(self) -> list[str]:
+        """The order the table opens in: the seven a person reads first.
+
+        ``include`` and ``status`` stay where they are, at the very left,
+        because they are the tick and the badge the eye goes to and a text
+        column in front of them buries both.
+        """
+        leading = [
+            k for k in InventoryTableModel.DEFAULT_LEADING_KEYS
+            if any(c.key == k for c in COLUMNS)
+        ]
+        pinned = [c.key for c in COLUMNS if c.role in ("checkbox", "status")]
+        rest = [
+            c.key for c in COLUMNS
+            if c.key not in leading and c.key not in pinned
+        ]
+        return pinned + leading + rest
+
+    def reset_column_order(self) -> None:
+        """Put the leading columns back at the front, keeping the rest.
+
+        Offered as "Reset defaults" rather than applied silently, because a
+        user who has arranged their own layout has said something about how
+        they work and a release should not overrule it.
+        """
+        self._apply_column_order(self.default_column_order())
+        self._persist_column_order()
+
     def _restore_column_order(self) -> None:
-        """Re-apply the persisted visual order to the header (if any)."""
+        """Re-apply the persisted visual order, or the default first time."""
         raw = self._settings().value("inspector/column_order", "")
         if not raw:
+            # No stored layout: this is a fresh install or a fresh profile,
+            # so the table opens in the order that reads best rather than in
+            # the order the inventory happens to be built in.
+            self._apply_column_order(self.default_column_order())
             return
         saved = [k for k in str(raw).split(",") if k]
+        self._apply_column_order(saved)
+
+    def _apply_column_order(self, keys: list[str]) -> None:
+        """Move the header sections so they read in ``keys`` order."""
         key_to_logical = {spec.key: i for i, spec in enumerate(COLUMNS)}
         header = self._table.horizontalHeader()
         self._restoring_order = True
         try:
             target_visual = 0
-            for key in saved:
+            for key in keys:
                 logical = key_to_logical.get(key)
                 if logical is None:
                     continue
@@ -1453,11 +1536,11 @@ class ConverterPanel(QWidget):
                     included = True
             if not included:
                 continue
-            basename = str(df.at[idx, "proposed_basename"] or "")
+            basename = str(df.at[idx, "bids_name"] or "")
             if not basename:
                 continue
-            datatype = str(df.at[idx, "proposed_datatype"] or "")
-            subject = str(df.at[idx, "BIDS_name"] or "")
+            datatype = str(df.at[idx, "datatype"] or "")
+            subject = str(df.at[idx, "participant_id"] or "")
             session = str(df.at[idx, "session"] or "")
             dataset = str(df.at[idx, "dataset"] or "") if "dataset" in df.columns else ""
 
@@ -1494,10 +1577,10 @@ class ConverterPanel(QWidget):
         df = self._model.dataframe()
         n_rows = len(df)
         # Unique subjects + sessions across all rows.
-        subs = sorted({str(s) for s in df.get("BIDS_name", []) if s})
+        subs = sorted({str(s) for s in df.get("participant_id", []) if s})
         ses = sorted({
             f"{s}/{x}" for s, x in zip(
-                df.get("BIDS_name", []), df.get("session", []),
+                df.get("participant_id", []), df.get("session", []),
             ) if s and x
         })
         self._stats_label.setText(
@@ -1572,6 +1655,7 @@ class ConverterPanel(QWidget):
             skip_bids_guess=s.scan_skip_bids_guess,
             user_hints=s.to_user_hints(),
             exclusions=s.to_exclusions(),
+            index_widths=s.scan_index_widths,
         )
 
     def _on_tsv_filename_edited(self) -> None:
@@ -2006,6 +2090,14 @@ class ConverterPanel(QWidget):
         from .bulk_edit_dialog import BulkEditDialog
         dlg = BulkEditDialog(self._model, rows, parent=self)
         dlg.exec()
+        # A removal applies row by row, so some rows can be left alone. Say
+        # so: "24 rows changed" must never quietly mean "and 6 were not".
+        skipped = dlg.skipped_count()
+        if skipped:
+            self._log_view.appendPlainText(
+                f"Bulk edit: {dlg.changed_count()} row(s) changed, {skipped} "
+                f"kept the entity because their datatype requires it."
+            )
         # Status chips + previews refresh via the model's dataChanged
         # signal — the dispatcher's per-row writes already trigger them.
 
@@ -2061,7 +2153,7 @@ class ConverterPanel(QWidget):
         clashing subject (e.g. sub-001 -> sub-002) and clicks Re-validate -- the
         stale "sub-001 ... DIFFERENT subject" note no longer lingers.
 
-        Routes through the warnings system (a non-fatal proposed_issues note ->
+        Routes through the warnings system (a non-fatal issues note ->
         warn row -> warnings chip / Issues dialog). When participants.tsv carries
         identity (PatientID / names), the note is precise -- same subject (and
         whether this is a new session), a possible match (one field coincides),
@@ -2069,7 +2161,7 @@ class ConverterPanel(QWidget):
         otherwise it degrades to a generic heads-up. The merge-aware commit keeps
         existing data safe regardless.
         """
-        if "proposed_issues" not in df.columns:
+        if "issues" not in df.columns:
             return
         from ..inventory import dataset_identity as di
 
@@ -2078,16 +2170,16 @@ class ConverterPanel(QWidget):
         # 1) Strip any stale collision note from EVERY row so a rename / re-scan
         #    starts from a clean slate (the note bakes in the old id).
         for i in df.index:
-            cur = str(df.at[i, "proposed_issues"] or "")
+            cur = str(df.at[i, "issues"] or "")
             if token not in cur:
                 continue
             kept = [
                 seg.strip() for seg in cur.split(" | ")
                 if seg.strip() and not seg.strip().startswith(token)
             ]
-            df.at[i, "proposed_issues"] = " | ".join(kept)
+            df.at[i, "issues"] = " | ".join(kept)
 
-        if self._bids_root is None or "BIDS_name" not in df.columns:
+        if self._bids_root is None or "participant_id" not in df.columns:
             return
         existing = {p.name for p in self._bids_root.glob("sub-*") if p.is_dir()}
         if not existing:
@@ -2101,7 +2193,7 @@ class ConverterPanel(QWidget):
 
         # 2) Re-add a fresh, tagged note to rows whose current id is on disk.
         for i in df.index:
-            name = _cell(i, "BIDS_name")
+            name = _cell(i, "participant_id")
             if not name or name not in existing:
                 continue
             scanned = {
@@ -2116,8 +2208,8 @@ class ConverterPanel(QWidget):
                 name, scanned, session, identities.get(name),
                 sessions_cache[name], next_free,
             )
-            cur = str(df.at[i, "proposed_issues"] or "").strip()
-            df.at[i, "proposed_issues"] = f"{cur} | {note}" if cur else note
+            cur = str(df.at[i, "issues"] or "").strip()
+            df.at[i, "issues"] = f"{cur} | {note}" if cur else note
 
     @staticmethod
     def _collect_row_ids(df: pd.DataFrame) -> list[str]:

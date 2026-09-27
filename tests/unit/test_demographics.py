@@ -76,7 +76,7 @@ def test_handedness_flows_from_inventory_to_participants(tmp_path):
     (bids_root / "sub-001").mkdir(parents=True)
     inv = tmp_path / "inv.tsv"
     inv.write_text(
-        "BIDS_name\tPatientSex\tHandedness\tPatientAge\n"
+        "participant_id\tPatientSex\tHandedness\tPatientAge\n"
         "sub-001\tmale\tright\t29\n",
         encoding="utf-8",
     )
@@ -96,7 +96,7 @@ def test_participants_file_overrides_inventory(tmp_path):
     bids_root = tmp_path / "ds"
     (bids_root / "sub-001").mkdir(parents=True)
     inv = tmp_path / "inv.tsv"
-    inv.write_text("BIDS_name\tHandedness\nsub-001\tleft\n", encoding="utf-8")
+    inv.write_text("participant_id\tHandedness\nsub-001\tleft\n", encoding="utf-8")
     pfile = tmp_path / "participants_src.tsv"
     pfile.write_text("participant_id\thandedness\nsub-001\tright\n", encoding="utf-8")
 

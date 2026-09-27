@@ -34,7 +34,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
+from PyQt6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    Qt,
+    QThreadPool,
+    pyqtSignal,
+)
 
 from ... import schema as schema_mod
 from ...inventory.rebuild import rebuild_from_columns, rebuild_from_entities
@@ -160,7 +166,7 @@ _PET_NUMERIC_FIELDS: frozenset[str] = frozenset({
 # Live entity-validation (re-runs on every user edit)
 # ---------------------------------------------------------------------------
 #
-# ``proposed_issues`` carries two kinds of note. *Static* notes describe the
+# ``issues`` carries two kinds of note. *Static* notes describe the
 # source and cannot change once scanned (suspected_abort, B0 reroute, fmap
 # multi-output, non-image series, user-excluded, mixed-study / collision
 # hints). *Managed* notes are the schema entity-validation issues derived from
@@ -179,7 +185,7 @@ _MANAGED_ISSUE_PREFIXES: tuple[str, ...] = (
     "build_basename",
 )
 # Managed notes that carry no ``": "`` separator.
-_MANAGED_ISSUE_EXACT: frozenset[str] = frozenset({"BIDS_name missing"})
+_MANAGED_ISSUE_EXACT: frozenset[str] = frozenset({"participant_id missing"})
 
 # Sentinel values the scan inserts for a missing required entity (see
 # ``cli/scan._placeholder_for_entity``). Live validation treats them as still
@@ -232,19 +238,24 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     # Mandatory (cannot be hidden by the user — they're the row identity).
     ColumnSpec("include",   "",                       "checkbox", True,  28),
     ColumnSpec("status",    "",                       "status",   False, 28),
-    ColumnSpec("id",        "id",                     "mono",     False, 50, df_column="BIDS_name"),
+    ColumnSpec("id",        "subject",                "mono",     False, 80, df_column="participant_id"),
     # Default-visible curated set.
     # Read-only: the dataset name is owned by the project (the locked output
     # folder). Editing it by hand would point conversion at the wrong folder,
     # so it is informative only and excluded from bulk edits.
     ColumnSpec("dataset",   "dataset",                "plain",    False, 100, df_column="dataset"),
-    ColumnSpec("ses",       "ses",                    "mono",     True,  50, df_column="session"),
-    ColumnSpec("mod",       "mod",                    "plain",    False, 38, df_column="modality"),
-    ColumnSpec("datatype",  "data",                   "plain",    True,  50, df_column="proposed_datatype"),
-    ColumnSpec("suffix",    "suffix",                 "plain",    True,  80, df_column="bids_guess_suffix"),
-    ColumnSpec("task",      "task",                   "plain",    True,  60, df_column="task"),
-    ColumnSpec("run",       "run",                    "mono",     True,  50, df_column="run"),
-    ColumnSpec("conf",      "conf",                   "conf",     False, 50, df_column="bids_guess_confidence"),
+    ColumnSpec("ses",       "session",                "mono",     True,  80, df_column="session"),
+    # MODALITY is how the data was acquired (mri, eeg, meg, pet) and
+    # DATATYPE is the BIDS folder it lands in (anat, func, eeg). They were
+    # headed "mod" and "data", which is not the same word shortened: it is
+    # two different facts, both abbreviated past the point of telling them
+    # apart.
+    ColumnSpec("mod",       "modality",               "plain",    False, 80, df_column="modality"),
+    ColumnSpec("datatype",  "datatype",               "plain",    True,  90, df_column="datatype"),
+    ColumnSpec("suffix",    "suffix",                 "plain",    True,  90, df_column="bids_guess_suffix"),
+    ColumnSpec("task",      "task",                   "plain",    True,  80, df_column="task"),
+    ColumnSpec("run",       "run",                    "mono",     True,  60, df_column="run"),
+    ColumnSpec("conf",      "confidence",             "conf",     False, 90, df_column="bids_guess_confidence"),
     # WHERE a row came from, WHAT it was read from, and WHAT the scanner called
     # it. These were three different answers hiding behind one header: the old
     # "sequence / source" column carried only the sequence name, source_folder
@@ -253,7 +264,12 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("source_folder", "origin",             "plain",    False, 160, df_column="source_folder"),
     ColumnSpec("format",    "format",                 "mono",     False, 80,  df_column="format"),
     ColumnSpec("sequence",  "sequence",               "mono",     False, 200, df_column="sequence"),
-    ColumnSpec("basename",  "predicted basename",     "basename", False, 320, stretch=True, df_column="proposed_basename"),
+    ColumnSpec("basename",  "BIDS name",              "basename", False, 320, stretch=True, df_column="bids_name"),
+    # What the classifier recognised the sequence AS. It used to be written
+    # into the modality column, which is how a T1 came to report its
+    # modality as "T1w".
+    ColumnSpec("sequence_kind", "recognised as", "plain", False, 120,
+               df_column="sequence_kind", default_visible=False),
     # Default-hidden — show via the column-visibility menu.
     ColumnSpec("backend",      "backend",     "mono",  False, 90,  default_visible=False),
     ColumnSpec("source_file",  "source file", "mono",  False, 220, df_column="source_file", default_visible=False),
@@ -279,7 +295,7 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("probe_n_nifti","probe_nifti", "mono",  False, 80,  df_column="probe_n_nifti", default_visible=False),
     ColumnSpec("probe_n_vols", "probe_vols",  "mono",  False, 70,  df_column="probe_n_volumes", default_visible=False),
     ColumnSpec("repetition_type","repetition","plain", False, 110, df_column="repetition_type", default_visible=False),
-    ColumnSpec("proposed_issues","issues",    "plain", False, 240, df_column="proposed_issues", default_visible=False),
+    ColumnSpec("issues","issues",    "plain", False, 240, df_column="issues", default_visible=False),
 )
 
 # Columns the user cannot hide (lose them and rows become unidentifiable).
@@ -292,19 +308,20 @@ MANDATORY_COLUMN_KEYS: frozenset[str] = frozenset({"include", "status", "id"})
 COLUMN_DESCRIPTIONS: dict[str, str] = {
     "include":   "Whether this row is converted. Untick to skip the series.",
     "status":    "At-a-glance state badge: ok, warning, error, skipped, non-image, or physio.",
-    "id":        "Subject label (sub-XXX) the row converts under.",
+    "id":        "Participant this row converts under, as sub-XXX.",
     "dataset":   "BIDS dataset slug. Rows with different datasets become sibling BIDS roots.",
-    "ses":       "Session label (ses-XXX). Blank when the study has no sessions.",
-    "mod":       "Detected modality (mri, eeg, meg, physio, ...).",
-    "datatype":  "BIDS datatype folder the row lands in (anat, func, dwi, fmap, eeg, ...).",
+    "ses":       "Session this row converts under, as ses-XXX. Blank when the study has no sessions.",
+    "mod":       "How the data was acquired: mri, eeg, meg, pet, nirs. Not the same as the datatype.",
+    "datatype":  "The BIDS folder the row lands in: anat, func, dwi, fmap, eeg, meg, pet. An MRI acquisition can land in any of the first four.",
+    "sequence_kind": "What the classifier recognised the sequence as: T1w, bold, dwi, fieldmap, scout. MRI only.",
     "suffix":    "BIDS suffix (T1w, bold, dwi, physio, ...).",
     "task":      "Task entity (task-XXX) for func / eeg / meg rows.",
     "run":       "Run index (run-N) when a series was repeated.",
-    "conf":      "Classifier confidence (0-1) for the predicted datatype + suffix.",
+    "conf":      "How sure the classifier is about the datatype and suffix, from 0 to 1.",
     "source_folder": "Where the row came from: the folder inside the raw tree that holds its files.",
     "format":    "What the row was read from: DICOM, ECAT, FIF, EDF, BrainVision, EEGLAB, CTF.",
     "sequence":  "Scanner sequence name used for classification. Empty for formats that do not name one.",
-    "basename":  "Full predicted BIDS filename (without extension).",
+    "basename":  "The BIDS filename this row will be written as, without its extension. Edit the entity columns to change it.",
     "backend":   "Converter backend that will handle the row: dcm2niix, mne-bids, ecat, or bidsphysio.",
     "source_file": "Source recording path (EEG / MEG). Blank for DICOM rows.",
     "n_files":   "Number of source files in the series.",
@@ -329,7 +346,7 @@ COLUMN_DESCRIPTIONS: dict[str, str] = {
     "probe_n_nifti": "NIfTI files dcm2niix actually produced in a --probe-convert run.",
     "probe_n_vols":  "Volumes dcm2niix actually produced in a --probe-convert run.",
     "repetition_type": "Repeat classification, e.g. suspected_abort (operator restart).",
-    "proposed_issues": "Scanner-detected notes: non-image series, B0 reroute, missing entity, ...",
+    "issues": "Scanner-detected notes: non-image series, B0 reroute, missing entity, ...",
 }
 
 
@@ -398,7 +415,7 @@ class InventoryTableModel(QAbstractTableModel):
         # cells up front means a later single-cell edit only ever changes the
         # field the user actually touched; every other entity is preserved.
         # This matches what ``cli/convert.py`` does in memory before reading
-        # rows. Idempotent: ``proposed_basename`` is rebuilt from the same
+        # rows. Idempotent: ``bids_name`` is rebuilt from the same
         # entities, so a well-formed scan TSV is unchanged.
         rebuild_from_entities(self._df, in_place=True)
 
@@ -407,7 +424,7 @@ class InventoryTableModel(QAbstractTableModel):
         if project is not None:
             self._apply_project_overlay(project.state())
 
-        # Normalise ``proposed_issues`` to the live entity-validation state so a
+        # Normalise ``issues`` to the live entity-validation state so a
         # freshly-loaded TSV and a user-edited one read identically (load ==
         # edit). Static scan notes are preserved; only the schema-validation
         # segment is recomputed. Pure DataFrame mutation, no signals (we build
@@ -510,24 +527,46 @@ class InventoryTableModel(QAbstractTableModel):
         """Decide the modality-scoped columns up front, once per row TYPE.
 
         Answering costs a full walk of the schema's rules, and the answer is
-        the same for every row of a given datatype and suffix. Left to the
-        paint path, the first scroll that reveals these columns pays for one
-        walk per distinct type, which reads as a stall part-way across the
-        table. Doing it at bind time costs the same work where a wait is
-        already expected, and is bounded by the number of distinct types in
-        the scan rather than the number of rows.
+        the same for every row of a given datatype and suffix. Left entirely
+        to the paint path, the first scroll that reveals these columns pays
+        for one walk per distinct type, which reads as a stall part-way
+        across the table.
+
+        **On a worker thread**, because it was measured at 790 ms of an
+        830 ms freeze right after a scan finished: 425 walks of the schema
+        rules, in the model's constructor, on the GUI thread, with the
+        spinner already stopped. A frozen window is not "a wait where a wait
+        is expected", it is an application that looks hung.
+
+        The paint path still answers lazily for anything not yet warm, so
+        the table is correct from the first frame and merely gets faster.
+        The cache underneath is a ``functools.lru_cache``, which is safe to
+        fill from another thread.
         """
         if not len(self._df):
             return
-        scoped = set(_COLUMN_BIDS_FIELDS) | set(_COLUMN_DATATYPES)
-        seen: set[tuple[str, str]] = set()
-        for row in range(len(self._df)):
-            pair = self.effective_datatype_suffix(row)
-            if pair in seen:
-                continue
-            seen.add(pair)
-            for df_col in scoped:
-                self.column_applies(row, df_col)
+
+        pairs = {
+            self.effective_datatype_suffix(row) for row in range(len(self._df))
+        }
+        scoped = tuple(set(_COLUMN_BIDS_FIELDS) | set(_COLUMN_DATATYPES))
+
+        def warm() -> None:
+            for datatype, suffix in pairs:
+                for df_col in scoped:
+                    key = (df_col, datatype, suffix)
+                    if key in self._applies_cache:
+                        continue
+                    try:
+                        self._applies_cache[key] = self._compute_applies(
+                            df_col, datatype, suffix,
+                            _COLUMN_DATATYPES.get(df_col),
+                            _COLUMN_BIDS_FIELDS.get(df_col),
+                        )
+                    except Exception:  # noqa: BLE001 - warming is advisory
+                        return
+
+        QThreadPool.globalInstance().start(warm)
 
     def column_applies(self, row: int, df_col: str) -> bool:
         """True when ``df_col`` means anything for this row's datatype.
@@ -557,7 +596,7 @@ class InventoryTableModel(QAbstractTableModel):
     def effective_datatype_suffix(self, row: int) -> tuple[str, str]:
         """``(datatype, suffix)`` for the row, falling back to the guess.
 
-        A blank ``proposed_datatype`` does not mean "undecided". Scanner
+        A blank ``datatype`` does not mean "undecided". Scanner
         derivatives carry one: a Siemens scout, a PhoenixZIPReport or a TENSOR
         map is excluded from conversion and left with no proposed datatype,
         while the classifier's guess still records what it is (``anat``,
@@ -992,6 +1031,44 @@ class InventoryTableModel(QAbstractTableModel):
         self.refresh_row(row)
         return True
 
+    def apply_pet_block(self, row: int, block) -> int:
+        """Lay a whole ``PetAcquisitionSpec`` onto ONE row. Returns fields set.
+
+        Used by the per-row dose importer. Going field by field through
+        :meth:`set_pet_override` would mean stringifying every value and
+        parsing it straight back, which loses the list fields entirely and
+        would round-trip a float through text for no reason: the block
+        arrived already typed, from a reader that validated it.
+
+        Merges rather than replaces, so importing a file that states the
+        tracer does not silently clear a mass somebody typed. A field the
+        block leaves unset is a field the block says nothing about.
+        """
+        from ...recording_meta import merge_pet
+
+        if not (0 <= row < len(self._df)) or block is None:
+            return 0
+        if self._global_spec is None:
+            self._global_spec = RecordingMetaSpec()
+
+        stated = {
+            name for name, value in block.model_dump().items()
+            if value not in (None, "", [], {})
+        }
+        if not stated:
+            return 0
+
+        rid = self.row_id(row)
+        overrides = dict(self._global_spec.pet_overrides)
+        current = overrides.get(rid)
+        overrides[rid] = merge_pet(current, block) if current is not None else block
+        self._global_spec = self._global_spec.model_copy(
+            update={"pet_overrides": overrides})
+
+        self.recordingSpecChanged.emit()
+        self.refresh_row(row)
+        return len(stated)
+
     # ------------------------------------------------------------------
     # Qt model API
     # ------------------------------------------------------------------
@@ -1039,7 +1116,7 @@ class InventoryTableModel(QAbstractTableModel):
             return self._highlight_aborts and self.is_row_aborted(row)
 
         # Hovering any cell of a flagged row surfaces the scanner's
-        # ``proposed_issues`` (e.g. the "non-image series" reason) so the
+        # ``issues`` (e.g. the "non-image series" reason) so the
         # user sees *why* a row is highlighted without unhiding the issues
         # column. Newline-split the `` | ``-joined notes for readability.
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -1062,8 +1139,8 @@ class InventoryTableModel(QAbstractTableModel):
                 from ...inventory.name_collisions import DUPLICATE_ISSUE
 
                 return DUPLICATE_ISSUE
-            if "proposed_issues" in self._df.columns:
-                issues = str(self._df.at[row, "proposed_issues"] or "").strip()
+            if "issues" in self._df.columns:
+                issues = str(self._df.at[row, "issues"] or "").strip()
                 if issues:
                     return issues.replace(" | ", "\n")
             return None
@@ -1252,12 +1329,12 @@ class InventoryTableModel(QAbstractTableModel):
 
         self._df.at[row, "entities"] = json.dumps(current, sort_keys=True)
 
-        # ``BIDS_name`` is the de-facto mirror for the ``subject``
+        # ``participant_id`` is the de-facto mirror for the ``subject``
         # entity: ``rebuild_from_columns`` reads it back as ground truth.
         # Keep it in sync so subsequent mirror-cell edits don't undo
         # this change.
-        if entity == "subject" and "BIDS_name" in self._df.columns:
-            self._df.at[row, "BIDS_name"] = (
+        if entity == "subject" and "participant_id" in self._df.columns:
+            self._df.at[row, "participant_id"] = (
                 f"sub-{new_value}" if new_value else ""
             )
 
@@ -1270,7 +1347,7 @@ class InventoryTableModel(QAbstractTableModel):
     def row_issues(self, row: int) -> list[str]:
         """Return the parsed list of scanner-detected issues for ``row``.
 
-        ``proposed_issues`` in the unified TSV is a `` | ``-joined
+        ``issues`` in the unified TSV is a `` | ``-joined
         string assembled by the scan step (suspected aborts, B0
         reroutes, missing required entities, etc.). Splitting it here
         keeps the inspector + Properties panel + IssuesDialog reading
@@ -1278,9 +1355,9 @@ class InventoryTableModel(QAbstractTableModel):
         """
         if not (0 <= row < len(self._df)):
             return []
-        if "proposed_issues" not in self._df.columns:
+        if "issues" not in self._df.columns:
             return []
-        raw = self._df.at[row, "proposed_issues"]
+        raw = self._df.at[row, "issues"]
         if pd.isna(raw):
             return []
         text = str(raw).strip()
@@ -1344,11 +1421,50 @@ class InventoryTableModel(QAbstractTableModel):
     # Bulk edit
     # ------------------------------------------------------------------
 
+    # Bulk-editable ENTITIES are prefixed with this, so an entity name can
+    # never be mistaken for one of the column keys below. ``acquisition``
+    # has no column; ``task`` has one.
+    ENTITY_KEY_PREFIX = "entity:"
+
+    # The entities that already have a dedicated column key in the list
+    # below. Offering them twice would be two controls writing one value.
+    _ENTITY_COLUMN_KEYS: dict[str, str] = {
+        "subject": "id",
+        "session": "ses",
+        "task": "task",
+        "run": "run",
+    }
+
     # Keys the bulk-edit dialog can target. The order is intentional —
     # the dropdown shows these in this sequence so the most common
     # targets (subject, dataset, task) come first.
+    #
+    # This list covers COLUMNS. Entities without a column are offered too,
+    # and are read from the schema rather than listed here: see
+    # :meth:`bulk_editable_entities`.
+    # The columns a person reads FIRST, in the order they read them.
+    #
+    # The table has 62 columns and its natural order is the order the
+    # inventory was built in, which is not the order anyone looks in. This
+    # is: who, in what format, which session, where it lands, what it is,
+    # what it will be called, and what the scanner called it. Everything
+    # else keeps its existing position behind them.
+    #
+    # ``include`` and ``status`` are deliberately NOT here: they are the
+    # two-pixel-wide tick and badge that live at the very left, and putting
+    # a text column before them would bury the thing the eye goes to.
+    DEFAULT_LEADING_KEYS: tuple[str, ...] = (
+        "id",         # subject
+        "format",
+        "ses",        # session
+        "datatype",
+        "suffix",
+        "basename",   # BIDS name
+        "sequence",
+    )
+
     BULK_EDITABLE_KEYS: tuple[str, ...] = (
-        "id",        # → subject entity + BIDS_name
+        "id",        # → subject entity + participant_id
         # "dataset" is intentionally excluded: it is owned by the project /
         # locked output folder and must never be changed by hand (see ColumnSpec).
         "ses",
@@ -1366,6 +1482,278 @@ class InventoryTableModel(QAbstractTableModel):
         "companion_files",
     )
 
+    def bulk_editable_entities(self, rows: list[int]) -> list[str]:
+        """Entity long names the schema permits for EVERY row in ``rows``.
+
+        The per-row Properties panel has always built its entity list from
+        ``schema.allowed_entities(datatype, suffix)``, so ``acq`` is
+        editable there. The bulk dialog read a hand-written tuple whose
+        only entities were subject, session, task and run, so the one
+        operation that exists to set the same value on many rows could not
+        set the entity people most often need: the one that tells two
+        otherwise identical acquisitions apart.
+
+        The UNION, because a bulk edit is applied ROW BY ROW: an entity one
+        row may not carry is skipped on that row, not withheld from the
+        whole selection. Intersecting meant selecting a whole study offered
+        nothing at all, since no entity is legal on anat and eeg and meg and
+        pet at once, and with nothing in the list there was no way to reach
+        the remove tick either.
+
+        :meth:`entity_settable_on` is the per-row half, and
+        :meth:`bulk_set` applies it.
+
+        A row whose datatype or suffix is not resolved yet constrains
+        nothing rather than emptying the list: the schema cannot answer for
+        a file it cannot identify, and one unclassified row in a selection
+        of twenty should not disable the control. This matches what the
+        Properties panel does with the same unknown.
+
+        Returned in the schema's canonical filename order, and without the
+        four that have their own column.
+        """
+        allowed: Optional[set[str]] = None
+        for row in rows:
+            if not (0 <= row < len(self._df)):
+                continue
+            datatype = str(self._df.at[row, "datatype"] or "") \
+                if "datatype" in self._df.columns else ""
+            suffix = str(self._df.at[row, "bids_guess_suffix"] or "") \
+                if "bids_guess_suffix" in self._df.columns else ""
+            if not datatype or not suffix:
+                continue
+            try:
+                here = set(schema_mod.allowed_entities(datatype, suffix))
+            except Exception:  # noqa: BLE001 - an unknown pair constrains nothing
+                continue
+            if not here:
+                # The schema has NO RULE for this datatype and suffix pair,
+                # which is not the same as "no entities are allowed". It
+                # returns an empty set rather than raising, so the except
+                # above never fired. Such a row says nothing either way.
+                continue
+            allowed = here if allowed is None else (allowed | here)
+
+        if allowed is None:
+            # Nothing in the selection could be identified. Offer what the
+            # schema knows rather than nothing at all.
+            allowed = set(schema_mod.entity_order())
+
+        return [
+            e for e in schema_mod.entity_order()
+            if e in allowed and e not in self._ENTITY_COLUMN_KEYS
+        ]
+
+    def bulk_removable_entities(self, rows: list[int]) -> set[str]:
+        """Entity long names that can be TAKEN OFF every row in ``rows``.
+
+        Every entity the schema allows minus the ones it REQUIRES, which is
+        the same rule ``editor.restructure.removable_entities`` applies to a
+        finished dataset. A ``_bold`` cannot lose its ``task`` and nothing
+        can lose its ``sub``, so offering to remove them would be offering
+        to produce a filename the standard rejects.
+
+        Includes the four entities that have a column of their own
+        (``sub``, ``ses``, ``task``, ``run``). They were left out of the
+        removable set entirely, because the dialog edits them as COLUMNS
+        rather than as entities and only the entity path carried a remove
+        tick. So a session could be set and never unset, and the only
+        entity anyone could take off a group of files was ``acq``.
+
+        Decided PER ROW and then UNIONED, not intersected. Selecting every
+        row and asking for ``acq`` to go should take it off the rows that
+        have one and can lose it, leaving the rest alone. Intersecting
+        meant one ``_bold`` in the selection removed ``task`` from the
+        offer for everything, and one row of an unrecognised datatype
+        removed nearly everything, so the answer to "take this label off
+        the study" was almost always no.
+
+        :meth:`remove_entity_rows` then applies it, skipping the rows the
+        schema will not allow it on.
+        """
+        out: set[str] = set()
+        seen_any = False
+        for row in rows:
+            if not (0 <= row < len(self._df)):
+                continue
+            datatype = str(self._df.at[row, "datatype"] or "") \
+                if "datatype" in self._df.columns else ""
+            suffix = str(self._df.at[row, "bids_guess_suffix"] or "") \
+                if "bids_guess_suffix" in self._df.columns else ""
+            if not datatype or not suffix:
+                continue
+            try:
+                allowed = set(schema_mod.allowed_entities(datatype, suffix))
+                required = set(schema_mod.required_entities(datatype, suffix))
+            except Exception:  # noqa: BLE001 - an unknown pair constrains nothing
+                continue
+            if not allowed:
+                # No rule for this pair. It contributes nothing and it does
+                # not count as an answer, so a selection of nothing BUT
+                # derivative rows still falls back below rather than
+                # returning an empty offer.
+                continue
+            seen_any = True
+            out |= {e for e in allowed if e not in required}
+
+        if not seen_any:
+            # Nothing could be identified, so nothing is known to be
+            # required either, except the one entity BIDS requires of every
+            # file there is.
+            return {e for e in schema_mod.entity_order() if e != "subject"}
+        return out
+
+    def entity_removable_on(self, row: int, entity: str) -> bool:
+        """Whether ``entity`` can come off THIS row.
+
+        The per-row half of :meth:`bulk_removable_entities`. A row whose
+        datatype and suffix the schema does not describe is left alone
+        rather than edited on a guess.
+        """
+        if entity == "subject" or not (0 <= row < len(self._df)):
+            return False
+        datatype = str(self._df.at[row, "datatype"] or "") \
+            if "datatype" in self._df.columns else ""
+        suffix = str(self._df.at[row, "bids_guess_suffix"] or "") \
+            if "bids_guess_suffix" in self._df.columns else ""
+        if not datatype or not suffix:
+            return False
+        try:
+            allowed = set(schema_mod.allowed_entities(datatype, suffix))
+            required = set(schema_mod.required_entities(datatype, suffix))
+        except Exception:  # noqa: BLE001
+            return False
+        if not allowed:
+            return False
+        long = self._long_entity(entity)
+        return long in allowed and long not in required
+
+    @staticmethod
+    def _long_entity(entity: str) -> str:
+        """The schema's own name for an entity, given either spelling.
+
+        Callers are not consistent and cannot be made so cheaply: the bulk
+        dialog builds its keys from :meth:`bulk_editable_entities`, which
+        returns the schema's long names (``acquisition``), while the
+        entities JSON on a row and several existing callers use the short
+        filename form (``acq``). ``allowed_entities`` answers in long names
+        only, so a check that skipped this normalisation silently refused
+        every short-form write.
+        """
+        if entity in schema_mod.entity_order():
+            return entity
+        for long in schema_mod.entity_order():
+            try:
+                if schema_mod.entity_info(long).name == entity:
+                    return long
+            except KeyError:
+                continue
+        return entity
+
+    def entity_settable_on(self, row: int, entity: str) -> bool:
+        """Whether ``entity`` may be written to THIS row.
+
+        A row whose datatype and suffix the schema has no rule for is left
+        alone rather than edited on a guess, which is the same answer
+        ``editor.restructure.plan_entity_edit`` gives such a file.
+        """
+        if not (0 <= row < len(self._df)):
+            return False
+        datatype = str(self._df.at[row, "datatype"] or "") \
+            if "datatype" in self._df.columns else ""
+        suffix = str(self._df.at[row, "bids_guess_suffix"] or "") \
+            if "bids_guess_suffix" in self._df.columns else ""
+        if not datatype or not suffix:
+            # Not identified yet, so the schema cannot refuse it either. The
+            # Properties panel treats this unknown the same way.
+            return True
+        try:
+            allowed = set(schema_mod.allowed_entities(datatype, suffix))
+        except Exception:  # noqa: BLE001
+            return True
+        if not allowed:
+            return False
+        return self._long_entity(entity) in allowed
+
+    def remove_entity_rows(self, rows: list[int], entity: str) -> tuple[int, int]:
+        """Take ``entity`` off every row that can lose it.
+
+        Returns ``(changed, skipped)``. A row that never carried it counts
+        as neither: there was nothing to do and nothing was refused.
+        """
+        changed = skipped = 0
+        for row in rows:
+            if not (0 <= row < len(self._df)):
+                continue
+            if not self.entities(row).get(entity):
+                continue
+            if not self.entity_removable_on(row, entity):
+                skipped += 1
+                continue
+            if self.set_entity(row, entity, ""):
+                changed += 1
+        return changed, skipped
+
+    def entity_values_in_use(self, rows: list[int], entity: str) -> list[str]:
+        """The values ``entity`` already carries across ``rows``, sorted.
+
+        Offered as suggestions in the bulk dialog. A selection where half
+        the rows already say ``acq-fm2`` is the common case, and retyping a
+        value that is on screen is how a typo gets in.
+        """
+        seen = {
+            value for row in rows
+            if 0 <= row < len(self._df)
+            for value in (self.entities(row).get(entity, ""),)
+            if value
+        }
+        return sorted(seen)
+
+    def row_label(self, row: int) -> str:
+        """How to name one row to a person: its BIDS name.
+
+        Falls back to the participant and the sequence when the name has
+        not been proposed yet, because a preview listing "row 14" tells the
+        reader nothing about which recording it is.
+        """
+        if not (0 <= row < self.rowCount()):
+            return ""
+        idx = self._df.index[row]
+
+        def cell(column: str) -> str:
+            if column not in self._df.columns:
+                return ""
+            return str(self._df.at[idx, column] or "").strip()
+
+        name = cell("bids_name")
+        if name:
+            return name
+        parts = [p for p in (cell("participant_id"), cell("sequence")) if p]
+        return " / ".join(parts) or f"row {row + 1}"
+
+    def bulk_value(self, row: int, column_key: str) -> str:
+        """What ``column_key`` currently says on ``row``.
+
+        The read half of :meth:`bulk_set`, and it exists for the same
+        reason the write half does: the bulk dialog has to be able to show
+        what each row holds NOW, both so a preview can say what changes and
+        so "only the rows that say X" is answerable. Keyed exactly as
+        ``bulk_set`` is, so the two cannot disagree about what a key means.
+        """
+        if not (0 <= row < self.rowCount()):
+            return ""
+        if column_key.startswith(self.ENTITY_KEY_PREFIX):
+            entity = column_key[len(self.ENTITY_KEY_PREFIX):]
+            return str(self.entities(row).get(entity, "") or "")
+        if column_key == "id":
+            return str(self.entities(row).get("subject", "") or "")
+        spec = next((c for c in self.COLUMNS if c.key == column_key), None)
+        if spec is None or not spec.df_column:
+            return ""
+        if spec.df_column not in self._df.columns:
+            return ""
+        return str(self._df.at[self._df.index[row], spec.df_column] or "")
+
     def bulk_set(
         self,
         rows: list[int],
@@ -1379,12 +1767,28 @@ class InventoryTableModel(QAbstractTableModel):
         rows actually changed (no-ops are excluded).
 
         * ``id``                → :meth:`set_entity` on ``subject``
-          (this also updates ``BIDS_name``).
+          (this also updates ``participant_id``).
         * ``datatype`` / ``suffix`` → :meth:`set_datatype_suffix`
           (the unchanged half is preserved per-row).
         * Everything else      → :meth:`setData` on the column index
           (mirror-cell rebuilds happen inside ``setData``).
         """
+        # An entity with no column of its own goes straight to
+        # ``set_entity``, which records the edit, rewrites the entities
+        # JSON and rebuilds the basename, exactly as the per-row panel does.
+        if column_key.startswith(self.ENTITY_KEY_PREFIX):
+            entity = column_key[len(self.ENTITY_KEY_PREFIX):]
+            # Per row, because the dropdown offers what is usable on AT
+            # LEAST ONE row. A row the schema will not let carry this
+            # entity is skipped rather than written with a name the
+            # standard rejects.
+            return sum(
+                1 for row in rows
+                if 0 <= row < self.rowCount()
+                and self.entity_settable_on(row, entity)
+                and self.set_entity(row, entity, value)
+            )
+
         if column_key not in self.BULK_EDITABLE_KEYS:
             return 0
 
@@ -1400,6 +1804,22 @@ class InventoryTableModel(QAbstractTableModel):
 
             if column_key == "id":
                 if self.set_entity(row, "subject", value):
+                    changed += 1
+                continue
+
+            # ``ses`` / ``task`` / ``run`` are entities that happen to have
+            # a column. Routed through ``set_entity`` so that clearing one
+            # REMOVES it from the basename, which is what the dialog's
+            # remove tick now offers for them. ``setData`` on the cell
+            # writes an empty string, which is not the same thing: the
+            # entity stays in the name with nothing after the dash.
+            entity = next(
+                (e for e, col in self._ENTITY_COLUMN_KEYS.items()
+                 if col == column_key and e != "subject"),
+                None,
+            )
+            if entity is not None:
+                if self.set_entity(row, entity, value):
                     changed += 1
                 continue
 
@@ -1424,15 +1844,15 @@ class InventoryTableModel(QAbstractTableModel):
     def datatype_suffix(self, row: int) -> tuple[str, str]:
         """Return ``(datatype, suffix)`` for ``row``, both possibly empty.
 
-        Reads ``proposed_datatype`` + ``bids_guess_suffix`` (with empty
+        Reads ``datatype`` + ``bids_guess_suffix`` (with empty
         fallback). Used by the Properties panel to drive its combos.
         """
         if not (0 <= row < len(self._df)):
             return ("", "")
         dt = ""
         sf = ""
-        if "proposed_datatype" in self._df.columns:
-            dt = "" if pd.isna(self._df.at[row, "proposed_datatype"]) else str(self._df.at[row, "proposed_datatype"])
+        if "datatype" in self._df.columns:
+            dt = "" if pd.isna(self._df.at[row, "datatype"]) else str(self._df.at[row, "datatype"])
         if "bids_guess_suffix" in self._df.columns:
             sf = "" if pd.isna(self._df.at[row, "bids_guess_suffix"]) else str(self._df.at[row, "bids_guess_suffix"])
         return (dt, sf)
@@ -1447,7 +1867,7 @@ class InventoryTableModel(QAbstractTableModel):
             return False
         changed = False
         for col, val, key in (
-            ("proposed_datatype", datatype, "datatype"),
+            ("datatype", datatype, "datatype"),
             ("bids_guess_suffix", suffix, "suffix"),
         ):
             if col not in self._df.columns:
@@ -1528,7 +1948,7 @@ class InventoryTableModel(QAbstractTableModel):
 
         Forces a full live re-validation: for each row the schema entity checks
         run against its current entities / datatype / suffix, the managed
-        segment of ``proposed_issues`` is refreshed (static scan notes kept),
+        segment of ``issues`` is refreshed (static scan notes kept),
         and the cached row state is rebuilt. Emits one ``dataChanged`` over the
         whole table so delegates repaint and the controller's chip / preview /
         stats listeners recompute. Backs the Converter's "Re-validate" button so
@@ -1711,7 +2131,7 @@ class InventoryTableModel(QAbstractTableModel):
         """Schema entity-validation issues for the row's *current* entities.
 
         Returns the same ``"<rule_id>: <message>"`` strings the scan emits, so
-        they slot straight back into ``proposed_issues``. Skipped rows and rows
+        they slot straight back into ``issues``. Skipped rows and rows
         without a datatype/suffix produce none. Placeholder sentinels are
         treated as missing (see :data:`_ENTITY_PLACEHOLDERS`).
         """
@@ -1754,7 +2174,7 @@ class InventoryTableModel(QAbstractTableModel):
         ]
 
     def _revalidate_row(self, row: int) -> bool:
-        """Recompute the managed (entity-validation) segment of ``proposed_issues``.
+        """Recompute the managed (entity-validation) segment of ``issues``.
 
         Static scan notes are preserved verbatim; only the schema-validation
         issues are replaced with a fresh recompute of the row's current
@@ -1764,10 +2184,10 @@ class InventoryTableModel(QAbstractTableModel):
         """
         if not (0 <= row < len(self._df)):
             return False
-        if "proposed_issues" not in self._df.columns:
+        if "issues" not in self._df.columns:
             return False
-        old_val = "" if pd.isna(self._df.at[row, "proposed_issues"]) else str(
-            self._df.at[row, "proposed_issues"]
+        old_val = "" if pd.isna(self._df.at[row, "issues"]) else str(
+            self._df.at[row, "issues"]
         )
         existing = [t.strip() for t in old_val.split(" | ") if t.strip()]
         static = [t for t in existing if not _is_managed_issue(t)]
@@ -1776,7 +2196,7 @@ class InventoryTableModel(QAbstractTableModel):
         new_val = " | ".join(fresh + static)
         if new_val == old_val:
             return False
-        self._df.at[row, "proposed_issues"] = new_val
+        self._df.at[row, "issues"] = new_val
         return True
 
     # -------- per-row state --------
@@ -1789,12 +2209,12 @@ class InventoryTableModel(QAbstractTableModel):
         """
         # Non-image DERIVED objects (no pixel data; e.g. a Siemens TENSOR
         # map) are flagged by the scanner via the ``non-image series``
-        # token in ``proposed_issues`` (see ``cli/scan.NONIMAGE_ISSUE_TOKEN``).
+        # token in ``issues`` (see ``cli/scan.NONIMAGE_ISSUE_TOKEN``).
         # They are excluded from conversion (include=0) but must still read
         # as a deliberate, highlighted "not an image" state rather than a
         # de-emphasised skip — so this check wins over the include check.
-        if "proposed_issues" in self._df.columns:
-            issues_l = str(self._df.at[row, "proposed_issues"] or "").lower()
+        if "issues" in self._df.columns:
+            issues_l = str(self._df.at[row, "issues"] or "").lower()
             if "non-image series" in issues_l:
                 return "noimg"
 
@@ -1817,8 +2237,8 @@ class InventoryTableModel(QAbstractTableModel):
                 return "skip"
 
         issues = ""
-        if "proposed_issues" in self._df.columns:
-            issues = str(self._df.at[row, "proposed_issues"] or "")
+        if "issues" in self._df.columns:
+            issues = str(self._df.at[row, "issues"] or "")
         if issues:
             lowered = issues.lower()
             if any(tok in lowered for tok in (
@@ -1831,11 +2251,11 @@ class InventoryTableModel(QAbstractTableModel):
             return "warn"
 
         basename = ""
-        if "proposed_basename" in self._df.columns:
-            basename = str(self._df.at[row, "proposed_basename"] or "")
+        if "bids_name" in self._df.columns:
+            basename = str(self._df.at[row, "bids_name"] or "")
         datatype = ""
-        if "proposed_datatype" in self._df.columns:
-            datatype = str(self._df.at[row, "proposed_datatype"] or "")
+        if "datatype" in self._df.columns:
+            datatype = str(self._df.at[row, "datatype"] or "")
         if not basename or not datatype:
             return "err"
 

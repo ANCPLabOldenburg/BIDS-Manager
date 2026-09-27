@@ -23,6 +23,7 @@ from bidsmgr.editor.types import (
     Severity,
     ValidationReport,
 )
+from .conftest import open_every_folder
 from bidsmgr.gui.delegates.bids_tree import BADGE_ROLE
 from bidsmgr.gui.editor_panel import EditorPanel
 from bidsmgr.gui.widgets.bids_tree_pane import BidsTreePane
@@ -62,6 +63,7 @@ def bids_root(tmp_path: Path) -> Path:
 
 
 def _find_item(tree, name: str):
+    open_every_folder(tree)
     matches = []
 
     def visit(item) -> None:

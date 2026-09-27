@@ -3,7 +3,7 @@
 Reference: architecture.md §7. ``ConvertTask`` is what the CLI orchestrator
 hands a backend; ``ConvertResult`` is what the backend hands back. Backends
 never decide BIDS names — ``basename`` and ``datatype`` come from the
-schema engine via the inventory TSV's ``proposed_basename`` column.
+schema engine via the inventory TSV's ``bids_name`` column.
 """
 
 from __future__ import annotations

@@ -119,3 +119,39 @@ def test_every_string_setting_round_trips_a_non_boolish_value():
             f"{field.name} did not survive; it is probably saved by the "
             "loop that writes booleans as '1'/'0'"
         )
+
+
+def test_index_widths_survive_a_round_trip(qtbot, tmp_path, monkeypatch):
+    """The setting that makes the inspection table read ``run-01``.
+
+    Stored as JSON because QSettings has no dict type. Written beside the
+    other strings rather than inside the bool loop, which is what turned
+    ``convert_deface_engine`` into ``"1"`` and lost a whole conversion.
+    """
+    from PyQt6.QtCore import QSettings
+
+    from bidsmgr.gui.app_settings import AppSettings
+
+    monkeypatch.setattr(
+        QSettings, "fileName", lambda self: str(tmp_path / "s.ini")
+    )
+    s = AppSettings()
+    s.scan_index_widths = {"run": 2, "echo": 3}
+    s.save()
+
+    back = AppSettings.load()
+    assert back.scan_index_widths == {"run": 2, "echo": 3}
+
+
+def test_a_nonsense_width_is_dropped_on_load(tmp_path, monkeypatch):
+    """A hand-edited config cannot make the scanner write ``run-0000001``."""
+    from bidsmgr.gui.app_settings import KEYS, AppSettings
+
+    # Through the same accessor ``load`` uses, or the value lands in a
+    # different QSettings scope and the test passes for the wrong reason.
+    AppSettings._settings().setValue(
+        KEYS["scan_index_widths"], '{"run": 99, "echo": 2}'
+    )
+    back = AppSettings.load()
+    assert "run" not in back.scan_index_widths
+    assert back.scan_index_widths.get("echo") == 2

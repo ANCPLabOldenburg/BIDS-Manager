@@ -30,7 +30,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from ..inventory._time import parse_dicom_time_seconds
+from ..inventory._time import parse_time_seconds
 
 log = logging.getLogger(__name__)
 
@@ -86,48 +86,86 @@ def populate_intended_for(
 # ---------------------------------------------------------------------------
 
 
-def _process_one_root(
+def suggest_intended_for(
     root: Path, subject: str, session: Optional[str],
-) -> int:
-    """Update fmap sidecars under ``root`` (a sub-X or sub-X/ses-Y folder)."""
+) -> tuple[list[tuple[list[Path], list[str]]], Optional[str]]:
+    """What ``IntendedFor`` SHOULD say under ``root``, without writing it.
+
+    Returns one ``(sidecars, uris)`` pair per fieldmap acquisition, plus the
+    reason the assignment is the way it is, or ``None`` when there is
+    nothing to say.
+
+    Split out of :func:`populate_intended_for` so the Editor's linkage tool
+    proposes exactly what the conversion would have written, rather than a
+    second implementation of the same rule that can disagree with it.
+    """
     fmap_dir = root / "fmap"
     func_dir = root / "func"
     if not (fmap_dir.is_dir() and func_dir.is_dir()):
-        return 0
+        return [], None
 
     timed_runs, runs_missing_time = _collect_func_runs(func_dir)
     if not timed_runs and not runs_missing_time:
-        return 0
+        return [], None
 
     timed_fmaps, fmap_missing_time = _collect_fieldmap_groups(fmap_dir)
     if not timed_fmaps and not fmap_missing_time:
-        return 0
+        return [], None
 
     if runs_missing_time or fmap_missing_time:
-        # Fallback: every run is a candidate for every fieldmap.
+        # Fallback: every run is a candidate for every fieldmap. Say so, or
+        # the user cannot tell this apart from a protocol where one
+        # fieldmap genuinely covers everything.
         all_runs = sorted(
             [img for img, _ in timed_runs] + runs_missing_time,
             key=lambda p: p.name,
         )
-        intended_for = [
+        uris = [
             _format_bids_uri(subject, session, "func", p.name) for p in all_runs
         ]
         groups = [members for _, members, _ in timed_fmaps] + fmap_missing_time
-        return _write_intended_for(groups, intended_for)
+        nameless = [p.name for p in runs_missing_time] + [
+            p.name for g in fmap_missing_time for p in g
+        ]
+        why = (
+            "every run is offered to every fieldmap, because "
+            f"{len(nameless)} file(s) carry no readable acquisition time "
+            f"({', '.join(sorted(nameless)[:3])}"
+            f"{', ...' if len(nameless) > 3 else ''})"
+        )
+        return [(g, uris) for g in groups], why
 
-    # All timing present → run-by-fmap assignment.
+    # All timing present: a fieldmap covers the runs acquired after it and
+    # before the next one.
     timed_runs.sort(key=lambda item: item[1])
     timed_fmaps.sort(key=lambda item: item[2])
 
-    n_updated = 0
+    out: list[tuple[list[Path], list[str]]] = []
     for idx, (_key, members, fmap_time) in enumerate(timed_fmaps):
-        next_time = timed_fmaps[idx + 1][2] if idx + 1 < len(timed_fmaps) else float("inf")
-        intended_for = [
+        next_time = (
+            timed_fmaps[idx + 1][2] if idx + 1 < len(timed_fmaps) else float("inf")
+        )
+        uris = [
             _format_bids_uri(subject, session, "func", img.name)
             for img, acq in timed_runs
             if fmap_time <= acq < next_time
         ]
-        n_updated += _write_intended_for([members], intended_for)
+        out.append((members, uris))
+    why = (
+        f"{len(timed_fmaps)} fieldmap(s) and {len(timed_runs)} run(s) carry "
+        "acquisition times, so each fieldmap takes the runs acquired after "
+        "it and before the next one"
+    )
+    return out, why
+
+
+def _process_one_root(
+    root: Path, subject: str, session: Optional[str],
+) -> int:
+    """Update fmap sidecars under ``root`` (a sub-X or sub-X/ses-Y folder)."""
+    n_updated = 0
+    for members, uris in suggest_intended_for(root, subject, session)[0]:
+        n_updated += _write_intended_for([members], uris)
     return n_updated
 
 
@@ -150,7 +188,7 @@ def _collect_func_runs(
             continue
 
         meta = _load_json(_matching_json(image))
-        acq_time = parse_dicom_time_seconds(
+        acq_time = parse_time_seconds(
             meta.get("AcquisitionTime")
             or meta.get("acq_time")
             or meta.get("AcquisitionDateTime")
@@ -174,7 +212,7 @@ def _collect_fieldmap_groups(
     for sidecar in sorted(fmap_dir.glob("*.json")):
         key = _fieldmap_group_key(sidecar)
         meta = _load_json(sidecar)
-        acq_time = parse_dicom_time_seconds(
+        acq_time = parse_time_seconds(
             meta.get("AcquisitionTime")
             or meta.get("acq_time")
             or meta.get("AcquisitionDateTime")

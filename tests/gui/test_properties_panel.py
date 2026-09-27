@@ -38,17 +38,17 @@ pytestmark = pytest.mark.gui
 
 def _func_row(**overrides) -> dict:
     base = {
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "ses-pre",
         "include": 1,
         "modality": "mri",
-        "proposed_datatype": "func",
-        "proposed_basename": "sub-001_ses-pre_task-rest_bold",
-        "Proposed BIDS name": "sub-001_ses-pre_task-rest_bold",
+        "datatype": "func",
+        "bids_name": "sub-001_ses-pre_task-rest_bold",
+        "bids_path": "sub-001_ses-pre_task-rest_bold",
         "bids_guess_suffix": "bold",
         "bids_guess_confidence": "0.97",
         "bids_guess_skip": False,
-        "proposed_issues": "",
+        "issues": "",
         "entities": json.dumps(
             {"subject": "001", "session": "pre", "task": "rest"},
             sort_keys=True,
@@ -85,23 +85,23 @@ def test_datatype_suffix_reads_columns() -> None:
 def test_set_entity_adds_to_basename() -> None:
     m = InventoryTableModel(pd.DataFrame([_func_row()]))
     assert m.set_entity(0, "acquisition", "mprage") is True
-    bn = m.dataframe().at[0, "proposed_basename"]
+    bn = m.dataframe().at[0, "bids_name"]
     assert "acq-mprage" in bn
 
 
 def test_set_entity_removes_when_value_blank() -> None:
     m = InventoryTableModel(pd.DataFrame([_func_row()]))
     m.set_entity(0, "acquisition", "mprage")
-    assert "acq-mprage" in m.dataframe().at[0, "proposed_basename"]
+    assert "acq-mprage" in m.dataframe().at[0, "bids_name"]
     m.set_entity(0, "acquisition", "")
-    assert "acq-" not in m.dataframe().at[0, "proposed_basename"]
+    assert "acq-" not in m.dataframe().at[0, "bids_name"]
 
 
 def test_set_entity_subject_updates_bids_name_mirror() -> None:
     m = InventoryTableModel(pd.DataFrame([_func_row()]))
     m.set_entity(0, "subject", "042")
-    assert m.dataframe().at[0, "BIDS_name"] == "sub-042"
-    assert m.dataframe().at[0, "proposed_basename"].startswith("sub-042_")
+    assert m.dataframe().at[0, "participant_id"] == "sub-042"
+    assert m.dataframe().at[0, "bids_name"].startswith("sub-042_")
 
 
 def test_set_entity_no_op_when_value_unchanged() -> None:
@@ -168,7 +168,7 @@ def test_panel_committing_field_updates_model_basename(qtbot) -> None:
     acq_row = next(r for r in panel._entity_rows if r.entity_name == "acquisition")
     acq_row.edit.setText("mprage")
     panel._on_entity_committed("acquisition", "mprage")
-    assert "acq-mprage" in m.dataframe().at[0, "proposed_basename"]
+    assert "acq-mprage" in m.dataframe().at[0, "bids_name"]
 
 
 def test_panel_blank_when_no_row_selected(qtbot) -> None:
@@ -211,17 +211,17 @@ def test_panel_project_integration(qtbot, tmp_path: Path) -> None:
 
 def _eeg_row(**overrides) -> dict:
     base = {
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "",
         "include": 1,
         "modality": "eeg",
-        "proposed_datatype": "eeg",
-        "proposed_basename": "sub-001_task-rest_eeg",
-        "Proposed BIDS name": "sub-001_task-rest_eeg",
+        "datatype": "eeg",
+        "bids_name": "sub-001_task-rest_eeg",
+        "bids_path": "sub-001_task-rest_eeg",
         "bids_guess_suffix": "eeg",
         "bids_guess_confidence": "1.00",
         "bids_guess_skip": False,
-        "proposed_issues": "",
+        "issues": "",
         "entities": json.dumps({"subject": "001", "task": "rest"}, sort_keys=True),
         "task": "rest",
         "run": "",
@@ -334,25 +334,30 @@ def test_section_headers_color_code_agnostic_vs_modality(qtbot) -> None:
 
 
 def test_region_labels_split_agnostic_and_specific(qtbot) -> None:
-    """An EEG row shows both region dividers (agnostic + modality-specific);
-    an MRI row shows only the agnostic region (no recording sidecar)."""
+    """An EEG row shows both region dividers; an MRI row shows only the
+    first, because it has no recording sidecar.
+
+    The labels name the DATATYPE they apply to. They used to say
+    "modality-specific" while being decided by the datatype, which is the
+    same word standing for two different facts.
+    """
     from PyQt6.QtWidgets import QLabel
 
     def region_texts(panel):
         return [
             w.text() for w in panel._body.findChildren(QLabel)
-            if "MODALITY-AGNOSTIC" in w.text() or "MODALITY-SPECIFIC" in w.text()
+            if "EVERY DATATYPE" in w.text() or " ONLY" in w.text()
         ]
 
     panel, _m = _build_panel_with_model(qtbot, _eeg_row())
     texts = region_texts(panel)
-    assert any("MODALITY-AGNOSTIC" in t for t in texts)
-    assert any("MODALITY-SPECIFIC" in t for t in texts)
+    assert any("EVERY DATATYPE" in t for t in texts)
+    assert any("EEG ONLY" in t for t in texts)
 
     panel2, _m2 = _build_panel_with_model(qtbot, _func_row())  # MRI
     texts2 = region_texts(panel2)
-    assert any("MODALITY-AGNOSTIC" in t for t in texts2)
-    assert not any("MODALITY-SPECIFIC" in t for t in texts2)
+    assert any("EVERY DATATYPE" in t for t in texts2)
+    assert not any(" ONLY" in t for t in texts2)
 
 
 def test_montage_match_rate_shown_for_eeg(qtbot) -> None:
@@ -375,8 +380,8 @@ def test_meg_row_can_state_a_meg_only_field(qtbot) -> None:
     it comes from the schema now, with the rest of what a *_meg.json may carry,
     so nothing had to be listed in code for it to be here.
     """
-    row = _eeg_row(proposed_datatype="meg", bids_guess_suffix="meg", modality="meg",
-                   proposed_basename="sub-001_task-rest_meg", montage_suggestion="")
+    row = _eeg_row(datatype="meg", bids_guess_suffix="meg", modality="meg",
+                   bids_name="sub-001_task-rest_meg", montage_suggestion="")
     panel, m = _build_panel_with_model(qtbot, row)
     from bidsmgr.recording_meta import default_spec
     m.set_global_spec(default_spec()); panel.set_selected_row(0)
@@ -389,11 +394,11 @@ def test_meg_row_can_state_a_meg_only_field(qtbot) -> None:
 def test_a_row_says_where_an_inherited_value_came_from(qtbot) -> None:
     """A value the row did not state is attributed, not left mysterious."""
     from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
-    row = _eeg_row(proposed_datatype="meg", bids_guess_suffix="meg", modality="meg",
-                   proposed_basename="sub-001_task-rest_meg")
+    row = _eeg_row(datatype="meg", bids_guess_suffix="meg", modality="meg",
+                   bids_name="sub-001_task-rest_meg")
     panel, m = _build_panel_with_model(qtbot, row)
     spec = RecordingMetaSpec()
-    spec.modality_defaults["meg"] = AcquisitionSpec(institution_name="Oldenburg")
+    spec.datatype_defaults["meg"] = AcquisitionSpec(institution_name="Oldenburg")
     m.set_global_spec(spec)
     panel.set_selected_row(0)
 
@@ -405,10 +410,10 @@ def test_echoing_an_inherited_value_stores_nothing(qtbot) -> None:
     """Otherwise today's inherited answer freezes into the row, and a later
     change to the dataset default would skip this one recording."""
     from bidsmgr.recording_meta import AcquisitionSpec, RecordingMetaSpec
-    row = _eeg_row(proposed_datatype="meg", bids_guess_suffix="meg", modality="meg")
+    row = _eeg_row(datatype="meg", bids_guess_suffix="meg", modality="meg")
     panel, m = _build_panel_with_model(qtbot, row)
     spec = RecordingMetaSpec()
-    spec.modality_defaults["meg"] = AcquisitionSpec(institution_name="Oldenburg")
+    spec.datatype_defaults["meg"] = AcquisitionSpec(institution_name="Oldenburg")
     m.set_global_spec(spec)
     panel.set_selected_row(0)
 
@@ -467,15 +472,15 @@ def test_per_row_fields_have_tooltips(qtbot) -> None:
 
 
 def test_nirs_row_has_no_reference_montage_section(qtbot) -> None:
-    """NIRS gets the modality-specific ACQUISITION block but NOT the EEG/iEEG
+    """NIRS gets its own ACQUISITION block but NOT the EEG/iEEG
     REFERENCE & MONTAGE block (montage/reference/ground are scalp-EEG concepts,
     matching the global dialog + the enrichment fixup)."""
     from PyQt6.QtWidgets import QLabel
-    row = _eeg_row(proposed_datatype="nirs", bids_guess_suffix="nirs", modality="nirs",
-                   proposed_basename="sub-001_task-rest_nirs")
+    row = _eeg_row(datatype="nirs", bids_guess_suffix="nirs", modality="nirs",
+                   bids_name="sub-001_task-rest_nirs")
     panel, _m = _build_panel_with_model(qtbot, row)
     texts = [w.text() for w in panel._body.findChildren(QLabel)]
-    assert any("MODALITY-SPECIFIC" in t for t in texts)   # still modality-specific
+    assert any("NIRS ONLY" in t for t in texts)           # its own region
     assert any("CONVERSION" in t for t in texts)          # line frequency lives there
     assert not any("montage match" in t for t in texts)   # no montage hint
     # Reference and ground are scalp-EEG concepts; NIRS is never asked.
@@ -519,8 +524,8 @@ def test_compute_psd_button_enabled_when_source_resolvable(qtbot, tmp_path) -> N
 def test_meg_and_ieeg_rows_have_psd_button(qtbot) -> None:
     for dt in ("meg", "ieeg"):
         row = _eeg_row(
-            proposed_datatype=dt, bids_guess_suffix=dt, modality=dt,
-            proposed_basename=f"sub-001_task-rest_{dt}",
+            datatype=dt, bids_guess_suffix=dt, modality=dt,
+            bids_name=f"sub-001_task-rest_{dt}",
         )
         panel, _m = _build_panel_with_model(qtbot, row)
         assert len(_psd_buttons(panel)) == 1, dt
@@ -545,8 +550,8 @@ def test_resolve_source_path_none_for_dicom_row(qtbot) -> None:
 def _pet_row(**overrides) -> dict:
     row = _func_row(
         modality="pet",
-        proposed_datatype="pet",
-        proposed_basename="sub-001_trc-FDG_pet",
+        datatype="pet",
+        bids_name="sub-001_trc-FDG_pet",
         bids_guess_suffix="pet",
         entities=json.dumps({"subject": "001", "tracer": "FDG"}, sort_keys=True),
         task="",

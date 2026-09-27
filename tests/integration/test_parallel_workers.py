@@ -115,7 +115,7 @@ def test_two_workers_agree_with_one(raw: Path, tmp_path: Path) -> None:
     # Compared on the identifying columns rather than the whole frame: a
     # timestamp or a scratch path may differ run to run without meaning
     # anything.
-    for column in ("proposed_basename", "proposed_datatype", "source_file"):
+    for column in ("bids_name", "datatype", "source_file"):
         if column not in one.columns:
             continue
         assert sorted(one[column]) == sorted(two[column]), (

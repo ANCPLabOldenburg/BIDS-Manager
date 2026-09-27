@@ -1,7 +1,7 @@
 """One inheritance chain, resolved to BIDS field names.
 
 The same fact about the same file could be stated in two places and two
-vocabularies: as a spec attribute (``modality_defaults["eeg"].manufacturer``)
+vocabularies: as a spec attribute (``datatype_defaults["eeg"].manufacturer``)
 or as a BIDS field in a sequence template
 (``sequence_templates["eeg/eeg"]["Manufacturer"]``). Two write paths applied
 them independently, so which one won was decided by the order the fixups
@@ -17,7 +17,7 @@ The layers, least specific first:
 
 ===============  ==========================================================
 ``dataset``      the agnostic block: the site, and anything shared by all
-``modality``     that datatype's own block: the instrument
+``datatype``     that datatype's own block: the instrument
 ``template``     the per-sequence template for this datatype/suffix
 ``template@task`` the same, narrowed to one task
 ``row``          this recording's override, from the properties panel
@@ -46,7 +46,7 @@ from .templates import template_key
 
 # Weakest first. The order IS the precedence.
 LAYERS: tuple[str, ...] = (
-    "dataset", "modality", "template", "template@task", "row", "cell",
+    "dataset", "datatype", "template", "template@task", "row", "cell",
 )
 
 
@@ -257,10 +257,10 @@ def resolve_sidecar_fields(
     contributions: list[tuple[str, dict[str, Any]]] = [
         ("dataset", _acquisition_as_bids(spec.defaults, datatype, field_applies)),
         (
-            "modality",
+            "datatype",
             {
                 **_acquisition_as_bids(
-                    spec.modality_defaults.get(datatype), datatype, field_applies,
+                    spec.datatype_defaults.get(datatype), datatype, field_applies,
                 ),
                 # PET keeps its own block because an injected dose and an EEG cap
                 # have nothing to say to each other. It is still this datatype's
@@ -324,7 +324,7 @@ def resolve_sidecar_fields(
 # How each layer reads in a form or a tooltip.
 LAYER_LABELS: dict[str, str] = {
     "dataset": "the dataset defaults",
-    "modality": "the {datatype} defaults",
+    "datatype": "the {datatype} defaults",
     "template": "the {datatype}/{suffix} template",
     "template@task": "the {datatype}/{suffix} template for task {task}",
     "row": "this recording",
@@ -385,7 +385,7 @@ def resolve_attribute(
 
     candidates: list[tuple[str, Any]] = [
         ("dataset", from_block(spec.defaults)),
-        ("modality", from_block(spec.modality_defaults.get(datatype))),
+        ("datatype", from_block(spec.datatype_defaults.get(datatype))),
         ("template", from_template(template_key(datatype, suffix))),
     ]
     if task:

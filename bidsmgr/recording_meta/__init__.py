@@ -79,6 +79,7 @@ from .resolve import (
 from .schema_types import bids_channel_types, mne_channel_types
 from .serialize import (
     RECORDING_META_SIDECAR,
+    ScaffoldVersionError,
     default_spec,
     dump_spec,
     load_spec,
@@ -136,6 +137,7 @@ __all__ = [
     "RECORDING_META_SIDECAR",
     "default_spec",
     "dump_spec",
+    "ScaffoldVersionError",
     "load_spec",
     "scaffold_sidecar_path",
 ]

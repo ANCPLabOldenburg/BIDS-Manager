@@ -110,6 +110,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     from .gui.app_icon import set_app_icon
     set_app_icon(app)
 
+    # Warm the schema on a background thread while the user is still
+    # choosing a folder. Answering "which sidecar fields apply here" is a
+    # walk of the standard's rule tree, cached for the life of the process,
+    # and the first walk was being paid on the GUI thread the moment a scan
+    # finished: 393 ms of dead window with the spinner already stopped.
+    from PyQt6.QtCore import QThreadPool
+
+    from . import schema as _schema
+
+    QThreadPool.globalInstance().start(_schema.warm_caches)
+
     # Honor the persisted theme + font-scale if the user didn't pass
     # ``--theme``.
     from .gui.app_settings import AppSettings

@@ -1063,6 +1063,26 @@ class TemplateTree(QWidget):
         line.addWidget(note, 0)
         return row
 
+    def set_values(self, values: dict[str, dict]) -> None:
+        """Re-seed the tree from stored answers, without rebuilding it.
+
+        Used when something outside the form supplies values, which today
+        means importing a PET dose file. Rebuilding the whole tree would
+        work and would also collapse every section the user had opened and
+        lose the scroll position, so the existing controls are written
+        instead.
+
+        A section nobody has opened has no widgets to write; its answers go
+        into ``_stored``, which is what a later ``values_by_key`` reads for
+        exactly that case.
+        """
+        self._stored = {key: dict(vals) for key, vals in (values or {}).items()}
+        for key, widgets in self._widgets.items():
+            stored = self._stored.get(key, {})
+            for name, widget in widgets.items():
+                if name in stored:
+                    write_field_widget(widget, stored[name])
+
     # -- reading -------------------------------------------------------
 
     def values_by_key(self) -> dict[str, dict]:

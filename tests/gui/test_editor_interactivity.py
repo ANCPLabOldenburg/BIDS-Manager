@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PyQt6.QtWidgets import QLineEdit, QPushButton
+from PyQt6.QtWidgets import QPushButton
 
 from bidsmgr.editor.types import (
     FieldLevel,
@@ -166,6 +166,12 @@ def test_warn_chip_opens_dialog_when_report_loaded(
 ) -> None:
     """Clicking the warn chip pops the issues dialog filtered by warn."""
     panel = EditorPanel()
+    # Registered with qtbot so Qt destroys it when the test ends.
+    # A widget left to the garbage collector is freed at
+    # interpreter teardown in an order Qt does not survive, and
+    # pytest's own ``gc_collect_harder`` then segfaults with every
+    # test in the file passing.
+    qtbot.addWidget(panel)
     panel._set_root(bids_root, persist=False)
     panel._report = _make_report(bids_root)
     # Make the chip "visible" enough that its click handler fires
@@ -189,11 +195,12 @@ def test_warn_chip_opens_dialog_when_report_loaded(
     assert captured.get("severity") == "warn"
 
 
-def test_chip_click_with_no_report_is_noop(
+def test_chip_click_with_no_report_is_noop(qtbot, 
     qapp, isolated_settings, bids_root: Path,
 ) -> None:
     """If there's no report yet, clicking a chip must not crash."""
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     panel._set_root(bids_root, persist=False)
     assert panel._report is None
     # Just make sure the method doesn't raise.
@@ -205,10 +212,11 @@ def test_chip_click_with_no_report_is_noop(
 # ---------------------------------------------------------------------------
 
 
-def test_select_file_in_tree_updates_tree_selection(
+def test_select_file_in_tree_updates_tree_selection(qtbot, 
     qapp, isolated_settings, bids_root: Path,
 ) -> None:
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     panel._set_root(bids_root, persist=False)
     target = bids_root / "dataset_description.json"
 
@@ -252,6 +260,7 @@ def test_fix_request_focuses_field_in_sidecar_form(
     TODO issue lands the user on that file and focuses the editor for
     the named field."""
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     panel._set_root(bids_root, persist=False)
     panel._report = _make_report(bids_root)
     panel._update_chips(panel._report)
@@ -293,11 +302,12 @@ def test_fix_request_focuses_field_in_sidecar_form(
     assert line.selectedText() == line.text()
 
 
-def test_editor_undo_redo_buttons_follow_active_pane(qapp, tmp_path: Path) -> None:
+def test_editor_undo_redo_buttons_follow_active_pane(qtbot, qapp, tmp_path: Path) -> None:
     """The Editor's Undo/Redo buttons delegate to the active editable pane and
     sync their enabled-state with that pane's history."""
     import json
     panel = EditorPanel()
+    qtbot.addWidget(panel)
     qapp.processEvents()
 
     # No undoable pane yet (NIfTI placeholder / nothing).

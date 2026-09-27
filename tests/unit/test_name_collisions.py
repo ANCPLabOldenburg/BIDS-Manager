@@ -32,11 +32,11 @@ def _row(**overrides) -> dict:
     base = {
         "dataset": "study",
         "include": "1",
-        "proposed_datatype": "pet",
+        "datatype": "pet",
         "bids_guess_suffix": "pet",
-        "proposed_basename": "sub-001_pet",
+        "bids_name": "sub-001_pet",
         "entities": json.dumps({"subject": "001"}, sort_keys=True),
-        "proposed_issues": "",
+        "issues": "",
         "source_file": "a.v",
         "run": "",
     }
@@ -54,7 +54,7 @@ def _frame(*rows) -> pd.DataFrame:
 
 
 def test_distinct_names_do_not_collide() -> None:
-    df = _frame(_row(), _row(proposed_basename="sub-002_pet", source_file="b.v"))
+    df = _frame(_row(), _row(bids_name="sub-002_pet", source_file="b.v"))
     assert find_collisions(df) == {}
 
 
@@ -77,7 +77,7 @@ def test_the_same_name_in_a_different_dataset_is_fine() -> None:
 
 def test_a_row_with_no_name_yet_is_not_a_collision() -> None:
     """Not having been named is a different problem from being named twice."""
-    df = _frame(_row(proposed_basename=""), _row(proposed_basename="", source_file="b.v"))
+    df = _frame(_row(bids_name=""), _row(bids_name="", source_file="b.v"))
     assert find_collisions(df) == {}
 
 
@@ -100,7 +100,7 @@ def test_the_basename_is_rebuilt_to_carry_the_run() -> None:
     """A run written only into the entities JSON would rename no file."""
     df = _frame(_row(source_file="a.v"), _row(source_file="b.v"))
     assign_runs(df)
-    assert all("run-" in name for name in df["proposed_basename"])
+    assert all("run-" in name for name in df["bids_name"])
 
 
 def test_numbering_is_deterministic() -> None:
@@ -130,7 +130,7 @@ def test_the_earliest_acquisition_is_run_one() -> None:
 
 
 def test_nothing_is_numbered_when_nothing_clashes() -> None:
-    df = _frame(_row(), _row(proposed_basename="sub-002_pet", source_file="b.v"))
+    df = _frame(_row(), _row(bids_name="sub-002_pet", source_file="b.v"))
     before = df.copy()
     assert assign_runs(df) == 0
     pd.testing.assert_frame_equal(df, before)
@@ -160,14 +160,14 @@ def test_a_stated_run_is_never_overwritten() -> None:
 def test_a_datatype_that_cannot_carry_a_run_is_left_alone() -> None:
     """The schema decides which files may have a run, not us."""
     df = _frame(
-        _row(proposed_datatype="anat", bids_guess_suffix="TB1TFL",
-             proposed_basename="sub-001_TB1TFL", source_file="a.nii"),
-        _row(proposed_datatype="anat", bids_guess_suffix="TB1TFL",
-             proposed_basename="sub-001_TB1TFL", source_file="b.nii"),
+        _row(datatype="anat", bids_guess_suffix="TB1TFL",
+             bids_name="sub-001_TB1TFL", source_file="a.nii"),
+        _row(datatype="anat", bids_guess_suffix="TB1TFL",
+             bids_name="sub-001_TB1TFL", source_file="b.nii"),
     )
     assign_runs(df)
     assert count_collisions(df) == 2
-    assert all("run-" not in n for n in df["proposed_basename"])
+    assert all("run-" not in n for n in df["bids_name"])
 
 
 def test_every_clashing_row_is_counted() -> None:
@@ -195,7 +195,7 @@ def test_fixing_one_row_clears_the_clash_for_both() -> None:
     df = _frame(_row(source_file="a.v"), _row(source_file="b.v"))
     assert count_collisions(df) == 2
 
-    df.at[1, "proposed_basename"] = "sub-001_task-video_eeg"
+    df.at[1, "bids_name"] = "sub-001_task-video_eeg"
     assert count_collisions(df) == 0
     assert find_collisions(df) == {}
 
@@ -206,7 +206,7 @@ def test_fixing_one_row_clears_the_clash_for_both() -> None:
 
 
 def test_a_clean_inventory_has_nothing_to_report() -> None:
-    df = _frame(_row(), _row(proposed_basename="sub-002_pet", source_file="b.v"))
+    df = _frame(_row(), _row(bids_name="sub-002_pet", source_file="b.v"))
     assert describe_collisions(df) is None
 
 
@@ -237,9 +237,9 @@ def test_excluding_one_side_resolves_the_refusal(include: str) -> None:
 
 def _eeg_row(**overrides) -> dict:
     return _row(
-        proposed_datatype="eeg",
+        datatype="eeg",
         bids_guess_suffix="eeg",
-        proposed_basename="sub-001_task-CLV002_eeg",
+        bids_name="sub-001_task-CLV002_eeg",
         entities=json.dumps(
             {"subject": "001", "task": "CLV002"}, sort_keys=True,
         ),
@@ -266,7 +266,7 @@ def test_an_eeg_only_inventory_is_checked_too() -> None:
 
     # eeg/eeg may carry a run, so the scan resolves this one for the user.
     assert count_collisions(df) == 0
-    assert all("run-" in n for n in df["proposed_basename"])
+    assert all("run-" in n for n in df["bids_name"])
 
 
 def test_an_excluded_row_is_not_a_clash() -> None:

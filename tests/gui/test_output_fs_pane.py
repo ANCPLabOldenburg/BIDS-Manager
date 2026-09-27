@@ -19,6 +19,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from .conftest import open_every_folder
 from bidsmgr.gui.converter_panel import ConverterPanel
 from bidsmgr.gui.output_fs_pane import OutputFsPane
 
@@ -76,14 +77,7 @@ def test_pane_populates_from_a_bids_tree(qtbot, tmp_path: Path) -> None:
     assert not pane._empty.isVisible()
     _wait_scan_idle(qtbot, pane)
 
-    def walk(item):
-        yield item.text(0)
-        for i in range(item.childCount()):
-            yield from walk(item.child(i))
-
-    labels: list[str] = []
-    for i in range(pane._tree.topLevelItemCount()):
-        labels.extend(walk(pane._tree.topLevelItem(i)))
+    labels = _walk_labels(pane)
     assert any("study" in lbl for lbl in labels)
     assert any("sub-001_T1w.nii.gz" in lbl for lbl in labels)
     assert any("sub-001_T1w.json" in lbl for lbl in labels)
@@ -105,7 +99,10 @@ def test_pane_clears_on_none(qtbot, tmp_path: Path) -> None:
     assert pane._tree.topLevelItemCount() == 0
 
 
+
+
 def _walk_labels(pane: OutputFsPane) -> list[str]:
+    open_every_folder(pane._tree)
     out: list[str] = []
     def walk(item):
         yield item.text(0)
@@ -118,6 +115,7 @@ def _walk_labels(pane: OutputFsPane) -> list[str]:
 
 def _find_item(pane: OutputFsPane, path: tuple[str, ...]):
     """Walk the pane's tree and return the QTreeWidgetItem at ``path``."""
+    open_every_folder(pane._tree)
     cur = None
     for i in range(pane._tree.topLevelItemCount()):
         if pane._tree.topLevelItem(i).text(0) == path[0]:
@@ -150,10 +148,12 @@ def test_user_expansion_survives_rebuild(qtbot, tmp_path: Path) -> None:
     pane.set_root(tmp_path)
     _wait_scan_idle(qtbot, pane)
 
-    # ``study`` is auto-expanded on first render. Collapse it manually.
+    # The first render opens the dataset row and stops there, so open
+    # ``study`` the way a user would, then collapse it again.
     item_study = _find_item(pane, (tmp_path.name, "study"))
     assert item_study is not None
-    assert item_study.isExpanded(), "first render auto-expands the first level"
+    item_study.setExpanded(True)
+    assert item_study.isExpanded()
     item_study.setExpanded(False)
     assert not item_study.isExpanded()
 
@@ -258,14 +258,7 @@ def test_pane_refreshes_after_files_appear(qtbot, tmp_path: Path) -> None:
     _wait_scan_idle(qtbot, pane)
 
     # Initially empty (the dir exists but has no children).
-    def walk(item):
-        yield item.text(0)
-        for i in range(item.childCount()):
-            yield from walk(item.child(i))
-
-    labels_before: list[str] = []
-    for i in range(pane._tree.topLevelItemCount()):
-        labels_before.extend(walk(pane._tree.topLevelItem(i)))
+    labels_before = _walk_labels(pane)
 
     # Simulate a convert producing files.
     (tmp_path / "study" / "sub-001").mkdir(parents=True)
@@ -273,9 +266,7 @@ def test_pane_refreshes_after_files_appear(qtbot, tmp_path: Path) -> None:
 
     pane.refresh()
     _wait_scan_idle(qtbot, pane)
-    labels_after: list[str] = []
-    for i in range(pane._tree.topLevelItemCount()):
-        labels_after.extend(walk(pane._tree.topLevelItem(i)))
+    labels_after = _walk_labels(pane)
     assert any("sub-001_T1w.nii.gz" in lbl for lbl in labels_after)
     assert "sub-001_T1w.nii.gz" not in str(labels_before)
 
@@ -324,15 +315,7 @@ def test_convert_finished_refreshes_output_pane(qtbot, tmp_path: Path) -> None:
     _wait_scan_idle(qtbot, panel._output_pane)
 
     # Walk the rendered tree and assert the marker file is present.
-    def walk(item):
-        yield item.text(0)
-        for i in range(item.childCount()):
-            yield from walk(item.child(i))
-
-    labels: list[str] = []
-    for i in range(panel._output_pane._tree.topLevelItemCount()):
-        labels.extend(walk(panel._output_pane._tree.topLevelItem(i)))
-    assert any("marker.tsv" in lbl for lbl in labels)
+    assert any("marker.tsv" in lbl for lbl in _walk_labels(panel._output_pane))
 
 
 # ---------------------------------------------------------------------------
@@ -438,3 +421,48 @@ def test_a_late_result_after_the_root_changed_is_dropped(
     assert "b" in labels or any("sub-002" in x for x in labels), (
         f"the newer root should be what is rendered, got {labels}"
     )
+
+
+def test_an_open_folder_keeps_its_contents_across_a_rebuild(
+    qtbot, tmp_path: Path,
+) -> None:
+    """A folder is drawn when it is opened, so a rebuild has to redraw the
+    ones that were already open.
+
+    Restoring only the fold FLAG left the folder expanded over its
+    placeholder, which is one blank row, and the only way to see the contents
+    again was to close it and open it. The watcher fires this on every disk
+    change during a conversion.
+    """
+    anat = tmp_path / "study" / "sub-001" / "anat"
+    anat.mkdir(parents=True)
+    (anat / "sub-001_T1w.nii.gz").write_bytes(b"")
+    pane = OutputFsPane()
+    qtbot.addWidget(pane)
+    pane.show()
+    qtbot.waitExposed(pane)
+    pane.set_root(tmp_path)
+    _wait_scan_idle(qtbot, pane)
+
+    item = _find_item(pane, (tmp_path.name, "study", "sub-001", "anat"))
+    assert item is not None
+    item.setExpanded(True)
+    before = {item.child(i).text(0) for i in range(item.childCount())}
+    assert before == {"sub-001_T1w.nii.gz"}
+
+    pane._rebuild()
+    _wait_scan_idle(qtbot, pane)
+
+    # Walk down through the rows that already exist: expanding would hide
+    # the bug by drawing the folder on the way past.
+    cur = pane._tree.topLevelItem(0)
+    for name in ("study", "sub-001", "anat"):
+        cur = next(
+            (cur.child(i) for i in range(cur.childCount())
+             if cur.child(i).text(0) == name),
+            None,
+        )
+        assert cur is not None, f"{name} is not drawn"
+    assert cur.isExpanded(), "the fold state was dropped"
+    after = {cur.child(i).text(0) for i in range(cur.childCount())}
+    assert after == before, "an open folder came back empty"

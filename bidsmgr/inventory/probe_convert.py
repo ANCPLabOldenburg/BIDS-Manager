@@ -76,7 +76,7 @@ from joblib import delayed  # pools are built by bidsmgr.util.parallel
 
 from bidsmgr.util.paths import long_path
 
-from ..classifier.dcm2niix_bidsguess import find_dcm2niix
+from ..classifier.dcm2niix_bidsguess import find_dcm2niix, run_dcm2niix
 from .types import InventoryRow
 
 log = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ def _run_dcm2niix_full(
         "-f", PROBE_BASENAME,
         str(dicom_dir),
     ]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return run_dcm2niix(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 _BIDS_EXT_PRIORITY = (".nii.gz", ".nii", ".bval", ".bvec", ".tsv", ".tsv.gz")
@@ -307,9 +307,9 @@ def _should_probe_row(row: InventoryRow) -> bool:
 
     if row.modality != "mri" or not row.series_uid:
         return False
-    fine = (row.fine_modality or "").lower()
-    skip_modalities = {"scout", "report", "physio"}
-    if fine in skip_modalities:
+    fine = (row.sequence_kind or "").lower()
+    skip_kinds = {"scout", "report", "physio"}
+    if fine in skip_kinds:
         return False
     return True
 

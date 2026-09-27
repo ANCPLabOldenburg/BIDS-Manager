@@ -6,7 +6,7 @@ question a user has when they open a dataset they did not make, or come back
 to one after a month: what is in it, is it evenly filled, and where is the
 work.
 
-So this counts. Subjects, sessions, modalities, how much of the metadata each
+So this counts. Subjects, sessions, datatypes, how much of the metadata each
 datatype actually carries, and where the findings are concentrated. All of it
 read from the tree and from a validation report the caller already has:
 nothing here runs the validator, because drawing a summary is not a reason to
@@ -31,6 +31,7 @@ import json
 import logging
 from collections import Counter
 from dataclasses import dataclass, field as dc_field
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -47,7 +48,7 @@ DATASET_FILES = (
 
 
 @dataclass
-class ModalityRow:
+class DatatypeRow:
     """One datatype, and how much of it there is."""
 
     datatype: str
@@ -75,6 +76,26 @@ class ModalityRow:
 
 
 @dataclass
+class SuffixRow:
+    """One SUFFIX, and how much of it there is.
+
+    The datatype is the folder a recording lands in; the suffix is what the
+    recording IS. ``anat`` holds ``T1w``, ``T2w`` and ``FLAIR``, and a
+    summary that stops at the folder cannot tell a dataset with three
+    anatomicals per subject from one with three subjects' worth of T1w.
+    Both are BIDS terms and the standard uses them for different things, so
+    the dashboard reports both.
+    """
+
+    datatype: str
+    suffix: str
+    subjects: int = 0
+    recordings: int = 0
+    errors: int = 0
+    warnings: int = 0
+
+
+@dataclass
 class SubjectRow:
     """One subject, and how evenly filled it is compared with the others."""
 
@@ -94,7 +115,8 @@ class Dashboard:
     name: str = ""
     bids_version: str = ""
     subjects: list[SubjectRow] = dc_field(default_factory=list)
-    modalities: list[ModalityRow] = dc_field(default_factory=list)
+    datatypes: list[DatatypeRow] = dc_field(default_factory=list)
+    suffixes: list[SuffixRow] = dc_field(default_factory=list)
     # Dataset-level files that are present, and the ones that are not.
     present: tuple[str, ...] = ()
     absent: tuple[str, ...] = ()
@@ -206,12 +228,14 @@ def _finding_counts(report) -> dict[str, tuple[int, int]]:
 
 
 def _walk_tree(root: Path, board: Dashboard, counts: dict) -> None:
-    """One pass over the tree, filling the subject and modality tables."""
+    """One pass over the tree, filling the subject and datatype tables."""
     from ..schema import list_datatypes
 
     known = set(list_datatypes())
-    modalities: dict[str, ModalityRow] = {}
+    rows_by_datatype: dict[str, DatatypeRow] = {}
+    rows_by_suffix: dict[tuple[str, str], SuffixRow] = {}
     seen_subjects: dict[str, set[str]] = {}
+    seen_suffix_subjects: dict[tuple[str, str], set[str]] = {}
 
     for subject_dir in sorted(p for p in root.glob("sub-*") if p.is_dir()):
         row = SubjectRow(label=subject_dir.name)
@@ -239,27 +263,87 @@ def _walk_tree(root: Path, board: Dashboard, counts: dict) -> None:
             if datatype not in known:
                 continue
             datatypes.add(datatype)
-            modality = modalities.setdefault(
-                datatype, ModalityRow(datatype=datatype),
+            entry = rows_by_datatype.setdefault(
+                datatype, DatatypeRow(datatype=datatype),
             )
-            modality.files += 1
-            modality.errors += errors
-            modality.warnings += warnings
+            entry.files += 1
+            entry.errors += errors
+            entry.warnings += warnings
             if path.suffix == ".json":
-                _count_metadata(path, modality)
+                _count_metadata(path, entry)
             elif path.suffix not in (".tsv", ".bval", ".bvec"):
-                modality.recordings += 1
+                entry.recordings += 1
             seen_subjects.setdefault(datatype, set()).add(subject_dir.name)
+
+            # And by SUFFIX, which is what the recording IS rather than the
+            # folder it lands in. Only recordings are counted, so a sidecar
+            # is not a second T1w.
+            suffix = _suffix_of(path)
+            if suffix:
+                key = (datatype, suffix)
+                srow = rows_by_suffix.setdefault(
+                    key, SuffixRow(datatype=datatype, suffix=suffix),
+                )
+                srow.errors += errors
+                srow.warnings += warnings
+                if path.suffix not in (".json", ".tsv", ".bval", ".bvec"):
+                    srow.recordings += 1
+                seen_suffix_subjects.setdefault(key, set()).add(
+                    subject_dir.name
+                )
 
         row.datatypes = tuple(sorted(datatypes))
         board.subjects.append(row)
 
     for datatype, subjects in seen_subjects.items():
-        modalities[datatype].subjects = len(subjects)
-    board.modalities = sorted(modalities.values(), key=lambda m: m.datatype)
+        rows_by_datatype[datatype].subjects = len(subjects)
+    board.datatypes = sorted(
+        rows_by_datatype.values(), key=lambda r: r.datatype,
+    )
+    for key, subjects in seen_suffix_subjects.items():
+        rows_by_suffix[key].subjects = len(subjects)
+    board.suffixes = sorted(
+        rows_by_suffix.values(), key=lambda r: (r.datatype, r.suffix),
+    )
 
 
-def _count_metadata(path: Path, modality: ModalityRow) -> None:
+def _suffix_of(path: Path) -> str:
+    """The BIDS suffix of a filename, checked against the schema.
+
+    The suffix is the last underscore-separated token before the extension,
+    and only if the standard knows it: a stray ``notes.txt`` beside a
+    recording must not become a datatype's third "suffix", and neither must
+    ``sub-001`` on a file whose name carries no suffix at all.
+    """
+    from ..schema import list_datatypes
+
+    name = path.name
+    for _ in range(2):          # strip .nii.gz and .tsv.gz in two bites
+        stem, dot, _ext = name.rpartition(".")
+        if not dot:
+            break
+        name = stem
+    token = name.rsplit("_", 1)[-1] if "_" in name else name
+    if not token or "-" in token:
+        return ""
+    return token if token in _known_suffixes(tuple(list_datatypes())) else ""
+
+
+@lru_cache(maxsize=1)
+def _known_suffixes(datatypes: tuple[str, ...]) -> frozenset[str]:
+    """Every suffix the ACTIVE schema declares, across all datatypes."""
+    from ..schema import list_suffixes
+
+    out: set[str] = set()
+    for datatype in datatypes:
+        try:
+            out.update(list_suffixes(datatype))
+        except Exception:  # noqa: BLE001 - a summary must still be drawn
+            continue
+    return frozenset(out)
+
+
+def _count_metadata(path: Path, row: DatatypeRow) -> None:
     """How much of what the standard declares this sidecar actually answers."""
     from ..metadata.engine import _NA_VALUE, _TODO_VALUE
     from ..schema import sidecar_fields
@@ -272,21 +356,21 @@ def _count_metadata(path: Path, modality: ModalityRow) -> None:
         return
     suffix = path.stem.rsplit("_", 1)[-1] if "_" in path.stem else path.stem
     try:
-        declared = sidecar_fields(modality.datatype, suffix)
+        declared = sidecar_fields(row.datatype, suffix)
     except Exception:  # noqa: BLE001 - a summary must still be drawn
         return
     names = {field.name for field in declared}
     if not names:
         return
-    modality.declared += len(names)
+    row.declared += len(names)
     for name in names:
         if name not in data:
             continue
         value = data[name]
         if _is_placeholder(value, _TODO_VALUE, _NA_VALUE):
-            modality.placeholders += 1
+            row.placeholders += 1
         else:
-            modality.answered += 1
+            row.answered += 1
 
 
 def _is_placeholder(value, todo: str, na: str) -> bool:
@@ -380,7 +464,7 @@ def human_bytes(size: int) -> str:
 __all__ = [
     "DATASET_FILES",
     "Dashboard",
-    "ModalityRow",
+    "DatatypeRow",
     "SubjectRow",
     "build",
     "human_bytes",

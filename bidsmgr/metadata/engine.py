@@ -26,6 +26,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -699,7 +700,7 @@ def _write_participants(
 def _load_demographics_from_inventory(
     inventory_tsv: Optional[Path], report: MetadataReport,
 ) -> dict[str, dict[str, str]]:
-    """Read the inventory TSV and group demographics by ``BIDS_name``.
+    """Read the inventory TSV and group demographics by ``participant_id``.
 
     bidsmgr-scan writes ``GivenName`` / ``FamilyName`` / ``PatientID`` /
     ``PatientAge`` / ``PatientSex`` columns (PascalCase) — see
@@ -722,15 +723,15 @@ def _load_demographics_from_inventory(
         report.warnings.append(f"could not read inventory TSV {inventory_tsv}: {exc}")
         return {}
 
-    if df.empty or "BIDS_name" not in df.columns:
+    if df.empty or "participant_id" not in df.columns:
         return {}
 
     lookup: dict[str, dict[str, str]] = {}
-    for bids_name, sub_df in df.groupby("BIDS_name"):
-        bids_name = str(bids_name).strip()
-        if not bids_name:
+    for participant, sub_df in df.groupby("participant_id"):
+        participant = str(participant).strip()
+        if not participant:
             continue
-        pid = bids_name if bids_name.startswith("sub-") else f"sub-{bids_name}"
+        pid = participant if participant.startswith("sub-") else f"sub-{participant}"
         head = sub_df.iloc[0]
         lookup[pid] = {
             "given_name": str(head.get("GivenName", "") or ""),
@@ -858,13 +859,44 @@ _SCANS_SYSTEM_ENTITIES: tuple[str, ...] = ("acq-calibration", "acq-crosstalk")
 _SCANS_DIR_EXTS: frozenset[str] = frozenset({".ds", ".mff"})
 
 
+@lru_cache(maxsize=1)
+def _schema_suffixes() -> frozenset:
+    """Every suffix the standard defines, across all datatypes."""
+    from .. import schema as schema_mod
+
+    return frozenset(
+        s for dt in schema_mod.list_datatypes()
+        for s in schema_mod.list_suffixes(dt)
+    )
+
+
+# Files an operating system or an editor leaves in a data folder. None of
+# them is BIDS and all of them turn up in real datasets.
+_OS_JUNK = frozenset({
+    ".DS_Store", "Thumbs.db", "desktop.ini", "Icon\r", ".directory",
+})
+
+
 def _is_recording_file(path: Path) -> bool:
     """Does this path get a row in ``*_scans.tsv``?
 
     True for the data files themselves, of every modality, and false for the
     sidecars, tables and format side files that accompany them.
+
+    It also has to be false for everything that is not BIDS at all. This
+    used to end with "the last token carrying no hyphen is the suffix, so
+    if it is not a known companion it is a recording", which accepted
+    ``.DS_Store``, ``Thumbs.db``, ``notes.txt`` and every dotfile, and put
+    them in ``*_scans.tsv`` as though they were data. The standard is the
+    thing that decides what a recording is, so the suffix is now CHECKED
+    against it rather than assumed from the shape of the name.
     """
     name = path.name
+
+    # OS junk and editor droppings, before anything else. A leading dot is
+    # not a BIDS name on any platform and never will be.
+    if name.startswith(".") or name in _OS_JUNK:
+        return False
     if name.endswith(".tsv.gz") or name.endswith(".nii.gz"):
         ext = ".tsv.gz" if name.endswith(".tsv.gz") else ".nii.gz"
     else:
@@ -876,11 +908,14 @@ def _is_recording_file(path: Path) -> bool:
     if any(token in name for token in _SCANS_SYSTEM_ENTITIES):
         return False
     # The BIDS suffix is the last underscore-delimited token that carries no
-    # hyphen; entity tokens all do.
+    # hyphen; entity tokens all do. It has to BE a suffix the standard
+    # defines, or the file is not a recording whatever it looks like.
     stem = name.split(".")[0]
     for token in reversed(stem.split("_")):
         if "-" not in token:
-            return token not in _SCANS_COMPANION_SUFFIXES
+            if token in _SCANS_COMPANION_SUFFIXES:
+                return False
+            return token in _schema_suffixes()
     return False
 
 

@@ -42,3 +42,51 @@ def test_rejects_malformed():
         parse_bids_guess([])
     with pytest.raises(ValueError):
         parse_bids_guess(["anat"])
+
+
+class TestTheSidecarIsJoinedToTheRightRow:
+    """dcm2niix does not always write a usable ``SeriesInstanceUID``.
+
+    Measured 2026-09-26 on a Siemens study whose spectroscopy is stored under
+    the STANDARD MR Spectroscopy Storage SOP class: the sidecar's
+    ``SeriesInstanceUID`` came out as ``133347.357000``, which is the series
+    TIME. The image series in the same folder got a correct UID, and a second
+    study whose spectroscopy uses the Siemens private CSA class got one too.
+    Joining on that field alone meant both spectroscopy series matched no
+    inventory row, got no BidsGuess, and the scan reported them with no
+    datatype at all: the tool "found nothing".
+    """
+
+    def test_a_real_uid_is_recognised(self):
+        from bidsmgr.classifier.dcm2niix_bidsguess import looks_like_uid
+
+        assert looks_like_uid(
+            "1.3.12.2.1107.5.2.61.237021.2026060513392604620209355.0.0.0"
+        )
+
+    def test_the_series_time_is_not(self):
+        from bidsmgr.classifier.dcm2niix_bidsguess import looks_like_uid
+
+        assert not looks_like_uid("133347.357000")
+
+    @pytest.mark.parametrize("value", ["", None, "svs_se", "1.2", "1.2.a"])
+    def test_nothing_else_passes_either(self, value):
+        from bidsmgr.classifier.dcm2niix_bidsguess import looks_like_uid
+
+        assert not looks_like_uid(value)
+
+
+class TestSpectroscopySuffixSurvivesTheSchema:
+    """``mrs`` is a BIDS 1.11 datatype and ``svs`` one of its suffixes, so a
+    BidsGuess of ``['mrs', '_svs']`` must survive parsing, canonicalisation
+    and validation intact. It did; the join was what failed."""
+
+    def test_it_parses_canonicalises_and_validates(self):
+        from bidsmgr.classifier.dcm2niix_bidsguess import (
+            _validate_classification, canonicalise, parse_bids_guess,
+        )
+
+        datatype, entities, suffix = parse_bids_guess(["mrs", "_svs"])
+        assert (datatype, suffix) == ("mrs", "svs")
+        assert canonicalise(datatype, suffix) == ("mrs", "svs")
+        assert _validate_classification(datatype, suffix, entities)

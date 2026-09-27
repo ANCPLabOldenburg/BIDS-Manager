@@ -326,12 +326,12 @@ class TestScanEegMeg:
         df = scan_eeg_meg(tmp_path, dataset="study")
         assert len(df) == 3
         # Each file with a unique stem becomes a unique subject in flat layout.
-        assert df["BIDS_name"].nunique() == 3
+        assert df["participant_id"].nunique() == 3
         # All rows carry the dataset slug.
         assert (df["dataset"] == "study").all()
-        # Every row's modality and proposed_datatype are set.
+        # Every row's modality and datatype are set.
         assert (df["modality"] == "eeg").all()
-        assert (df["proposed_datatype"] == "eeg").all()
+        assert (df["datatype"] == "eeg").all()
 
     def test_seeds_demographics_and_event_codes_from_probe(
         self, tmp_path: Path, monkeypatch,
@@ -388,7 +388,7 @@ class TestScanEegMeg:
         df = scan_eeg_meg(tmp_path)
         # 4 rows, 2 subjects.
         assert len(df) == 4
-        assert df["BIDS_name"].nunique() == 2
+        assert df["participant_id"].nunique() == 2
         assert set(df["subject"]) == {"S001", "S002"}
 
     def test_proposed_basename_is_schema_built(
@@ -401,7 +401,7 @@ class TestScanEegMeg:
         (sub_dir / "sub-007_ses-pre_task-rest_eeg.edf").write_bytes(b"x")
         df = scan_eeg_meg(tmp_path)
         assert len(df) == 1
-        bn = df.iloc[0]["proposed_basename"]
+        bn = df.iloc[0]["bids_name"]
         assert bn.startswith("sub-")
         assert "_eeg" in bn
         assert "_task-rest" in bn
@@ -417,8 +417,8 @@ class TestScanEegMeg:
         assert len(df) == 1
         row = df.iloc[0]
         assert row["modality"] == "meg"
-        assert row["proposed_datatype"] == "meg"
-        assert "_meg" in row["proposed_basename"]
+        assert row["datatype"] == "meg"
+        assert "_meg" in row["bids_name"]
 
     def test_brainvision_triplet_yields_one_row(
         self, tmp_path: Path, monkeypatch,
@@ -485,9 +485,9 @@ class TestUnsupportedFormats:
         row = df.iloc[0]
         assert str(row["include"]) in ("0", "False", "false")
         assert row["format"] == "CNT"
-        assert eeg_meg_mod.UNSUPPORTED_FORMAT_TOKEN in row["proposed_issues"]
+        assert eeg_meg_mod.UNSUPPORTED_FORMAT_TOKEN in row["issues"]
         # No half-built BIDS name for an unconvertible row.
-        assert row["proposed_basename"] == ""
+        assert row["bids_name"] == ""
 
     def test_nonnative_readable_format_gets_warning_note(
         self, tmp_path: Path, monkeypatch,
@@ -507,8 +507,8 @@ class TestUnsupportedFormats:
         assert len(df) == 1
         row = df.iloc[0]
         assert str(row["include"]) in ("1", "True", "true")  # still convertible
-        assert eeg_meg_mod.NONNATIVE_FORMAT_TOKEN in row["proposed_issues"]
-        assert row["proposed_basename"]  # has a real BIDS name
+        assert eeg_meg_mod.NONNATIVE_FORMAT_TOKEN in row["issues"]
+        assert row["bids_name"]  # has a real BIDS name
 
     def test_native_format_has_no_note(
         self, tmp_path: Path, monkeypatch,
@@ -517,7 +517,7 @@ class TestUnsupportedFormats:
         _patch_probe(monkeypatch)  # stub fmt defaults to EDF
         (tmp_path / "a.edf").write_bytes(b"x")
         df = scan_eeg_meg(tmp_path, dataset="study")
-        assert df.iloc[0]["proposed_issues"] == ""
+        assert df.iloc[0]["issues"] == ""
 
 
 def test_pdf_documents_are_never_scanned(tmp_path):

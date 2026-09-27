@@ -45,6 +45,11 @@ from ..schema import entity_key_info
 from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
 from .widgets.move_preview import KEY_ROLE, MovePreviewTree, plan_extras
+from .widgets.preview_split import (
+    PreviewSplit,
+    controls_panel,
+    preview_toggle,
+)
 
 def entity_choices() -> list[tuple[str, str]]:
     """Every entity the ACTIVE schema defines, as ``(key, display name)``.
@@ -221,8 +226,12 @@ class RenameEntityDialog(QDialog):
             tools.addWidget(btn)
         tools.addStretch(1)
         pl.addLayout(tools)
-
-        bl.addWidget(preview_card, 1)
+        # Controls and preview in a splitter the user can flip
+        # between stacked and side by side. See preview_split.py.
+        self._split = PreviewSplit(
+            controls_panel(chooser, self._summary), preview_card, name="rename",
+        )
+        bl.addWidget(self._split, 1)
         outer.addWidget(body, 1)
 
         self._status = QLabel("")
@@ -238,6 +247,9 @@ class RenameEntityDialog(QDialog):
         self._ok.setEnabled(False)
         buttons.accepted.connect(self._on_apply)
         buttons.rejected.connect(self.reject)
+        buttons.addButton(
+            preview_toggle(self._split), QDialogButtonBox.ButtonRole.ResetRole
+        )
         outer.addWidget(build_footer_with(self._status, buttons))
 
         self._reload_values()

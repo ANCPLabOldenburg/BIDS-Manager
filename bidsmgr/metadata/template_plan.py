@@ -402,7 +402,7 @@ def present_pairs(df) -> list[tuple[str, str]]:
     for _, row in df.iterrows():
         if str(row.get("include", "1")).strip() in ("0", "False", "false"):
             continue
-        datatype = str(row.get("proposed_datatype", "") or "").strip()
+        datatype = str(row.get("datatype", "") or "").strip()
         if not datatype:
             datatype = str(row.get("bids_guess_datatype", "") or "").strip()
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
@@ -425,7 +425,7 @@ def pair_counts(df) -> dict[tuple[str, str], int]:
     for _, row in df.iterrows():
         if str(row.get("include", "1")).strip() in ("0", "False", "false"):
             continue
-        datatype = str(row.get("proposed_datatype", "") or "").strip()
+        datatype = str(row.get("datatype", "") or "").strip()
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
         if datatype and suffix:
             out[(datatype, suffix)] = out.get((datatype, suffix), 0) + 1
@@ -441,26 +441,26 @@ def example_paths_for(df) -> dict[tuple[str, str], str]:
         return {}
     out: dict[tuple[str, str], str] = {}
     for _, row in df.iterrows():
-        datatype = str(row.get("proposed_datatype", "") or "").strip()
+        datatype = str(row.get("datatype", "") or "").strip()
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
-        basename = str(row.get("proposed_basename", "") or "").strip()
+        basename = str(row.get("bids_name", "") or "").strip()
         if not (datatype and suffix and basename):
             continue
         key = (datatype, suffix)
         if key not in out:
-            subject = str(row.get("BIDS_name", "") or "sub-<label>").strip()
+            subject = str(row.get("participant_id", "") or "sub-<label>").strip()
             out[key] = f"{subject}/{datatype}/{basename}.json"
     return out
 
 
 # ---------------------------------------------------------------------------
-# The tree the form renders: region -> modality -> file
+# The tree the form renders: region -> datatype -> file
 # ---------------------------------------------------------------------------
 
 # Region keys. Agnostic first, always: what applies to the whole dataset is
 # asked before what applies to one instrument.
 REGION_AGNOSTIC = "agnostic"
-REGION_MODALITY = "modality-specific"
+REGION_DATATYPE = "datatype-specific"
 
 # How a datatype reads as a heading, and the order regions list them in. A
 # datatype absent from the scan never appears, so this is an ordering, not a
@@ -473,7 +473,7 @@ _MODALITY_ORDER = ("mri", "anat", "func", "dwi", "fmap", "perf",
 class TemplateNode:
     """One node of the template tree.
 
-    ``kind`` is ``region``, ``modality`` or ``file``. Only a file node carries a
+    ``kind`` is ``region``, ``datatype`` or ``file``. Only a file node carries a
     section; the others exist to group and to collapse.
     """
 
@@ -567,7 +567,7 @@ def build_template_tree(
     agnostic_name, agnostic_dir = _file_label(agnostic_section)
     agnostic = TemplateNode(
         key=REGION_AGNOSTIC,
-        label="Modality-agnostic",
+        label="Every datatype",
         kind="region",
         children=(
             TemplateNode(
@@ -580,7 +580,7 @@ def build_template_tree(
         ),
     )
 
-    by_modality: dict[str, list[TemplateNode]] = {}
+    by_datatype: dict[str, list[TemplateNode]] = {}
     seen: set[tuple[str, str]] = set()
     for datatype, suffix in sorted(present):
         if not datatype or not suffix or (datatype, suffix) in seen:
@@ -597,7 +597,7 @@ def build_template_tree(
             # Nothing left to ask about this file: the converter answers it all.
             continue
         filename, directory = _file_label(section)
-        by_modality.setdefault(datatype, []).append(
+        by_datatype.setdefault(datatype, []).append(
             TemplateNode(
                 key=section.storage_key,
                 label=filename,
@@ -608,26 +608,26 @@ def build_template_tree(
         )
 
     order = {name: i for i, name in enumerate(_MODALITY_ORDER)}
-    modalities = tuple(
+    datatype_nodes = tuple(
         TemplateNode(
             key=datatype,
             label=datatype.upper(),
-            kind="modality",
+            kind="datatype",
             children=tuple(files),
         )
         for datatype, files in sorted(
-            by_modality.items(), key=lambda kv: (order.get(kv[0], 99), kv[0])
+            by_datatype.items(), key=lambda kv: (order.get(kv[0], 99), kv[0])
         )
     )
 
     tree = [agnostic]
-    if modalities:
+    if datatype_nodes:
         tree.append(
             TemplateNode(
-                key=REGION_MODALITY,
-                label="Modality-specific",
+                key=REGION_DATATYPE,
+                label="Per datatype",
                 kind="region",
-                children=modalities,
+                children=datatype_nodes,
             )
         )
     return tree
@@ -635,7 +635,7 @@ def build_template_tree(
 
 __all__ = [
     "REGION_AGNOSTIC",
-    "REGION_MODALITY",
+    "REGION_DATATYPE",
     "STORAGE_DATASET_DESCRIPTION",
     "STORAGE_SEQUENCE_TEMPLATE",
     "ORIGIN_ABSENT",

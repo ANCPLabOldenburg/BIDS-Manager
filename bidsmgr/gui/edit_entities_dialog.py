@@ -48,6 +48,12 @@ from ..editor import restructure as rs
 from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
 from .widgets.move_preview import MovePreviewTree, plan_extras
+from .widgets.preview_split import (
+    PreviewSplit,
+    controls_panel,
+    preview_toggle,
+)
+from .widgets.scope_bar import ScopeBar
 
 # Matches the rename dialog: planning walks the dataset, so doing it on every
 # keystroke froze the window on anything real.
@@ -100,10 +106,19 @@ class EditEntitiesDialog(QDialog):
         form.setSpacing(8)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
+        # The scope is a CHOICE, not a report. Opened from the tree it starts
+        # on what was picked and behaves as it always did; opened from the
+        # Tools menu with nothing selected it starts on the whole dataset and
+        # is narrowed from there.
+        self._scope_bar = ScopeBar(self._root, self._targets, show_summary=False, parent=self)
+        self._targets = self._scope_bar.targets()
+        self._scope_bar.changed.connect(self._on_scope_changed)
+        form.addRow("Applies to:", self._scope_bar)
+
         self._scope = QLabel("")
         self._scope.setObjectName("dlg-hint")
         self._scope.setWordWrap(True)
-        form.addRow("Applies to:", self._scope)
+        form.addRow("", self._scope)
 
         self._mode = QComboBox()
         self._mode.setObjectName("ent-input")
@@ -178,7 +193,15 @@ class EditEntitiesDialog(QDialog):
             tools.addWidget(btn)
         tools.addStretch(1)
         pl.addLayout(tools)
-        bl.addWidget(preview_card, 1)
+        # Controls and preview in a splitter the user can flip between
+        # stacked and side by side. Stacked is the default and the right
+        # one to read; beside is what a wide window and a fifty-file
+        # preview want.
+        self._split = PreviewSplit(
+            controls_panel(chooser, self._summary), preview_card,
+            name="entities",
+        )
+        bl.addWidget(self._split, 1)
         outer.addWidget(body, 1)
 
         self._status = QLabel("")
@@ -194,6 +217,9 @@ class EditEntitiesDialog(QDialog):
         self._ok.setEnabled(False)
         buttons.accepted.connect(self._on_apply)
         buttons.rejected.connect(self.reject)
+        buttons.addButton(
+            preview_toggle(self._split), QDialogButtonBox.ButtonRole.ResetRole
+        )
         outer.addWidget(build_footer_with(self._status, buttons))
 
         self._describe_scope()
@@ -217,12 +243,26 @@ class EditEntitiesDialog(QDialog):
             )
         return (
             "Add or remove an entity",
-            "Only entities the <b>schema</b> allows for these files are "
-            "offered, and only ones it treats as optional can be removed. The "
-            "new entity is placed in the position the standard puts it in, "
-            "not where it was typed, and sidecars and companion files travel "
-            "with the recording they belong to.",
+            "Only entities the <b>schema</b> allows are offered, and each "
+            "change is applied <b>file by file</b>: a file that may not carry "
+            "the entity, or that requires the one being removed, is left as it "
+            "is, and the preview lists exactly the files that change. The new "
+            "entity is placed in the position the standard puts it in, not "
+            "where it was typed, and sidecars and companion files travel with "
+            "the recording they belong to.",
         )
+
+    def _on_scope_changed(self) -> None:
+        """A wider or narrower scope means different entities are offerable.
+
+        Both lists are the UNION over the files in scope, each change then
+        applied file by file, so they have to be recomputed rather than
+        filtered: widening from one func run to the whole subject brings in
+        entities other datatypes allow, and narrowing takes them away again.
+        """
+        self._targets = self._scope_bar.targets()
+        self._describe_scope()
+        self._reload_entities()
 
     def _describe_scope(self) -> None:
         files = rs.expand(self._root, self._targets)

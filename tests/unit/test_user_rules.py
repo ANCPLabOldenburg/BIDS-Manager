@@ -166,11 +166,11 @@ def test_derivatives_hint_rejected(monkeypatch) -> None:
 def _excl_df() -> pd.DataFrame:
     return pd.DataFrame([
         {"sequence": "t1_mprage", "source_folder": "sub-01/anat", "include": 1,
-         "bids_guess_skip": False, "proposed_issues": ""},
+         "bids_guess_skip": False, "issues": ""},
         {"sequence": "AAHead_Scout", "source_folder": "sub-01/loc", "include": 1,
-         "bids_guess_skip": False, "proposed_issues": "existing note"},
+         "bids_guess_skip": False, "issues": "existing note"},
         {"sequence": "rest_bold", "source_folder": "scratch/junk", "include": 1,
-         "bids_guess_skip": False, "proposed_issues": ""},
+         "bids_guess_skip": False, "issues": ""},
     ])
 
 
@@ -181,8 +181,8 @@ def test_apply_user_exclusions_sequence_match() -> None:
     assert df.at[0, "include"] == 1
     assert df.at[1, "include"] == 0
     assert bool(df.at[1, "bids_guess_skip"]) is True
-    assert scan.USER_EXCLUDED_ISSUE_TOKEN in df.at[1, "proposed_issues"]
-    assert "existing note" in df.at[1, "proposed_issues"]   # prepended, not clobbered
+    assert scan.USER_EXCLUDED_ISSUE_TOKEN in df.at[1, "issues"]
+    assert "existing note" in df.at[1, "issues"]   # prepended, not clobbered
     assert df.at[2, "include"] == 1
     # Reversible: no rows dropped.
     assert len(df) == 3

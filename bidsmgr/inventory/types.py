@@ -44,7 +44,7 @@ class InventoryRow(BaseModel):
     series_uid: Optional[str] = None  # MRI-specific but cheap to keep here.
     series_description: Optional[str] = None
     acq_time: Optional[str] = None  # for cross-row run ordering
-    fine_modality: Optional[str] = None  # legacy regex label (T1w, bold, …)
+    sequence_kind: Optional[str] = None  # legacy regex label (T1w, bold, …)
     image_type: Optional[str] = None  # third DICOM ImageType element (M / P / ND / …)
 
 

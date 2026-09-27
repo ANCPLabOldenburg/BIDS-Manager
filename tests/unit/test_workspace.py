@@ -14,7 +14,7 @@ from bidsmgr.project import workspace as ws
 def _make_version(root: Path, label: str, raw: str) -> Path:
     vdir = ws.allocate_version_dir(root, label)
     vdir.mkdir(parents=True)
-    ws.version_inventory(vdir).write_text("BIDS_name\tinclude\n")
+    ws.version_inventory(vdir).write_text("participant_id\tinclude\n")
     ws.write_version_meta(vdir, source_label=label, raw_root=raw, status="curating")
     return vdir
 

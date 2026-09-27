@@ -31,14 +31,14 @@ def _empty_inventory() -> pd.DataFrame:
     provided the ``dataset`` column exists.
     """
     return pd.DataFrame(columns=[
-        "BIDS_name", "session", "include", "modality", "modality_bids",
+        "participant_id", "session", "include", "modality", "sequence_kind",
         "sequence", "series_uid", "rep", "acq_time", "image_type",
         "n_files", "GivenName", "FamilyName", "PatientID", "PatientSex",
         "PatientAge", "StudyDescription",
-        "proposed_datatype", "proposed_basename", "Proposed BIDS name",
+        "datatype", "bids_name", "bids_path",
         "bids_guess_classifier", "bids_guess_datatype", "bids_guess_suffix",
         "bids_guess_entities", "bids_guess_confidence", "bids_guess_skip",
-        "proposed_issues", "repetition_type",
+        "issues", "repetition_type",
         "entities", "dataset",
         "probe_n_files", "probe_n_nifti", "probe_n_volumes", "probe_extensions",
         "study_instance_uid", "study_date", "study_time",
@@ -67,7 +67,7 @@ def test_empty_inventory_returns_zero(qtbot, tmp_path: Path) -> None:
 def test_missing_dataset_column_raises_failed(qtbot, tmp_path: Path) -> None:
     """The CLI explicitly raises if the inventory lacks ``dataset``."""
     tsv = tmp_path / "inv.tsv"
-    df = pd.DataFrame([{"BIDS_name": "sub-001", "include": 1}])
+    df = pd.DataFrame([{"participant_id": "sub-001", "include": 1}])
     df.to_csv(tsv, sep="\t", index=False)
 
     worker = ConvertWorker(df, tsv, tmp_path / "out", n_jobs=1)
@@ -119,17 +119,17 @@ def test_dataframe_written_back_to_tsv(qtbot, tmp_path: Path) -> None:
     df = pd.concat([df, pd.DataFrame([{
         c: "" for c in df.columns
     }])], ignore_index=True)
-    df.at[0, "BIDS_name"] = "sub-write-back-marker"
+    df.at[0, "participant_id"] = "sub-write-back-marker"
     df.at[0, "include"] = "0"
     df.at[0, "dataset"] = "tombstone"
     df.to_csv(tsv, sep="\t", index=False)
 
     # Mutate the in-memory df to a different marker before launching.
-    df.at[0, "BIDS_name"] = "sub-edited"
+    df.at[0, "participant_id"] = "sub-edited"
     worker = ConvertWorker(df, tsv, tmp_path / "out", n_jobs=1)
     with qtbot.waitSignal(worker.finished_with_result, timeout=30_000):
         worker.start()
     worker.wait()
 
     persisted = pd.read_csv(tsv, sep="\t", dtype=str, keep_default_na=False)
-    assert persisted.at[0, "BIDS_name"] == "sub-edited"
+    assert persisted.at[0, "participant_id"] == "sub-edited"

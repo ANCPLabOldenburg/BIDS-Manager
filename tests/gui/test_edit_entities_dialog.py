@@ -198,9 +198,14 @@ def test_the_entity_row_is_hidden_in_session_mode(
     assert [s.key for s in dlg._slots] == ["ses"]
 
 
-def test_a_mixed_selection_offers_only_what_suits_both(
+def test_a_mixed_selection_is_offered_what_suits_either(
     qtbot, dataset: Path,
 ) -> None:
+    """The union, applied file by file, the same rule as removal and as the
+    Converter's bulk edit. ``echo`` suits the T1w and not the EEG recording,
+    so the pair is still offered it and the EEG file is left alone when it is
+    applied (``test_restructure`` pins the applying half). It used to be the
+    intersection, which offered a mixed selection almost nothing."""
     anat = dataset / "sub-001/anat/sub-001_T1w.nii.gz"
     eeg = dataset / "sub-001/eeg/sub-001_task-rest_eeg.edf"
 
@@ -211,7 +216,8 @@ def test_a_mixed_selection_offers_only_what_suits_both(
 
     alone = {s.key for s in one._slots}
     together = {s.key for s in both._slots}
-    assert "echo" in alone and "echo" not in together
+    assert "echo" in alone and "echo" in together
+    assert together >= alone
     assert "acq" in together
 
 

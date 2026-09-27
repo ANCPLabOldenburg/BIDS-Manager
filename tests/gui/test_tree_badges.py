@@ -26,6 +26,7 @@ from bidsmgr.gui.delegates.bids_tree import (
     BidsTreeDelegate,
 )
 from bidsmgr.gui.theme_manager import ThemeManager
+from .conftest import open_every_folder
 from bidsmgr.gui.widgets.bids_tree_pane import BidsTreePane
 
 pytestmark = pytest.mark.gui
@@ -46,6 +47,7 @@ def dataset(tmp_path: Path) -> Path:
 
 
 def _find(pane: BidsTreePane, name: str):
+    open_every_folder(pane._tree)
     found = pane._tree.findItems(
         name, Qt.MatchFlag.MatchRecursive | Qt.MatchFlag.MatchExactly, 0,
     )
@@ -56,7 +58,7 @@ def _pane(qtbot, dataset: Path) -> BidsTreePane:
     pane = BidsTreePane()
     qtbot.addWidget(pane)
     pane.set_root(dataset)
-    pane._tree.expandAll()
+    open_every_folder(pane._tree)
     return pane
 
 

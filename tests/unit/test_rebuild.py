@@ -1,7 +1,7 @@
 """Unit tests for ``bidsmgr.inventory.rebuild`` and the ``bidsmgr-rebuild`` CLI.
 
 The rebuild engine reconciles the inventory TSV's ``entities`` JSON
-column with the derived display cells (``proposed_basename``, mirror
+column with the derived display cells (``bids_name``, mirror
 columns). Two directions:
 
 * ``--from entities`` (default): JSON is the source of truth.
@@ -16,6 +16,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from bidsmgr.inventory import rebuild as rb
 from bidsmgr.inventory.rebuild import (
     rebuild_from_columns,
     rebuild_from_entities,
@@ -25,21 +26,21 @@ from bidsmgr.inventory.rebuild import (
 def _make_row(
     *,
     entities: dict | None = None,
-    proposed_basename: str = "",
-    proposed_datatype: str = "",
+    bids_name: str = "",
+    datatype: str = "",
     bids_guess_suffix: str = "",
-    BIDS_name: str = "sub-001",
+    participant_id: str = "sub-001",
     session: str = "",
     task: str = "",
     run: str = "",
 ) -> dict:
     return {
         "entities": json.dumps(entities, sort_keys=True) if entities else "",
-        "proposed_basename": proposed_basename,
-        "Proposed BIDS name": proposed_basename,
-        "proposed_datatype": proposed_datatype,
+        "bids_name": bids_name,
+        "bids_path": bids_name,
+        "datatype": datatype,
         "bids_guess_suffix": bids_guess_suffix,
-        "BIDS_name": BIDS_name,
+        "participant_id": participant_id,
         "session": session,
         "task": task,
         "run": run,
@@ -68,10 +69,10 @@ class TestRebuildFromEntities:
     def test_malformed_json_is_warned_not_crashed(self) -> None:
         df = pd.DataFrame([{
             "entities": "{not valid json",
-            "proposed_basename": "x",
-            "proposed_datatype": "anat",
+            "bids_name": "x",
+            "datatype": "anat",
             "bids_guess_suffix": "T1w",
-            "BIDS_name": "sub-001", "session": "", "task": "", "run": "",
+            "participant_id": "sub-001", "session": "", "task": "", "run": "",
         }])
         out, report = rebuild_from_entities(df)
         assert report.rows_updated == 0
@@ -79,22 +80,22 @@ class TestRebuildFromEntities:
 
     def test_basename_rebuilt_from_edited_entities(self) -> None:
         """User changed ``task`` from "restt" to "rest" in the JSON →
-        ``proposed_basename`` regenerated."""
+        ``bids_name`` regenerated."""
         df = pd.DataFrame([_make_row(
             entities={"subject": "001", "task": "rest"},
-            proposed_basename="sub-001_task-restt_bold",   # the stale typo
-            proposed_datatype="func", bids_guess_suffix="bold",
+            bids_name="sub-001_task-restt_bold",   # the stale typo
+            datatype="func", bids_guess_suffix="bold",
         )])
         out, report = rebuild_from_entities(df)
         assert report.basename_changes == 1
-        assert out.iloc[0]["proposed_basename"] == "sub-001_task-rest_bold"
-        assert out.iloc[0]["Proposed BIDS name"] == "sub-001_task-rest_bold"
+        assert out.iloc[0]["bids_name"] == "sub-001_task-rest_bold"
+        assert out.iloc[0]["bids_path"] == "sub-001_task-rest_bold"
 
     def test_mirror_cells_rebuilt(self) -> None:
         df = pd.DataFrame([_make_row(
             entities={"subject": "001", "session": "post", "task": "rest", "run": "2"},
-            proposed_basename="sub-001_ses-post_task-rest_run-2_bold",
-            proposed_datatype="func", bids_guess_suffix="bold",
+            bids_name="sub-001_ses-post_task-rest_run-2_bold",
+            datatype="func", bids_guess_suffix="bold",
             session="ses-pre",   # stale
             task="restt",        # stale
             run="1",             # stale
@@ -110,8 +111,8 @@ class TestRebuildFromEntities:
     def test_no_change_when_already_consistent(self) -> None:
         df = pd.DataFrame([_make_row(
             entities={"subject": "001", "task": "rest"},
-            proposed_basename="sub-001_task-rest_bold",
-            proposed_datatype="func", bids_guess_suffix="bold",
+            bids_name="sub-001_task-rest_bold",
+            datatype="func", bids_guess_suffix="bold",
             task="rest",
         )])
         out, report = rebuild_from_entities(df)
@@ -129,11 +130,11 @@ class TestRebuildFromColumns:
         """User had no entities JSON; we synthesise it from cells."""
         df = pd.DataFrame([_make_row(
             entities=None,   # blank cell
-            BIDS_name="sub-001",
+            participant_id="sub-001",
             session="ses-pre",
             task="rest",
             run="1",
-            proposed_datatype="func", bids_guess_suffix="bold",
+            datatype="func", bids_guess_suffix="bold",
         )])
         out, report = rebuild_from_columns(df)
         result = json.loads(out.iloc[0]["entities"])
@@ -149,9 +150,9 @@ class TestRebuildFromColumns:
         --from columns syncs the JSON."""
         df = pd.DataFrame([_make_row(
             entities={"subject": "001", "task": "restt"},
-            proposed_basename="sub-001_task-restt_bold",
-            proposed_datatype="func", bids_guess_suffix="bold",
-            BIDS_name="sub-001",
+            bids_name="sub-001_task-restt_bold",
+            datatype="func", bids_guess_suffix="bold",
+            participant_id="sub-001",
             task="rest",   # user fixed the typo here
         )])
         out, report = rebuild_from_columns(df)
@@ -159,15 +160,15 @@ class TestRebuildFromColumns:
         assert result["task"] == "rest"
         # And the basename was refreshed too (rebuild_from_entities runs
         # as a secondary pass at the end).
-        assert out.iloc[0]["proposed_basename"] == "sub-001_task-rest_bold"
+        assert out.iloc[0]["bids_name"] == "sub-001_task-rest_bold"
 
     def test_empty_cell_removes_entity(self) -> None:
         """Clearing the ``run`` cell drops ``run`` from the JSON."""
         df = pd.DataFrame([_make_row(
             entities={"subject": "001", "task": "rest", "run": "2"},
-            proposed_basename="sub-001_task-rest_run-2_bold",
-            proposed_datatype="func", bids_guess_suffix="bold",
-            BIDS_name="sub-001",
+            bids_name="sub-001_task-rest_run-2_bold",
+            datatype="func", bids_guess_suffix="bold",
+            participant_id="sub-001",
             task="rest",
             run="",   # cleared
         )])
@@ -178,11 +179,11 @@ class TestRebuildFromColumns:
     def test_malformed_json_repaired(self) -> None:
         df = pd.DataFrame([{
             "entities": "{garbage",
-            "proposed_basename": "",
-            "proposed_datatype": "anat", "bids_guess_suffix": "T1w",
-            "BIDS_name": "sub-001",
+            "bids_name": "",
+            "datatype": "anat", "bids_guess_suffix": "T1w",
+            "participant_id": "sub-001",
             "session": "", "task": "T1", "run": "",
-            "Proposed BIDS name": "",
+            "bids_path": "",
         }])
         out, report = rebuild_from_columns(df)
         # JSON was rebuilt from cells.
@@ -203,8 +204,8 @@ class TestRebuildCli:
         tsv = tmp_path / "inv.tsv"
         df = pd.DataFrame([_make_row(
             entities={"subject": "001", "task": "rest"},
-            proposed_basename="sub-001_task-restt_bold",  # stale
-            proposed_datatype="func", bids_guess_suffix="bold",
+            bids_name="sub-001_task-restt_bold",  # stale
+            datatype="func", bids_guess_suffix="bold",
         )])
         df.to_csv(tsv, sep="\t", index=False)
         before = tsv.read_text()
@@ -219,8 +220,8 @@ class TestRebuildCli:
         tsv = tmp_path / "inv.tsv"
         df = pd.DataFrame([_make_row(
             entities={"subject": "001", "task": "rest"},
-            proposed_basename="sub-001_task-restt_bold",
-            proposed_datatype="func", bids_guess_suffix="bold",
+            bids_name="sub-001_task-restt_bold",
+            datatype="func", bids_guess_suffix="bold",
         )])
         df.to_csv(tsv, sep="\t", index=False)
 
@@ -228,4 +229,51 @@ class TestRebuildCli:
         assert rc == 0
 
         rebuilt = pd.read_csv(tsv, sep="\t", dtype=str, keep_default_na=False)
-        assert rebuilt.iloc[0]["proposed_basename"] == "sub-001_task-rest_bold"
+        assert rebuilt.iloc[0]["bids_name"] == "sub-001_task-rest_bold"
+
+
+class TestAnInventoryFromAnOlderVersion:
+    """The columns were renamed to say what they hold, so an old TSV cannot
+    be read. Saying so is the job: indexing a column that is not there
+    raises a bare ``KeyError`` naming one of them, which tells a user
+    nothing about what to do next.
+    """
+
+    def _old(self) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "entities": '{"subject": "001"}',
+            "proposed_datatype": "anat",
+            "proposed_basename": "sub-001_T1w",
+            "BIDS_name": "sub-001",
+            "bids_guess_suffix": "T1w",
+        }])
+
+    def test_it_says_what_happened_and_what_to_do(self):
+        with pytest.raises(rb.InventoryVersionError) as caught:
+            rb.rebuild_from_entities(self._old())
+        message = str(caught.value)
+        assert "earlier version" in message
+        assert "proposed_datatype is now datatype" in message
+        assert "Re-scan" in message
+
+    def test_it_names_every_column_that_is_missing(self):
+        with pytest.raises(rb.InventoryVersionError) as caught:
+            rb.rebuild_from_entities(self._old())
+        assert "'datatype'" in str(caught.value)
+        assert "'bids_name'" in str(caught.value)
+
+    def test_the_other_rebuild_direction_refuses_too(self):
+        with pytest.raises(rb.InventoryVersionError):
+            rb.rebuild_from_columns(self._old())
+
+    def test_a_current_inventory_is_fine(self):
+        df = pd.DataFrame([{
+            "entities": '{"subject": "001"}',
+            "datatype": "anat",
+            "bids_name": "sub-001_T1w",
+            "participant_id": "sub-001",
+            "bids_guess_suffix": "T1w",
+        }])
+        out, report = rb.rebuild_from_entities(df)
+        assert out.at[0, "bids_name"] == "sub-001_T1w"
+        del report

@@ -34,6 +34,7 @@ from . import icons
 from .models import InventoryTableModel
 from .theme_manager import CUR
 from .widgets import PaneHeader
+from .widgets.tree_click import toggle_on_click
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +42,17 @@ log = logging.getLogger(__name__)
 # Hard cap on directory depth so a pathological input doesn't lock the
 # UI in a recursive walk. v0.2.5 datasets rarely exceed 3 levels;
 # DICOM dumps with one folder per subject + one per series sit at 2.
-_MAX_DEPTH = 4
+# Roles on a tree item: where it is, and whether it is the stand-in that
+# keeps a folder expandable before its children exist.
+# How many entries of one folder are drawn before the rest are summarised.
+# A DICOM study is routinely a single flat folder of several thousand files,
+# where lazy expansion buys nothing because that folder IS the first level.
+# Nobody reads three thousand filenames; the cap keeps the pane instant and
+# the count tells the truth about what is there.
+_MAX_PER_FOLDER = 300
+
+_PATH_ROLE = Qt.ItemDataRole.UserRole + 1
+_PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 2
 
 # Skip junk directories that pollute the tree without carrying any
 # scanner-relevant content.
@@ -78,12 +89,16 @@ class RawFsPane(QWidget):
         v.setSpacing(0)
         v.addWidget(PaneHeader("Raw data tree"))
 
+        self._kept: set[str] = set()
+        self._skipped: set[str] = set()
         self._tree = QTreeWidget()
         self._tree.setObjectName("raw-tree")
         self._tree.setHeaderHidden(True)
         self._tree.setRootIsDecorated(True)
         self._tree.setIndentation(14)
         self._tree.setUniformRowHeights(True)
+        self._tree.itemExpanded.connect(self._on_item_expanded)
+        toggle_on_click(self._tree)
         from .theme_manager import scaled_px
         _tree_ico = scaled_px(icons.DEFAULT_TREE_ICON_SIZE)
         self._tree.setIconSize(QSize(_tree_ico, _tree_ico))
@@ -153,28 +168,55 @@ class RawFsPane(QWidget):
         pal = CUR()
         kept_paths, skipped_paths = self._index_model_paths()
 
+        self._kept, self._skipped = kept_paths, skipped_paths
+
         root_item = QTreeWidgetItem([self._root.name])
         root_item.setForeground(0, QColor(pal["text"]))
         root_item.setIcon(0, icons.icon_for_path(self._root.name, is_dir=True))
+        root_item.setData(0, _PATH_ROLE, str(self._root))
         self._tree.addTopLevelItem(root_item)
-        self._populate(self._root, root_item, depth=0,
+        self._populate(self._root, root_item,
                        kept=kept_paths, skipped=skipped_paths)
         root_item.setExpanded(True)
-        # Auto-expand first level so the user immediately sees subjects.
+        # Auto-expand the first level so the user immediately sees subjects.
+        # Expanding is what fills a folder now, so this also builds it.
         for i in range(root_item.childCount()):
             root_item.child(i).setExpanded(True)
+
+    def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
+        """Fill a folder the first time it is opened.
+
+        The tree used to be built in full, recursively, the moment a raw
+        root was set: one ``QTreeWidgetItem`` and one icon lookup per file.
+        On a flat DICOM study of 3,673 files that was 266 ms of frozen
+        window on the GUI thread, and it grew with the dataset.
+
+        Nobody reads three thousand filenames, so they are not built until
+        a folder is opened. Each directory carries one placeholder child so
+        the expander arrow is still there to click.
+        """
+        if item.childCount() != 1:
+            return
+        child = item.child(0)
+        if child.data(0, _PLACEHOLDER_ROLE) is not True:
+            return
+        item.removeChild(child)
+        folder = item.data(0, _PATH_ROLE)
+        if not folder:
+            return
+        self._populate(
+            Path(folder), item, kept=self._kept, skipped=self._skipped,
+        )
 
     def _populate(
         self,
         folder: Path,
         parent: QTreeWidgetItem,
         *,
-        depth: int,
         kept: set[str],
         skipped: set[str],
     ) -> None:
-        if depth >= _MAX_DEPTH:
-            return
+        """Build ONE level of ``folder`` under ``parent``."""
         try:
             entries = sorted(
                 os.scandir(folder),
@@ -185,20 +227,37 @@ class RawFsPane(QWidget):
             return
 
         pal = CUR()
-        for entry in entries:
-            if entry.name.startswith("."):
-                continue
-            if entry.name in _SKIP_DIRS:
-                continue
+        shown = 0
+        visible = [
+            e for e in entries
+            if not e.name.startswith(".") and e.name not in _SKIP_DIRS
+        ]
+        for entry in visible:
+            if shown >= _MAX_PER_FOLDER:
+                more = QTreeWidgetItem([
+                    f"… {len(visible) - shown:,} more, not listed"
+                ])
+                more.setForeground(0, QColor(pal["dim"]))
+                more.setToolTip(0,
+                    "This folder holds more entries than the pane draws. "
+                    "The inspection table lists every series that was found; "
+                    "this pane is for orientation, not for reading a "
+                    "thousand filenames."
+                )
+                parent.addChild(more)
+                break
+            shown += 1
             child = QTreeWidgetItem([entry.name])
             parent.addChild(child)
             child.setIcon(0, icons.icon_for_path(entry.name, is_dir=entry.is_dir()))
             if entry.is_dir():
                 child.setForeground(0, QColor(pal["accent"]))
-                self._populate(
-                    Path(entry.path), child, depth=depth + 1,
-                    kept=kept, skipped=skipped,
-                )
+                child.setData(0, _PATH_ROLE, entry.path)
+                # A placeholder, so the arrow is there and the real
+                # children are built when it is clicked.
+                placeholder = QTreeWidgetItem([""])
+                placeholder.setData(0, _PLACEHOLDER_ROLE, True)
+                child.addChild(placeholder)
             else:
                 abs_path = str(Path(entry.path).resolve())
                 if abs_path in skipped:

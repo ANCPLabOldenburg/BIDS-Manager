@@ -198,10 +198,10 @@ def test_each_modality_keeps_its_own_hardware() -> None:
     spec = RecordingMetaSpec()
     spec.defaults.institution_name = "Uni Oldenburg"   # the building: shared
     spec.defaults.power_line_freq = 50                 # the mains: shared
-    spec.modality_defaults["eeg"] = AcquisitionSpec(
+    spec.datatype_defaults["eeg"] = AcquisitionSpec(
         manufacturer="Brain Products", cap_manufacturer="EasyCap",
     )
-    spec.modality_defaults["meg"] = AcquisitionSpec(
+    spec.datatype_defaults["meg"] = AcquisitionSpec(
         manufacturer="Elekta", dewar_position="upright",
     )
 
@@ -243,7 +243,7 @@ def test_the_same_field_stated_twice_has_a_defined_winner() -> None:
     from bidsmgr.recording_meta import AcquisitionSpec, resolve_sidecar_fields
 
     spec = RecordingMetaSpec()
-    spec.modality_defaults["eeg"] = AcquisitionSpec(manufacturer="Brain Products")
+    spec.datatype_defaults["eeg"] = AcquisitionSpec(manufacturer="Brain Products")
     spec.sequence_templates = {"eeg/eeg": {"Manufacturer": "Elekta"}}
 
     resolved = resolve_sidecar_fields(spec, "eeg", "eeg")
@@ -257,7 +257,7 @@ def test_every_layer_beats_the_one_above_it() -> None:
 
     spec = RecordingMetaSpec()
     spec.defaults.manufacturer = "from dataset"
-    spec.modality_defaults["eeg"] = AcquisitionSpec(manufacturer="from modality")
+    spec.datatype_defaults["eeg"] = AcquisitionSpec(manufacturer="from modality")
     spec.sequence_templates = {
         "eeg/eeg": {"Manufacturer": "from template"},
         "eeg/eeg@rest": {"Manufacturer": "from task template"},
@@ -299,7 +299,7 @@ def test_a_row_cell_beats_a_dataset_default(tmp_path: Path) -> None:
     spec = RecordingMetaSpec()
     spec.defaults = AcquisitionSpec(eeg_reference="Cz", power_line_freq=60.0)
     inventory = pd.DataFrame([{
-        "proposed_basename": "sub-001_task-rest_eeg",
+        "bids_name": "sub-001_task-rest_eeg",
         "source_file": "/raw/one.edf",
         "eeg_reference": "FCz",
         "line_freq": "50",
@@ -325,7 +325,7 @@ def test_varies_is_not_written_from_a_cell_either(tmp_path: Path) -> None:
     spec = RecordingMetaSpec()
     spec.defaults = AcquisitionSpec(eeg_reference=VARIES)
     apply_stated_metadata(root, spec, pd.DataFrame([{
-        "proposed_basename": "sub-001_task-rest_eeg", "source_file": "/raw/one.edf",
+        "bids_name": "sub-001_task-rest_eeg", "source_file": "/raw/one.edf",
     }]))
     assert "EEGReference" not in json.loads(
         (eeg / "sub-001_task-rest_eeg.json").read_text()

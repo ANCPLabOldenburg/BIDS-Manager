@@ -84,7 +84,7 @@ def apply_project_state(df: pd.DataFrame, state: ProjectState) -> None:
     """Replay a project's curation edits onto ``df`` in place.
 
     Mirrors ``InventoryTableModel._apply_project_overlay``: entity edits first
-    (subject renames keep ``BIDS_name`` in sync, then rebuild from entities),
+    (subject renames keep ``participant_id`` in sync, then rebuild from entities),
     then cell overrides (rebuild from columns), then include toggles. Unknown
     row ids are ignored (the inventory may have been re-scanned).
     """
@@ -106,8 +106,8 @@ def apply_project_state(df: pd.DataFrame, state: ProjectState) -> None:
                     current[ent] = val
                 else:
                     current.pop(ent, None)
-                if ent == "subject" and "BIDS_name" in df.columns:
-                    df.at[r, "BIDS_name"] = f"sub-{val}" if val else ""
+                if ent == "subject" and "participant_id" in df.columns:
+                    df.at[r, "participant_id"] = f"sub-{val}" if val else ""
             df.at[r, "entities"] = json.dumps(current, sort_keys=True)
             _rebuild_one_row(df, r, direction="entities")
 

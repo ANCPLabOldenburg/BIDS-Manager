@@ -148,7 +148,7 @@ def test_a_correction_to_what_the_converter_wrote_survives(tmp_path: Path) -> No
     spec = RecordingMetaSpec()
     spec.sequence_templates["eeg/eeg"] = {"Manufacturer": "what the user says"}
     apply_stated_metadata(root, spec, pd.DataFrame([{
-        "proposed_basename": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
+        "bids_name": "sub-001_task-rest_eeg", "source_file": "/raw/a.edf",
     }]))
 
     got = json.loads((eeg / "sub-001_task-rest_eeg.json").read_text())
@@ -207,7 +207,7 @@ def test_a_cell_typed_in_the_table_reaches_the_sidecar_as_a_number(tmp_path) -> 
     (eeg / "sub-001_task-rest_eeg.json").write_text(json.dumps({}))
 
     apply_stated_metadata(root, RecordingMetaSpec(), pd.DataFrame([{
-        "proposed_basename": "sub-001_task-rest_eeg",
+        "bids_name": "sub-001_task-rest_eeg",
         "source_file": "/raw/a.edf",
         "line_freq": "50",
     }]))
@@ -259,7 +259,7 @@ def test_a_numeric_array_stored_as_text_is_repaired_when_it_is_applied(
         "ReconMethodParameterLabels": ["none"],
     }
     apply_stated_metadata(root, spec, pd.DataFrame([{
-        "proposed_basename": "sub-001_pet", "source_file": "/raw/a.dcm",
+        "bids_name": "sub-001_pet", "source_file": "/raw/a.dcm",
     }]))
 
     got = json.loads((pet / "sub-001_pet.json").read_text())
@@ -286,7 +286,7 @@ def test_a_word_in_a_numeric_array_is_left_alone(tmp_path: Path) -> None:
     spec = RecordingMetaSpec()
     spec.sequence_templates["pet/pet"] = {"FrameTimesStart": ["n/a"]}
     apply_stated_metadata(root, spec, pd.DataFrame([{
-        "proposed_basename": "sub-001_pet", "source_file": "/raw/a.dcm",
+        "bids_name": "sub-001_pet", "source_file": "/raw/a.dcm",
     }]))
 
     assert json.loads((pet / "sub-001_pet.json").read_text())["FrameTimesStart"] == ["n/a"]

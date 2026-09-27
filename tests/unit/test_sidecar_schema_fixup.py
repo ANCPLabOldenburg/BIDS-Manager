@@ -199,7 +199,7 @@ def _apply(root, spec, rows=()):
     import pandas as pd
 
     inventory = pd.DataFrame(
-        [{"proposed_basename": b, "source_file": r} for b, r in rows]
+        [{"bids_name": b, "source_file": r} for b, r in rows]
     ) if rows else None
     return apply_stated_metadata(root, spec, inventory)
 

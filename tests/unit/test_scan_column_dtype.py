@@ -107,3 +107,56 @@ def test_strict_string_inference_does_not_break_helper() -> None:
         assert df.at[0, "bids_guess_confidence"] == 0.5
     finally:
         pd.set_option("future.infer_string", original)
+
+
+class TestIndexWidthsAtScanTime:
+    """Settings can make the inspection table read ``run-01`` from the start.
+
+    The Editor can repad afterwards, but the table is where a user first
+    reads the names, and one that already says what they want is one they do
+    not have to go and fix.
+    """
+
+    def _frame(self):
+        import json
+        import pandas as pd
+
+        return pd.DataFrame([
+            {"entities": json.dumps({"subject": "001", "run": "1"}),
+             "bids_name": "sub-001_run-1_bold"},
+            {"entities": json.dumps({"subject": "001", "run": "10"}),
+             "bids_name": "sub-001_run-10_bold"},
+            {"entities": json.dumps({"subject": "001", "task": "rest"}),
+             "bids_name": "sub-001_task-rest_bold"},
+        ])
+
+    def test_it_pads_the_numbers(self):
+        from bidsmgr.cli.scan import _apply_index_widths
+        import json
+
+        df = self._frame()
+        assert _apply_index_widths(df, {"run": 2}) == 1
+        assert json.loads(df.at[0, "entities"])["run"] == "01"
+        assert json.loads(df.at[1, "entities"])["run"] == "10", "never truncated"
+
+    def test_it_leaves_a_label_alone(self):
+        from bidsmgr.cli.scan import _apply_index_widths
+        import json
+
+        df = self._frame()
+        _apply_index_widths(df, {"run": 2})
+        assert json.loads(df.at[2, "entities"])["task"] == "rest"
+
+    def test_no_widths_is_a_no_op(self):
+        from bidsmgr.cli.scan import _apply_index_widths
+
+        df = self._frame()
+        before = list(df["entities"])
+        assert _apply_index_widths(df, {}) == 0
+        assert list(df["entities"]) == before
+
+    def test_an_empty_frame_is_safe(self):
+        import pandas as pd
+        from bidsmgr.cli.scan import _apply_index_widths
+
+        assert _apply_index_widths(pd.DataFrame(), {"run": 2}) == 0

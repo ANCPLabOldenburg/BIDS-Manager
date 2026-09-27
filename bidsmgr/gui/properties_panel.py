@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -54,6 +55,7 @@ import pandas as pd
 
 from .. import schema as schema_mod
 from ..fixups.blood import is_blood_role
+from ..recording_meta import merge_pet as _merge_pet
 from ..metadata.template_plan import sidecar_section
 from ..project import Project
 from ..recording_meta import CURATED_SUGGESTIONS, SCAN_SUGGESTION_COLUMNS
@@ -85,7 +87,7 @@ _LABEL_COL = 120
 _EEG_MEG_DATATYPES = frozenset({"eeg", "meg", "ieeg", "nirs"})
 
 # Human display names for the datatypes that carry a recording sidecar.
-_MODALITY_NAMES = {
+_DATATYPE_NAMES = {
     "eeg": "EEG", "meg": "MEG", "ieeg": "iEEG", "nirs": "NIRS", "pet": "PET",
 }
 
@@ -108,9 +110,9 @@ def _answered_field(name: str, value):
     return TemplateField(name=name, level="optional", type=kind)
 
 
-def _modality_label(datatype: str) -> str:
+def _datatype_label(datatype: str) -> str:
     """Display name for a single datatype (``eeg`` -> ``EEG``)."""
-    return _MODALITY_NAMES.get(datatype, datatype.upper())
+    return _DATATYPE_NAMES.get(datatype, datatype.upper())
 
 
 log = logging.getLogger(__name__)
@@ -139,6 +141,7 @@ class _EntityRow(QWidget):
         *,
         required: bool,
         deprecated: bool = False,
+        removable: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -175,6 +178,22 @@ class _EntityRow(QWidget):
         self.edit.setObjectName("ent-input")
         self.edit.setPlaceholderText("—")
         h.addWidget(self.edit, 1)
+
+        # Taking an entity OFF one recording, without going through Bulk
+        # edit. Clearing the box does the same thing, but nothing on screen
+        # said so: an empty field reads as "not filled in yet" rather than
+        # as an instruction, which is why this is a button and not a hint.
+        # Offered only where the schema allows the entity to go, and only
+        # while there is something to take away.
+        self.remove = QToolButton()
+        self.remove.setObjectName("tb-btn")
+        self.remove.setText("\u00d7")
+        self.remove.setToolTip(
+            f"Remove {entity_name} from this recording, so it stops "
+            f"appearing in its BIDS name."
+        )
+        self.remove.setVisible(removable and bool(value))
+        h.addWidget(self.remove, 0)
 
     def value(self) -> str:
         return self.edit.text().strip()
@@ -383,9 +402,13 @@ class PropertiesPanel(QWidget):
                 value,
                 required=entity in required_set,
                 deprecated=entity in deprecated_set,
+                removable=self._model.entity_removable_on(row, entity),
             )
             er.edit.editingFinished.connect(
                 lambda e=er: self._on_entity_committed(e.entity_name, e.value())
+            )
+            er.remove.clicked.connect(
+                lambda _checked=False, e=er: self._on_entity_removed(e)
             )
             self._entity_rows.append(er)
             self._body_layout.addWidget(er)
@@ -399,7 +422,7 @@ class PropertiesPanel(QWidget):
         self._body_layout.addWidget(sec)
         self._body_layout.addWidget(self._build_path_preview(row, datatype, suffix, entities))
 
-        # 4. Row-state notice (from the scanner's proposed_issues) +
+        # 4. Row-state notice (from the scanner's issues) +
         # schema validation. Two distinct sources of "what's wrong with
         # this row": scanner-detected operational issues vs. schema's
         # entity-set verdicts. Both render with the same ValMessage
@@ -411,19 +434,23 @@ class PropertiesPanel(QWidget):
             self._body_layout.addWidget(vmsg)
 
         # 5. Per-row metadata, split into two clearly-separated regions:
-        # modality-agnostic (participant demographics + companion files, written
-        # for any modality incl. MRI) and modality-specific (the recording
-        # sidecar, EEG/MEG/iEEG/NIRS only). Sections within each region are
-        # labelled by their BIDS destination file.
+        # what applies to EVERY datatype (participant demographics and
+        # companion files, written for MRI as much as for EEG) and what
+        # belongs to THIS datatype (the recording sidecar, EEG / MEG / iEEG /
+        # NIRS / PET). Sections within each region are labelled by their BIDS
+        # destination file.
         self._append_metadata_title()
-        self._append_region_label("Modality-agnostic", agnostic=True)
+        self._append_region_label("Every datatype", agnostic=True)
         self._append_participant_section(row)
         self._append_companion_section(row)
         if datatype == "pet":
-            self._append_region_label("Modality-specific", agnostic=False)
+            self._append_region_label(
+                f"{_datatype_label(datatype)} only", agnostic=False)
+            self._append_pet_dose_section(row)
             self._append_blood_section(row)
         if datatype in _EEG_MEG_DATATYPES:
-            self._append_region_label("Modality-specific", agnostic=False)
+            self._append_region_label(
+                f"{_datatype_label(datatype)} only", agnostic=False)
             self._append_recording_section(row, datatype)
 
         # 6. Everything else the standard lets this file carry, asked exactly as
@@ -671,6 +698,23 @@ class PropertiesPanel(QWidget):
         # canonical form used by the schema engine and ProjectState.
         self._model.set_entity(self._row, entity, value or None)
 
+
+    def _on_entity_removed(self, row_widget) -> None:
+        """Take one entity off THIS recording.
+
+        The schema decides whether it may go, and the button is only shown
+        where it may, so this is the confirmation rather than the check. The
+        row is rebuilt afterwards so the field empties and the button goes
+        with it.
+        """
+        if self._model is None or self._row is None:
+            return
+        entity = row_widget.entity_name
+        if not self._model.entity_removable_on(self._row, entity):
+            return
+        if self._model.set_entity(self._row, entity, ""):
+            self.set_selected_row(self._row)
+
     def _on_datatype_changed(self, new_value: str) -> None:
         if self._model is None or self._row is None:
             return
@@ -692,7 +736,7 @@ class PropertiesPanel(QWidget):
 
     def _region_label(self, text: str, *, agnostic: bool) -> QWidget:
         """A bold, colour-coded region divider separating the two metadata
-        regions (modality-agnostic vs modality-specific)."""
+        regions (every datatype vs this datatype only)."""
         pal = CUR()
         color = pal["teal"] if agnostic else pal["purple"]
         lbl = QLabel(
@@ -739,8 +783,9 @@ class PropertiesPanel(QWidget):
         """A colour-coded section title plus a dim ``<tag> -> <destination>`` note.
 
         ``agnostic`` colours the title; ``tag`` states which modalities the
-        section applies to (``any modality`` for agnostic sections, or the
-        recording's modality such as ``EEG``) so the destination is unambiguous.
+        section applies to (``any datatype`` for the agnostic ones, or the
+        recording's own datatype such as ``EEG``) so the destination is
+        unambiguous.
         """
         pal = CUR()
         color = pal["teal"] if agnostic else pal["purple"]
@@ -769,7 +814,7 @@ class PropertiesPanel(QWidget):
         self._body_layout.addSpacing(8)
         self._body_layout.addWidget(self._divider())
         self._body_layout.addWidget(self._section_header(
-            "PARTICIPANT", "participants.tsv", agnostic=True, tag="any modality"))
+            "PARTICIPANT", "participants.tsv", agnostic=True, tag="any datatype"))
         self._body_layout.addWidget(self._meta_combo_row(
             "sex", "PatientSex", ["", "M", "F", "O"], self._cell(row, "PatientSex"), "",
         ))
@@ -800,7 +845,7 @@ class PropertiesPanel(QWidget):
         self._body_layout.addWidget(self._divider())
         self._body_layout.addWidget(self._section_header(
             "CONVERSION", "electrodes.tsv + coordsystem.json",
-            agnostic=False, tag=_modality_label(datatype)))
+            agnostic=False, tag=_datatype_label(datatype)))
 
         if show_montage:
             self._body_layout.addWidget(self._meta_combo_row(
@@ -955,7 +1000,7 @@ class PropertiesPanel(QWidget):
         """The name of the file this row will produce, for the section heading."""
         if self._model is None:
             return ""
-        basename = self._cell(row, "proposed_basename")
+        basename = self._cell(row, "bids_name")
         return f"{datatype}/{basename}.json" if basename else ""
 
     def _field_suggestions(self, row: int, name: str) -> tuple:
@@ -1113,9 +1158,9 @@ class PropertiesPanel(QWidget):
     def _on_psd_ready(self, result) -> None:
         self._psd_worker = None
         self._psd_row_id = None
-        from .widgets.recording_viewer_pane import _PsdDialog
+        from .widgets.psd_dialog import PsdDialog
 
-        dlg = _PsdDialog(result, parent=self)
+        dlg = PsdDialog(result, parent=self)
         dlg.show()
         if self._row is not None:
             self.set_selected_row(self._row)
@@ -1164,7 +1209,7 @@ class PropertiesPanel(QWidget):
         self._body_layout.addWidget(self._divider())
         self._body_layout.addWidget(self._section_header(
             "COMPANION FILES", "events / beh / stim (copied into BIDS)",
-            agnostic=True, tag="any modality"))
+            agnostic=True, tag="any datatype"))
 
         self._companion_list = QListWidget()
         self._companion_list.setMaximumHeight(72)
@@ -1199,6 +1244,91 @@ class PropertiesPanel(QWidget):
         h.addWidget(rem)
         h.addStretch(1)
         self._body_layout.addWidget(ctl)
+
+    def _append_pet_dose_section(self, row: int) -> None:
+        """Import a dose file, for THIS recording, inside the PET region.
+
+        The dataset dialog has the same importer, and that is the right
+        place for a study-wide dose. This one exists because a dose is not
+        always study-wide: a second tracer, a re-injection, a subject whose
+        record came from a different sheet. Asking a user to leave the row
+        they are looking at, open a dataset dialog and scope a block by
+        subject label, in order to correct one scan, is asking them to do
+        the tool's filing for it.
+
+        It sits INSIDE the PET region rather than above it so that what the
+        file filled in is the next thing the eye reaches: the sidecar
+        fields below update in place, and the point of importing rather
+        than passing a path through is being able to see that happen.
+        """
+        from ..metadata.pet_metadata_json import read_pet_metadata_json
+        from ..metadata.pet_spreadsheet import read_pet_spreadsheet
+
+        self._body_layout.addSpacing(8)
+        self._body_layout.addWidget(self._divider())
+        self._body_layout.addWidget(self._section_header(
+            "DOSE FILE", "fills the PET fields below, for this recording",
+            agnostic=False, tag="pet"))
+
+        line = QWidget()
+        line.setObjectName("dose-row")
+        line.setStyleSheet("#dose-row { background: transparent; }")
+        h = QHBoxLayout(line)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        h.addWidget(FieldLabel("Import", CUR()["text"], _LABEL_COL, fixed=True))
+
+        status = QLineEdit()
+        status.setObjectName("ent-input")
+        status.setReadOnly(True)
+        status.setPlaceholderText("(nothing imported for this recording)")
+        status.setToolTip(
+            "A JSON keyed by BIDS field names, which is the shape pypet2bids "
+            "accepts through --set-default-metadata-json, or a spreadsheet. "
+            "Applied to THIS recording only. Keys BIDS does not define for a "
+            "PET sidecar are reported and never written."
+        )
+        h.addWidget(status, 1)
+
+        browse = QPushButton("Choose…")
+        browse.setToolTip("Pick a dose file and apply it to this recording.")
+
+        def choose() -> None:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select a PET dose file for this recording", "",
+                "PET metadata (*.json *.tsv *.csv *.xlsx *.ods);;All files (*)",
+            )
+            if not path:
+                return
+            chosen = Path(path)
+            blocks = (
+                read_pet_metadata_json(chosen)
+                if chosen.suffix.lower() == ".json"
+                else read_pet_spreadsheet(chosen)
+            )
+            # One recording, so every block in the file is for it: the
+            # dataset-wide one and any subject block alike. A file scoped to
+            # somebody else is the user's mistake to see, not ours to guess
+            # at, so they are merged in the order the file states them.
+            merged = None
+            for block in blocks.values():
+                merged = block if merged is None else _merge_pet(merged, block)
+            if merged is None:
+                status.setText(f"{chosen.name}: nothing readable")
+                return
+
+            applied = (
+                self._model.apply_pet_block(row, merged)
+                if self._model is not None else 0
+            )
+            status.setText(f"{chosen.name}: {applied} field(s)")
+            # Re-render so the sidecar fields below show what arrived. The
+            # whole reason for importing here rather than passing a path.
+            self.set_selected_row(row)
+
+        browse.clicked.connect(choose)
+        h.addWidget(browse)
+        self._body_layout.addWidget(line)
 
     def _append_blood_section(self, row: int) -> None:
         """Attach this PET run's blood curves.

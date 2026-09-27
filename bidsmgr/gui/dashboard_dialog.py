@@ -151,7 +151,8 @@ class DashboardDialog(QDialog):
 
         scroll, body = scrollable_body()
         self._add_headline(body)
-        self._add_modalities(body)
+        self._add_datatypes(body)
+        self._add_suffixes(body)
         self._add_subjects(body)
         self._add_findings(body)
         self._add_completeness(body)
@@ -172,7 +173,8 @@ class DashboardDialog(QDialog):
         row.setSpacing(28)
         row.addWidget(_stat("subjects", str(len(board.subjects))))
         row.addWidget(_stat("sessions", str(board.sessions)))
-        row.addWidget(_stat("modalities", str(len(board.modalities))))
+        row.addWidget(_stat("datatypes", str(len(board.datatypes))))
+        row.addWidget(_stat("suffixes", str(len(board.suffixes))))
         row.addWidget(_stat("files", f"{board.total_files:,}"))
         row.addWidget(_stat("size", dash.human_bytes(board.total_bytes)))
         if board.validated:
@@ -202,42 +204,84 @@ class DashboardDialog(QDialog):
             ))
         body.addWidget(frame)
 
-    def _add_modalities(self, body: QVBoxLayout) -> None:
+    def _add_datatypes(self, body: QVBoxLayout) -> None:
         board = self._board
-        if not board.modalities:
+        if not board.datatypes:
             return
-        frame, layout = card("What it holds")
+        frame, layout = card("What it holds, by datatype")
         layout.addWidget(hint(
-            "How much of what the standard declares for each datatype is "
-            "actually answered. A placeholder counts as unanswered, because "
-            "that is what it is."
+            "A DATATYPE is the folder a recording lands in: anat, func, "
+            "dwi, eeg. How much of what the standard declares for each one "
+            "is actually answered. A placeholder counts as unanswered, "
+            "because that is what it is."
         ))
         table = _table([
             "Datatype", "Subjects", "Recordings", "Answered", "TODO",
             "Errors", "Warnings",
         ])
-        for modality in board.modalities:
+        for row_data in board.datatypes:
             row = table.rowCount()
             table.insertRow(row)
-            table.setItem(row, 0, _cell(modality.datatype))
-            table.setItem(row, 1, _cell(str(modality.subjects)))
-            table.setItem(row, 2, _cell(str(modality.recordings)))
-            coverage = modality.coverage
+            table.setItem(row, 0, _cell(row_data.datatype))
+            table.setItem(row, 1, _cell(str(row_data.subjects)))
+            table.setItem(row, 2, _cell(str(row_data.recordings)))
+            coverage = row_data.coverage
             table.setItem(row, 3, _cell(
                 "not declared" if coverage is None else
-                f"{modality.answered} of {modality.declared}"
+                f"{row_data.answered} of {row_data.declared}"
             ))
             table.setItem(row, 4, _cell(
-                str(modality.placeholders) if modality.placeholders else "-",
-                "warning" if modality.placeholders else "",
+                str(row_data.placeholders) if row_data.placeholders else "-",
+                "warning" if row_data.placeholders else "",
             ))
             table.setItem(row, 5, _cell(
-                str(modality.errors) if modality.errors else "-",
-                "error" if modality.errors else "",
+                str(row_data.errors) if row_data.errors else "-",
+                "error" if row_data.errors else "",
             ))
             table.setItem(row, 6, _cell(
-                str(modality.warnings) if modality.warnings else "-",
-                "warning" if modality.warnings else "",
+                str(row_data.warnings) if row_data.warnings else "-",
+                "warning" if row_data.warnings else "",
+            ))
+        _fit(table)
+        layout.addWidget(table)
+        body.addWidget(frame)
+
+    def _add_suffixes(self, body: QVBoxLayout) -> None:
+        """What the recordings ARE, which the datatype does not say.
+
+        ``anat`` holds T1w, T2w and FLAIR. A summary that stops at the
+        folder cannot tell a dataset with three anatomicals per subject
+        from one with three subjects' worth of T1w, and those are different
+        datasets. Both words are the standard's own and it uses them for
+        different things, so both are reported.
+        """
+        board = self._board
+        if not board.suffixes:
+            return
+        frame, layout = card("What the recordings are, by suffix")
+        layout.addWidget(hint(
+            "A SUFFIX is what a recording is: T1w, bold, dwi, physio. It "
+            "is the last part of the filename and it is not the same as "
+            "the datatype folder, which is why both are here."
+        ))
+        table = _table([
+            "Datatype", "Suffix", "Subjects", "Recordings",
+            "Errors", "Warnings",
+        ])
+        for entry in board.suffixes:
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setItem(row, 0, _cell(entry.datatype))
+            table.setItem(row, 1, _cell(entry.suffix))
+            table.setItem(row, 2, _cell(str(entry.subjects)))
+            table.setItem(row, 3, _cell(str(entry.recordings)))
+            table.setItem(row, 4, _cell(
+                str(entry.errors) if entry.errors else "-",
+                "error" if entry.errors else "",
+            ))
+            table.setItem(row, 5, _cell(
+                str(entry.warnings) if entry.warnings else "-",
+                "warning" if entry.warnings else "",
             ))
         _fit(table)
         layout.addWidget(table)
@@ -256,7 +300,7 @@ class DashboardDialog(QDialog):
             verb = "does not" if len(uneven) == 1 and not more else "do not"
             layout.addWidget(hint(
                 f"<b>{shown}{more}</b> {verb} carry what most of the others "
-                "do. A subject missing a modality is invisible in a file "
+                "do. A subject missing a datatype is invisible in a file "
                 "tree and obvious in a table."
             ))
         for label, extra in outliers[:3]:
@@ -267,11 +311,11 @@ class DashboardDialog(QDialog):
             ))
         if not uneven and not outliers and len(board.subjects) > 1:
             layout.addWidget(hint(
-                "Every subject carries the same modalities."
+                "Every subject carries the same datatypes."
             ))
 
         table = _table([
-            "Subject", "Sessions", "Files", "Modalities", "Errors", "Warnings",
+            "Subject", "Sessions", "Files", "Datatypes", "Errors", "Warnings",
         ])
         for subject in board.subjects:
             row = table.rowCount()

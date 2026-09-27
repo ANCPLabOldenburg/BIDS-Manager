@@ -2,13 +2,13 @@
 
 This is the fallback classifier ported from BIDS-Manager v0.2.5
 (``bids_manager/schema_renamer.py``). It maps DICOM ``SeriesDescription``
-strings to a *fine* modality label (``"T1w"``, ``"bold"``, ``"dwi"``, …)
+strings to a SEQUENCE KIND (``"T1w"``, ``"bold"``, ``"dwi"``, …)
 which then resolves to a top-level BIDS datatype via
-:func:`modality_to_container`.
+:func:`datatype_for_sequence_kind`.
 
 It runs after the higher-confidence classifiers (BidsGuess, mne channel
 types). It is also exported here so the MRI inventory scanner can fill
-the legacy ``modality`` / ``modality_bids`` columns in the v0.2.5 22-col
+the legacy ``modality`` column of the v0.2.5 22-col
 TSV contract (improvement_plan.md §4).
 
 User-pref persistence (``user_preferences/sequence_dictionary.tsv`` in
@@ -60,12 +60,12 @@ TASK_HINT_PATTERNS: OrderedDict[str, tuple[str, ...]] = OrderedDict(
     )
 )
 
-SKIP_MODALITIES: frozenset[str] = frozenset({"scout", "report"})
+SKIP_SEQUENCE_KINDS: frozenset[str] = frozenset({"scout", "report"})
 
 
 @dataclass(frozen=True)
 class SequenceHint:
-    """One regex-dictionary entry: a fine modality label + match patterns."""
+    """One regex-dictionary entry: a sequence kind + its match patterns."""
 
     label: str
     suffix: Optional[str]      # BIDS suffix produced if matched
@@ -142,8 +142,14 @@ def _score_patterns(patterns: tuple[str, ...], lowered: str, token_set: set[str]
     return best
 
 
-def guess_modality(series: str) -> str:
-    """Return the fine modality label whose patterns best describe ``series``."""
+def guess_sequence_kind(series: str) -> str:
+    """The sequence KIND whose patterns best describe ``series``.
+
+    ``T1w``, ``bold``, ``dwi``, ``fieldmap``, ``scout``. Not a modality:
+    every one of these is MRI. It was called ``guess_sequence_kind`` and wrote
+    into a column called ``modality``, which is how a row acquired on an MRI
+    scanner came to report its modality as ``T1w``.
+    """
 
     lowered, token_set, tokens = _normalize_series(series)
     best_label = "unknown"
@@ -159,10 +165,10 @@ def guess_modality(series: str) -> str:
     return best_label
 
 
-def modality_to_container(modality: str) -> str:
-    """Translate a fine modality label into its top-level BIDS folder."""
+def datatype_for_sequence_kind(kind: str) -> str:
+    """The BIDS datatype folder a sequence kind belongs in."""
 
-    hint = SEQUENCE_HINTS.get(modality)
+    hint = SEQUENCE_HINTS.get(kind)
     if hint is None:
         return ""
     if hint.container_override:
@@ -264,9 +270,9 @@ def extract_direction_token(text: Optional[str]) -> Optional[str]:
     return m.group(1) if m else None
 
 
-# Mapping from fine modality label → BIDS suffix the legacy classifier proposes.
+# Mapping from sequence kind to the BIDS suffix the legacy classifier proposes.
 # Keys not present here have no suffix proposal.
-_MODALITY_TO_SUFFIX: dict[str, str] = {
+_SEQUENCE_KIND_TO_SUFFIX: dict[str, str] = {
     "T1w": "T1w",
     "T2w": "T2w",
     "FLAIR": "FLAIR",
@@ -382,7 +388,7 @@ def classify_user_hints(
 ) -> list[Classification]:
     """Emit a Classification ONLY for rows matching a user hint.
 
-    Unlike :func:`classify`, this does no regex/modality fallback - it is the
+    Unlike :func:`classify`, this does no regex/sequence-kind fallback - it is the
     user-hint layer the chain in ``cli/scan`` seeds / overlays with priority.
     The first matching hint (document order) wins for a given row.
     """
@@ -404,8 +410,8 @@ def classify(rows: Iterable[InventoryRow]) -> list[Classification]:
     For each :class:`InventoryRow`, produces at most one
     :class:`Classification` derived from:
 
-    * The fine modality label that the inventory scanner pre-computed
-      (``row.fine_modality``) or, if absent, :func:`guess_modality` on the
+    * The sequence kind the inventory scanner pre-computed
+      (``row.sequence_kind``) or, if absent, :func:`guess_sequence_kind` on the
       ``series_description``.
     * Best-effort task / direction / acquisition tokens extracted from the
       sequence text.
@@ -419,7 +425,7 @@ def classify(rows: Iterable[InventoryRow]) -> list[Classification]:
         sequence = row.series_description or ""
 
         # 1. DWI scanner-derivative detection (FA / ADC / trace / colFA /
-        #    expADC / S0map / TENSOR). Runs *before* the legacy modality
+        #    expADC / S0map / TENSOR). Runs *before* the legacy sequence-kind
         #    map so a sequence like ``..._dwi_FA`` is correctly emitted as
         #    suffix ``FA`` rather than ``dwi``.
         dwi_deriv = detect_dwi_derivative(sequence)
@@ -450,15 +456,15 @@ def classify(rows: Iterable[InventoryRow]) -> list[Classification]:
             )
             continue
 
-        modality = row.fine_modality
-        if not modality:
-            modality = guess_modality(sequence)
-        suffix = _MODALITY_TO_SUFFIX.get(modality)
+        kind = row.sequence_kind
+        if not kind:
+            kind = guess_sequence_kind(sequence)
+        suffix = _SEQUENCE_KIND_TO_SUFFIX.get(kind)
         if not suffix:
             continue
 
-        skip = modality in SKIP_MODALITIES
-        datatype = modality_to_container(modality) or ""
+        skip = kind in SKIP_SEQUENCE_KINDS
+        datatype = datatype_for_sequence_kind(kind) or ""
         if not datatype:
             continue
 
@@ -480,7 +486,7 @@ def classify(rows: Iterable[InventoryRow]) -> list[Classification]:
             if task:
                 entities["task"] = task
 
-        rationale = f"sequence_dict regex matched modality={modality!r}"
+        rationale = f"sequence_dict regex matched sequence kind {kind!r}"
 
         out.append(
             Classification(
@@ -500,10 +506,10 @@ def classify(rows: Iterable[InventoryRow]) -> list[Classification]:
 __all__ = [
     "SequenceHint",
     "SEQUENCE_HINTS",
-    "SKIP_MODALITIES",
+    "SKIP_SEQUENCE_KINDS",
     "TASK_HINT_PATTERNS",
-    "guess_modality",
-    "modality_to_container",
+    "guess_sequence_kind",
+    "datatype_for_sequence_kind",
     "normalize_study_name",
     "guess_task_from_text",
     "extract_acq_token",

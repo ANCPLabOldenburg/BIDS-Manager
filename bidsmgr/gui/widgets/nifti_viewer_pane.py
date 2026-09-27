@@ -87,6 +87,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .image_label import ImageLabel
+from .flow_layout import flow
 from .primitives import ElidedLabel, PaneHeader
 from .spinner import BusySpinner
 
@@ -470,28 +471,12 @@ class NiftiViewerPane(QWidget):
         # grew itself the moment the images finished loading. Scrolling
         # sideways keeps every control reachable without the window being
         # held hostage by the widest row of buttons.
+        # The toolbar goes in directly. It used to sit in a horizontally
+        # scrolling area with a FIXED height, which is exactly wrong for a
+        # bar whose rows wrap: the extra rows would be clipped. Its rows
+        # reflow now, so it needs no scrolling and its height follows.
         self._toolbar = self._build_toolbar()
-        self._toolbar_scroll = QScrollArea()
-        self._toolbar_scroll.setObjectName("nifti-toolbar-scroll")
-        self._toolbar_scroll.setWidget(self._toolbar)
-        self._toolbar_scroll.setWidgetResizable(True)
-        self._toolbar_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._toolbar_scroll.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self._toolbar_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded
-        )
-        self._toolbar_scroll.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed,
-        )
-        # The scroll area has no useful height of its own; give it the
-        # toolbar's, plus room for a scrollbar when one is needed.
-        self._toolbar_scroll.setFixedHeight(
-            self._toolbar.sizeHint().height()
-            + self._toolbar_scroll.horizontalScrollBar().sizeHint().height()
-        )
-        v.addWidget(self._toolbar_scroll)
+        v.addWidget(self._toolbar)
 
         # --- Stacked content: hint vs. canvas -------------------------
         self._stack = QStackedLayout()
@@ -530,16 +515,19 @@ class NiftiViewerPane(QWidget):
         # shrink it back.
         self._footer_path = ElidedLabel("")
         self._footer_path.setObjectName("sidecar-footer-path")
-        self._footer_summary = QLabel("")
+        # Elided too, and for the same reason as the path beside them: both
+        # carry runtime text, and a QHBoxLayout's minimum is the SUM of its
+        # children, so two plain labels put the floor back at 288 pixels.
+        self._footer_summary = ElidedLabel("")
         self._footer_summary.setObjectName("sidecar-footer-summary")
-        self._voxel_value = QLabel("")
+        self._voxel_value = ElidedLabel("")
         self._voxel_value.setObjectName("sidecar-footer-summary")
         fl.addWidget(self._footer_path, 1)
         fl.addWidget(self._voxel_value)
         fl.addWidget(self._footer_summary)
         v.addWidget(self._footer)
 
-        self._toolbar_scroll.setVisible(False)
+        self._toolbar.setVisible(False)
         self._footer.setVisible(False)
 
         # Track the H key application-wide so "H + scroll" works over the
@@ -824,7 +812,7 @@ class NiftiViewerPane(QWidget):
         identical toolbars driving one shared state is not a choice, it is the
         same control drawn twice.
         """
-        self._toolbar_scroll.setVisible(bool(visible))
+        self._toolbar.setVisible(bool(visible))
 
     def set_file(
         self,
@@ -872,7 +860,7 @@ class NiftiViewerPane(QWidget):
         """Switch to the loading page + start the spinner."""
         self._loading_label.setText(f"Loading {path.name}…")
         self._loading_spinner.set_busy(True, message="")
-        self._toolbar_scroll.setVisible(False)
+        self._toolbar.setVisible(False)
         self._footer.setVisible(False)
         self._stack.setCurrentWidget(self._loading_panel)
 
@@ -942,7 +930,7 @@ class NiftiViewerPane(QWidget):
         # file's storage orientation; the fixed-plane panels bake theirs once).
         self._refresh_all_orient_labels()
         self._compute_display_window()
-        self._toolbar_scroll.setVisible(True)
+        self._toolbar.setVisible(True)
         self._footer.setVisible(True)
         self._stack.setCurrentWidget(self._canvas)
         self._update_footer()
@@ -1008,12 +996,18 @@ class NiftiViewerPane(QWidget):
         outer = QVBoxLayout(bar)
         outer.setContentsMargins(14, 6, 14, 6)
         outer.setSpacing(6)
-        row1 = QHBoxLayout()
-        row1.setSpacing(8)
-        outer.addLayout(row1)
-        row2 = QHBoxLayout()
-        row2.setSpacing(8)
-        outer.addLayout(row2)
+        # WRAPPING rows. They used to be fixed rows inside a horizontally
+        # scrolling area, so on a narrow pane the controls were still all
+        # there but you had to scroll sideways to reach them, and the pane
+        # could not be dragged narrower than the widest row anyway. Wrapping
+        # reflows them instead: everything stays visible and reachable, and
+        # the bar grows taller rather than the pane refusing to shrink.
+        row1_holder = QWidget()
+        row1 = flow(row1_holder, h_spacing=8, v_spacing=6)
+        outer.addWidget(row1_holder)
+        row2_holder = QWidget()
+        row2 = flow(row2_holder, h_spacing=8, v_spacing=6)
+        outer.addWidget(row2_holder)
 
         # --- Row 1: orientation + view toggles + sliders ----------------
 
@@ -1315,7 +1309,12 @@ class NiftiViewerPane(QWidget):
         row.addWidget(self._loading_spinner)
         row.addStretch(1)
         v.addLayout(row)
-        self._loading_label = QLabel("")
+        # ELIDED: it carries the file's path, and a QStackedWidget sizes
+        # itself to its LARGEST page whichever one is showing, so a plain
+        # QLabel here is a floor under the whole pane even while hidden.
+        self._loading_label = ElidedLabel(
+            "", mode=Qt.TextElideMode.ElideMiddle,
+        )
         self._loading_label.setObjectName("pane-hint")
         self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(self._loading_label)
@@ -2999,7 +2998,7 @@ class NiftiViewerPane(QWidget):
         self._image_stack.setCurrentIndex(0)
         if self._gl is not None:
             self._gl.clear()
-        self._toolbar_scroll.setVisible(False)
+        self._toolbar.setVisible(False)
         self._footer.setVisible(False)
         self._footer_path.setText("")
         self._footer_summary.setText("")

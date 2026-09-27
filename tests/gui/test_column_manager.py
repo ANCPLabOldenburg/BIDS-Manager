@@ -49,11 +49,11 @@ def test_dialog_select_all_and_defaults(qtbot) -> None:
 
 def _df() -> pd.DataFrame:
     return pd.DataFrame([{
-        "BIDS_name": "sub-001", "session": "", "include": 1, "modality": "mri",
-        "proposed_datatype": "anat", "proposed_basename": "sub-001_T1w",
-        "Proposed BIDS name": "sub-001_T1w", "bids_guess_suffix": "T1w",
+        "participant_id": "sub-001", "session": "", "include": 1, "modality": "mri",
+        "datatype": "anat", "bids_name": "sub-001_T1w",
+        "bids_path": "sub-001_T1w", "bids_guess_suffix": "T1w",
         "bids_guess_confidence": "0.9", "bids_guess_skip": False,
-        "proposed_issues": "", "entities": json.dumps({"subject": "001"}),
+        "issues": "", "entities": json.dumps({"subject": "001"}),
         "task": "", "run": "", "series_uid": "1.1", "PatientID": "P1",
         "n_files": "100", "dataset": "D",
     }])

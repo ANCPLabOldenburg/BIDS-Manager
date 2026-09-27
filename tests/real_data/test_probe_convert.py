@@ -119,7 +119,7 @@ def test_bold_rows_produce_one_nifti_in_per_series_mode(
 
     A ``probe_n_nifti > 1`` here would indicate a real intra-series
     split (e.g. operator-cancelled volume). Such cases must surface
-    with a probe anomaly note in ``proposed_issues``.
+    with a probe anomaly note in ``issues``.
     """
     bold_rows = neuroimaging_unit_new_probe[
         (neuroimaging_unit_new_probe["bids_guess_datatype"] == "func")
@@ -130,9 +130,9 @@ def test_bold_rows_produce_one_nifti_in_per_series_mode(
     for _, r in bold_rows.iterrows():
         n_nifti = int(r["probe_n_nifti"])
         if n_nifti != 1:
-            assert "probe:" in str(r["proposed_issues"]), (
+            assert "probe:" in str(r["issues"]), (
                 f"bold row produced {n_nifti} NIfTI(s) in per-series mode "
-                f"but proposed_issues doesn't record the anomaly: "
+                f"but issues doesn't record the anomaly: "
                 f"{r['sequence']!r}"
             )
         assert int(r["probe_n_volumes"]) >= 1, (

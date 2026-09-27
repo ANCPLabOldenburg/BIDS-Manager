@@ -214,7 +214,7 @@ def scan_ecat(
     rows: list[dict] = []
     # One BIDS label per distinct source subject, numbered in encounter order.
     # Mirrors the EEG/MEG scanner: the label is provisional and the user
-    # reconciles it by editing BIDS_name in the inventory.
+    # reconciles it by editing participant_id in the inventory.
     bids_id_for_subject: dict[str, str] = {}
 
     for idx, fp in enumerate(find_ecat_files(root)):
@@ -230,21 +230,21 @@ def scan_ecat(
         subject = _subject_from_path(fp, root)
         if subject not in bids_id_for_subject:
             bids_id_for_subject[subject] = f"sub-{len(bids_id_for_subject) + 1:03d}"
-        bids_name = bids_id_for_subject[subject]
+        participant = bids_id_for_subject[subject]
 
-        entities = {"subject": bids_name[len("sub-"):]}
+        entities = {"subject": participant[len("sub-"):]}
         try:
             basename = schema_mod.build_basename(entities, "pet", "pet")
         except Exception as exc:  # noqa: BLE001 - fall back to a literal name
-            log.debug("schema.build_basename failed for %s: %s", bids_name, exc)
-            basename = f"{bids_name}_pet"
+            log.debug("schema.build_basename failed for %s: %s", participant, exc)
+            basename = f"{participant}_pet"
 
         rows.append({
             "subject": subject,
-            "BIDS_name": bids_name,
-            "proposed_datatype": "pet",
-            "proposed_basename": basename,
-            "Proposed BIDS name": basename,
+            "participant_id": participant,
+            "datatype": "pet",
+            "bids_name": basename,
+            "bids_path": basename,
             "entities": json.dumps(entities, sort_keys=True),
             "source_folder": str(rel.parent) if rel.parent != Path(".") else root.name,
             "source_file": str(rel),
@@ -253,7 +253,7 @@ def scan_ecat(
             "include": 1,
             "n_files": 1,
             "modality": "pet",
-            "modality_bids": "pet",
+            "sequence_kind": "",
             "bids_guess_datatype": "pet",
             "bids_guess_suffix": "pet",
             "bids_guess_classifier": "ecat_header",

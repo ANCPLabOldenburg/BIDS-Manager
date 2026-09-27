@@ -116,9 +116,9 @@ def resolve_effective(
     """
     base = spec.defaults
     if datatype:
-        per_modality = spec.modality_defaults.get(datatype)
-        if per_modality is not None:
-            base = merge_acquisition(base, per_modality)
+        per_datatype = spec.datatype_defaults.get(datatype)
+        if per_datatype is not None:
+            base = merge_acquisition(base, per_datatype)
     acquisition = merge_acquisition(base, spec.overrides.get(row_id))
 
     task_protocol = spec.task_protocols.get(task_label) if task_label else None

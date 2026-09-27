@@ -44,6 +44,7 @@ from ..deface.run import unavailable_reason
 from ..deface.select import Selection, walk
 from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
+from .widgets.scope_bar import ScopeBar
 from .widgets.spinner import BusySpinner
 
 
@@ -173,6 +174,10 @@ class DefaceDialog(QDialog):
 
         # --- scope -------------------------------------------------------
         scope_card, sl = card()
+        self._scope_bar = ScopeBar(self._root, self._targets, show_summary=False, parent=self)
+        self._targets = self._scope_bar.targets()
+        self._scope_bar.changed.connect(self._on_scope_changed)
+        sl.addWidget(self._scope_bar)
         self._scope = QLabel("")
         self._scope.setObjectName("dlg-hint")
         self._scope.setWordWrap(True)
@@ -300,21 +305,16 @@ class DefaceDialog(QDialog):
         # one engine rather than the whole dialog.
         self._update_status()
 
+    def _on_scope_changed(self) -> None:
+        self._targets = self._scope_bar.targets()
+        self._refresh()
+
     def _refresh(self) -> None:
         self._selection = walk(self._root, self._targets)
         sel = self._selection
 
-        where = "the whole dataset"
-        if self._targets:
-            shown = [
-                str(Path(t).relative_to(self._root)) if t != self._root else "."
-                for t in self._targets[:3]
-            ]
-            more = len(self._targets) - len(shown)
-            where = ", ".join(shown) + (f" and {more} more" if more else "")
-
         self._scope.setText(
-            f"<b>{where}</b><br>{len(sel.candidates)} image(s) can be "
+            f"{len(sel.candidates)} image(s) can be "
             f"{self._copy['verb']}, {_human(sel.total_bytes)}. "
             f"{len(sel.skipped)} skipped."
         )

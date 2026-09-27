@@ -23,7 +23,11 @@ from typing import Optional
 
 import pandas as pd
 
-from ..recording_meta import PetAcquisitionSpec
+from ..recording_meta import (
+    PET_LIST_TO_BIDS,
+    PET_SCALAR_TO_BIDS,
+    PetAcquisitionSpec,
+)
 
 log = logging.getLogger(__name__)
 
@@ -126,7 +130,76 @@ def _coerce(field: str, raw: str) -> Optional[object]:
             "PET spreadsheet: %r is not a yes/no value for %s; skipping", text, field,
         )
         return None
+    if field in _LIST_FIELDS:
+        # BIDS types the reconstruction-parameter trio as arrays, and a
+        # spreadsheet cell is one string. Split on the separators a person
+        # actually types; a single value becomes a one-element list, which
+        # is what the schema wants and what a bare scalar is not.
+        parts = [p.strip() for p in re.split(r"[;,|]", text) if p.strip()]
+        return [_maybe_number(p) for p in parts]
     return text
+
+
+def _maybe_number(text: str):
+    """A number when the text is one, the text otherwise."""
+    try:
+        value = float(text)
+    except ValueError:
+        return text
+    return int(value) if value.is_integer() else value
+
+
+#: Fields BIDS types as arrays. A spreadsheet cell is one string, so these
+#: are split rather than stored whole.
+_LIST_FIELDS: frozenset[str] = frozenset(PET_LIST_TO_BIDS)
+
+#: Column names for the vertical shape: one row per field, value beside it.
+_FIELD_ALIASES: tuple[str, ...] = ("field", "key", "name", "parameter")
+_VALUE_ALIASES: tuple[str, ...] = ("value", "answer")
+
+
+def _read_vertical(df, columns: dict, path: Path):
+    """One row per FIELD, keyed by BIDS name. ``None`` if that is not it.
+
+    Returns a single spec applying to every PET run, which is what a sheet
+    with no scan identifier can honestly mean.
+    """
+    field_col = next((columns[a] for a in _FIELD_ALIASES if a in columns), None)
+    value_col = next((columns[a] for a in _VALUE_ALIASES if a in columns), None)
+    if field_col is None or value_col is None:
+        return None
+
+    by_bids = {
+        bids.lower(): field
+        for field, bids in {**PET_SCALAR_TO_BIDS, **PET_LIST_TO_BIDS}.items()
+    }
+    fields: dict[str, object] = {}
+    unknown: list[str] = []
+    for _, row in df.iterrows():
+        name = str(row.get(field_col, "")).strip()
+        if not name:
+            continue
+        target = by_bids.get(name.lower()) or (
+            name if name in PetAcquisitionSpec.model_fields else None
+        )
+        if target is None:
+            unknown.append(name)
+            continue
+        value = _coerce(target, row.get(value_col, ""))
+        if value is not None:
+            fields[target] = value
+    if unknown:
+        log.warning(
+            "PET spreadsheet %s: ignoring %d row(s) naming no PET field: %s",
+            path.name, len(unknown), ", ".join(sorted(unknown)[:8]),
+        )
+    if not fields:
+        return None
+    log.info(
+        "PET spreadsheet %s: read %d field(s) as a dataset-wide block",
+        path.name, len(fields),
+    )
+    return PetAcquisitionSpec(**fields)
 
 
 def read_pet_spreadsheet(path: Path) -> dict[str, PetAcquisitionSpec]:
@@ -153,9 +226,18 @@ def read_pet_spreadsheet(path: Path) -> dict[str, PetAcquisitionSpec]:
         None,
     )
     if key_column is None:
+        # A sheet with no identifying column may still be the OTHER shape a
+        # lab writes: one row per FIELD rather than one row per scan, with
+        # the value beside it and often a column explaining what it is.
+        # That is the natural way to write a study with a single dose, and
+        # it is what BIDS Manager's own PET sample ships, where it silently
+        # did nothing until this existed.
+        vertical = _read_vertical(df, columns, path)
+        if vertical is not None:
+            return {"": vertical}
         log.warning(
-            "PET spreadsheet %s has no identifying column (looked for %s); "
-            "ignoring the file",
+            "PET spreadsheet %s has no identifying column (looked for %s) "
+            "and no field/value pair either; ignoring the file",
             path, ", ".join(_KEY_ALIASES[:4]),
         )
         return {}

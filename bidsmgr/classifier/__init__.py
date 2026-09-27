@@ -8,7 +8,7 @@ Layers (run in order, each schema-validates its output):
 2. ``mne_channel_types`` — EEG/MEG/iEEG; channel kinds from raw.
 3. ``sequence_dict``     — fallback regex dict on
    ``SeriesDescription`` (port from BIDS-Manager v0.2.5
-   ``dicom_inventory.guess_modality``).
+   ``dicom_inventory.guess_sequence_kind``).
 
 Every layer's output is ``schema.validate_*``-checked before the
 planner sees it. Wrong classifier outputs are dropped silently and

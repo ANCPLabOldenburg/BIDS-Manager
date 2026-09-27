@@ -26,7 +26,7 @@ def _seed_version(root: Path) -> None:
     staged = root / ".bidsmgr" / "project" / ".scan_staging" / "inventory.tsv"
     staged.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([{
-        "BIDS_name": "sub-001", "participant_id": "sub-001",
+        "participant_id": "sub-001", "participant_id": "sub-001",
         "series_uid": "U1", "dataset": root.name, "include": 1,
     }]).to_csv(staged, sep="\t", index=False)
     import_scan_as_version(root, staged, raw_root=root / "raw", row_ids=("U1",))

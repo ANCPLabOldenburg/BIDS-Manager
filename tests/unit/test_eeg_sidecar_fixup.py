@@ -35,7 +35,7 @@ def _apply_stated(staging, spec, tasks=(), cells=None):
     from bidsmgr.fixups.sidecar_schema import apply_stated_metadata
 
     rows = [
-        {"proposed_basename": t.basename, "source_file": t.row_id, **(cells or {})}
+        {"bids_name": t.basename, "source_file": t.row_id, **(cells or {})}
         for t in tasks
     ]
     return apply_stated_metadata(

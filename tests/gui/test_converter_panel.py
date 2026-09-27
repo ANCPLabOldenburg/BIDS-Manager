@@ -63,22 +63,22 @@ def test_panel_renders_under_offscreen_qpa(qtbot) -> None:
 
 def _func_row() -> dict:
     return {
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "ses-pre",
         "include": 1,
         "modality": "mri",
-        "modality_bids": "func",
+        "sequence_kind": "func",
         "sequence": "bold_rest",
         "series_uid": "1.2.3.4",
-        "proposed_datatype": "func",
-        "proposed_basename": "sub-001_ses-pre_task-rest_bold",
-        "Proposed BIDS name": "func/sub-001_ses-pre_task-rest_bold.nii.gz",
+        "datatype": "func",
+        "bids_name": "sub-001_ses-pre_task-rest_bold",
+        "bids_path": "func/sub-001_ses-pre_task-rest_bold.nii.gz",
         "bids_guess_classifier": "dcm2niix_bidsguess",
         "bids_guess_datatype": "func",
         "bids_guess_suffix": "bold",
         "bids_guess_confidence": "0.97",
         "bids_guess_skip": False,
-        "proposed_issues": "",
+        "issues": "",
         "entities": json.dumps(
             {"subject": "001", "session": "pre", "task": "rest"},
             sort_keys=True,
@@ -108,8 +108,8 @@ def test_load_inventory_updates_status_chips(qtbot, tmp_path: Path) -> None:
 
     valid = _func_row()
     err = _func_row()
-    err["proposed_basename"] = ""
-    err["proposed_datatype"] = ""
+    err["bids_name"] = ""
+    err["datatype"] = ""
     err["series_uid"] = "9.9.9"
     skip = _func_row()
     skip["include"] = 0
@@ -172,14 +172,14 @@ def test_load_inventory_does_not_overwrite_user_set_bids_output(qtbot, tmp_path:
 
 def _eeg_row() -> dict:
     return {
-        "BIDS_name": "sub-001", "session": "", "include": 1, "modality": "eeg",
-        "proposed_datatype": "eeg", "bids_guess_suffix": "eeg",
-        "proposed_basename": "sub-001_task-rest_eeg",
+        "participant_id": "sub-001", "session": "", "include": 1, "modality": "eeg",
+        "datatype": "eeg", "bids_guess_suffix": "eeg",
+        "bids_name": "sub-001_task-rest_eeg",
         "entities": json.dumps({"subject": "001", "task": "rest"}, sort_keys=True),
         "task": "rest", "run": "", "series_uid": "",
         "source_file": "sub-001/rec.edf",
         "montage": "", "line_freq": "", "eeg_reference": "", "eeg_ground": "",
-        "proposed_issues": "", "bids_guess_skip": False,
+        "issues": "", "bids_guess_skip": False,
     }
 
 
@@ -418,7 +418,7 @@ def test_bids_preview_omits_skipped_rows(qtbot, tmp_path: Path) -> None:
     skipped = _func_row()
     skipped["include"] = 0
     skipped["series_uid"] = "9.9.9"
-    skipped["proposed_basename"] = "should-not-appear"
+    skipped["bids_name"] = "should-not-appear"
     df = pd.DataFrame([_func_row(), skipped])
     panel.load_inventory(df, output_tsv=tmp_path / "inv.tsv")
 

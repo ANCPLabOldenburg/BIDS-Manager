@@ -92,12 +92,18 @@ def test_delete_refuses_non_dataset_folder(qtbot, isolated_settings, tmp_path) -
     assert plain.exists() and (plain / "important.txt").exists()  # untouched
 
 
-def test_mainwindow_lands_on_welcome_and_binds_on_open(
+def test_mainwindow_lands_on_welcome_and_binds_on_open(qtbot, 
     qapp, isolated_settings, tmp_path,
 ) -> None:
     theme = ThemeManager(qapp)
     theme.apply("dark")
     win = MainWindow(theme)
+    # Registered with qtbot so Qt destroys it when the test ends.
+    # A window left to the garbage collector is freed at
+    # interpreter teardown in an order Qt does not survive, and
+    # pytest's own ``gc_collect_harder`` then segfaults with every
+    # test in the file passing.
+    qtbot.addWidget(win)
     qapp.processEvents()
 
     # Lands on Welcome (index 2) with no project.
@@ -116,10 +122,11 @@ def test_mainwindow_lands_on_welcome_and_binds_on_open(
     assert win.converter._bids_pathbar.change_button.isEnabled() is False
 
 
-def test_theme_swap_repaints_welcome(qapp, isolated_settings, monkeypatch) -> None:
+def test_theme_swap_repaints_welcome(qtbot, qapp, isolated_settings, monkeypatch) -> None:
     theme = ThemeManager(qapp)
     theme.apply("dark")
     win = MainWindow(theme)
+    qtbot.addWidget(win)
     qapp.processEvents()
 
     calls: list = []
@@ -239,10 +246,11 @@ def test_parse_qcolor_handles_rgba_and_hex() -> None:
     assert (h.red(), h.green(), h.blue()) == (0x11, 0x16, 0x1d)
 
 
-def test_project_switcher_shows_and_switches(qapp, isolated_settings, tmp_path) -> None:
+def test_project_switcher_shows_and_switches(qtbot, qapp, isolated_settings, tmp_path) -> None:
     theme = ThemeManager(qapp)
     theme.apply("dark")
     win = MainWindow(theme)
+    qtbot.addWidget(win)
     qapp.processEvents()
 
     # Hidden until a project is open.
@@ -275,10 +283,11 @@ def test_project_switcher_shows_and_switches(qapp, isolated_settings, tmp_path) 
     assert win.converter._bids_root == tmp_path / "StudyB"
 
 
-def test_home_pill_returns_to_welcome(qapp, isolated_settings) -> None:
+def test_home_pill_returns_to_welcome(qtbot, qapp, isolated_settings) -> None:
     theme = ThemeManager(qapp)
     theme.apply("dark")
     win = MainWindow(theme)
+    qtbot.addWidget(win)
     qapp.processEvents()
 
     # Go to Converter, then Home pill back to Welcome.

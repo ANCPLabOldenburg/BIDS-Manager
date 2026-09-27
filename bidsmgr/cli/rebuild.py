@@ -4,7 +4,7 @@ Workflow this verb supports:
 
 1. The user runs ``bidsmgr-scan`` → TSV is created with the
    ``entities`` JSON column populated alongside derived display cells
-   (``proposed_basename``, ``session``, ``task``, ``run``).
+   (``bids_name``, ``session``, ``task``, ``run``).
 2. The user edits the inventory in a spreadsheet:
    * Power user: edit the ``entities`` JSON cell directly →
      run ``bidsmgr-rebuild`` (default ``--from entities``) to
@@ -116,7 +116,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         prog="bidsmgr-rebuild",
         description=(
             "Reconcile the inventory TSV's entities JSON column with "
-            "derived display cells (proposed_basename, session, task, run). "
+            "derived display cells (bids_name, session, task, run). "
             "The entities column is the source of truth for the BIDS "
             "basename; this verb regenerates whatever the user didn't "
             "edit. Pass --from columns when you edited the cells directly."

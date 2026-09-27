@@ -40,7 +40,7 @@ from ..deface import run as deface_run
 from ..editor.types import FileVerdict, Severity, ValidationReport
 from ..workers import FileReportWorker, FolderReportWorker, ReportWorker
 from . import icons
-from .combo_popup import round_menu
+from .combo_popup import menu_section, round_menu
 from .widgets.bidsignore_pane import BidsIgnorePane
 from .widgets.citation_pane import CitationPane
 from .widgets import (
@@ -50,6 +50,7 @@ from .widgets import (
     NiftiViewerPane,
     PanelFrame,
     PathBar,
+    MrsViewerPane,
     RecordingViewerPane,
     SidecarFormPane,
     TsvViewerPane,
@@ -57,6 +58,7 @@ from .widgets import (
     VSep,
     is_recording_path,
 )
+from .widgets.mrs_spectrum import is_mrs_path
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +111,7 @@ class EditorPanel(QWidget):
         self._tree_pane.deface_revert_requested.connect(self._on_deface_revert)
         self._tree_pane.strip_requested.connect(self._on_strip)
         self._tree_pane.compare_requested.connect(self._on_compare_images)
+        self._tree_pane.links_requested.connect(self._on_links)
         # Drive the Validate file/folder button enable-state from the
         # tree selection — file → file button, folder → folder button.
         self._tree_pane.file_selected.connect(
@@ -122,6 +125,7 @@ class EditorPanel(QWidget):
         self._tsv_viewer = TsvViewerPane()
         self._nifti_viewer = NiftiViewerPane()
         self._recording_viewer = RecordingViewerPane()
+        self._mrs_viewer = MrsViewerPane()
         self._center_stack = QStackedWidget()
         self._sidecar_form.apply_to_others_requested.connect(
             self._on_apply_field_to_others
@@ -131,6 +135,7 @@ class EditorPanel(QWidget):
         self._center_stack.addWidget(self._tsv_viewer)
         self._center_stack.addWidget(self._nifti_viewer)
         self._center_stack.addWidget(self._recording_viewer)
+        self._center_stack.addWidget(self._mrs_viewer)
         self._bidsignore_pane = BidsIgnorePane()
         self._center_stack.addWidget(self._bidsignore_pane)
         self._citation_pane = CitationPane()
@@ -398,6 +403,14 @@ class EditorPanel(QWidget):
         round_menu(self._tools_menu)
         self._tools_btn.setMenu(self._tools_menu)
 
+        # Grouped by PURPOSE, with headings rather than sub-menus. Sixteen
+        # flat verbs had become a list nobody could scan: "Index widths" and
+        # "Put the face back" sat next to each other, and the only thing that
+        # told you which one you wanted was reading all sixteen. Headings
+        # answer "what am I trying to do" first and keep every tool one click
+        # away, which a sub-menu would not.
+        menu_section(self._tools_menu, "Look at the dataset")
+
         self._dashboard_action = self._tools_menu.addAction("Dashboard")
         self._dashboard_action.setToolTip(
             "What is actually in this dataset: subjects, sessions, "
@@ -414,7 +427,28 @@ class EditorPanel(QWidget):
         )
         self._compare_action.triggered.connect(self._on_compare_images)
 
-        self._tools_menu.addSeparator()
+        menu_section(self._tools_menu, "Check and repair")
+
+        self._coherence_action = self._tools_menu.addAction("Check coherence...")
+        self._coherence_action.setToolTip(
+            "Find where the dataset's files stop agreeing with each other: "
+            "a scans row naming a file that is gone, a participants row for "
+            "a deleted subject, a link pointing at nothing, a sidecar with "
+            "no recording. Read-only until you choose a repair."
+        )
+        self._coherence_action.triggered.connect(self._on_coherence)
+
+        self._links_action = self._tools_menu.addAction(
+            "References (IntendedFor, Sources...)..."
+        )
+        self._links_action.setToolTip(
+            "Which files each file points at, and whether that is right. "
+            "Lists every IntendedFor, AssociatedEmptyRoom, Sources and "
+            "AnatomicalImage in the dataset with its status: correct, "
+            "pointing at a missing file, or disagreeing with the "
+            "acquisition times. Link by ticking files, not by typing paths."
+        )
+        self._links_action.triggered.connect(self._on_links)
 
         self._fixups_action = self._tools_menu.addAction("Fix ups...")
         self._fixups_action.setToolTip(
@@ -423,6 +457,64 @@ class EditorPanel(QWidget):
             "unanswered."
         )
         self._fixups_action.triggered.connect(self._on_fixups)
+
+        menu_section(self._tools_menu, "Names and structure")
+
+        self._rename_action = self._tools_menu.addAction("Rename entity...")
+        self._rename_action.setToolTip(
+            "Rename a subject, session, task or any other entity across "
+            "the whole dataset, including the references to it inside "
+            "IntendedFor, the scans tables and participants.tsv. You see "
+            "the full plan before anything moves."
+        )
+        self._rename_action.triggered.connect(self._on_rename)
+
+        self._replace_action = self._tools_menu.addAction(
+            "Find and replace a value..."
+        )
+        self._replace_action.setToolTip(
+            "Find every file where an entity has one value and give it "
+            "another, inside the whole dataset, one subject or one session. "
+            "The values are listed with how many files carry each, so there "
+            "is nothing to guess."
+        )
+        self._replace_action.triggered.connect(self._on_replace_value)
+
+        self._pad_action = self._tools_menu.addAction("Index widths...")
+        self._pad_action.setToolTip(
+            "Give every index entity a consistent width, so run-1 reads as "
+            "run-01 throughout. Says where the widths already disagree, "
+            "which is the case worth acting on. Both spellings are valid "
+            "BIDS, so this is a house style."
+        )
+        self._pad_action.triggered.connect(self._on_pad_values)
+
+        self._entities_action = self._tools_menu.addAction(
+            "Add or remove an entity..."
+        )
+        self._entities_action.setToolTip(
+            "Give a recording an entity the schema allows it, or take an "
+            "optional one away. Only what the standard permits for those "
+            "files is offered, and the entity lands in the position the "
+            "standard puts it in. Starts on the tree selection, or on the "
+            "whole dataset when there is none."
+        )
+        self._entities_action.triggered.connect(
+            lambda: self._on_edit_entities(session_mode=False)
+        )
+
+        self._sessions_action = self._tools_menu.addAction("Sessions...")
+        self._sessions_action.setToolTip(
+            "Create a session for the selected recordings, or take them back "
+            "out of the one they are in. The scans table travels to the level "
+            "BIDS puts it at and every reference follows. Starts on the tree "
+            "selection, or on the whole dataset when there is none."
+        )
+        self._sessions_action.triggered.connect(
+            lambda: self._on_edit_entities(session_mode=True)
+        )
+
+        menu_section(self._tools_menu, "Identifiable data")
 
         self._deface_action = self._tools_menu.addAction("Deface...")
         self._deface_action.setToolTip(
@@ -461,51 +553,21 @@ class EditorPanel(QWidget):
         )
         self._deface_revert_action.triggered.connect(self._on_deface_revert)
 
-        self._rename_action = self._tools_menu.addAction("Rename entity...")
-        self._rename_action.setToolTip(
-            "Rename a subject, session, task or any other entity across "
-            "the whole dataset, including the references to it inside "
-            "IntendedFor, the scans tables and participants.tsv. You see "
-            "the full plan before anything moves."
-        )
-        self._rename_action.triggered.connect(self._on_rename)
-
-        self._entities_action = self._tools_menu.addAction(
-            "Add or remove an entity..."
-        )
-        self._entities_action.setToolTip(
-            "Give a recording an entity the schema allows it, or take an "
-            "optional one away. Only what the standard permits for those "
-            "files is offered, and the entity lands in the position the "
-            "standard puts it in. Acts on the tree selection."
-        )
-        self._entities_action.triggered.connect(
-            lambda: self._on_edit_entities(session_mode=False)
-        )
-
-        self._sessions_action = self._tools_menu.addAction("Sessions...")
-        self._sessions_action.setToolTip(
-            "Create a session for the selected recordings, or take them back "
-            "out of the one they are in. The scans table travels to the level "
-            "BIDS puts it at and every reference follows. Acts on the tree "
-            "selection."
-        )
-        self._sessions_action.triggered.connect(
-            lambda: self._on_edit_entities(session_mode=True)
-        )
+        menu_section(self._tools_menu, "Remove")
 
         self._delete_action = self._tools_menu.addAction("Delete...")
         self._delete_action.setToolTip(
-            "Delete the selected recordings, datatypes or sessions. The "
-            "*_scans.tsv rows, the IntendedFor entries, a participants row "
-            "left describing nothing and any emptied folder go with them, as "
-            "one undoable step. Acts on the tree selection."
+            "Delete recordings, datatypes or sessions. The *_scans.tsv rows, "
+            "the IntendedFor entries, a participants row left describing "
+            "nothing and any emptied folder go with them, as one undoable "
+            "step. Starts on the tree selection; the whole dataset is "
+            "deliberately not one of the scopes."
         )
         self._delete_action.triggered.connect(self._on_delete)
 
         # Only meaningful for a dataset this tool did not convert, so it
         # hides itself once the dataset carries a project bundle.
-        self._tools_menu.addSeparator()
+        menu_section(self._tools_menu, "History")
         self._adopt_action = self._tools_menu.addAction("Track changes")
         self._adopt_action.setToolTip(
             "This dataset was not converted here, so there is no record "
@@ -917,11 +979,24 @@ class EditorPanel(QWidget):
             self._nifti_viewer.set_file(None, None)
             self._recording_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._tsv_viewer)
+        elif is_mrs_path(path):
+            # An MRS file is a NIfTI by container only: the data block is a
+            # complex free induction decay, and showing it as slices would
+            # show nothing. Routed on the DATATYPE folder and the schema's
+            # own suffix list, never by opening the file, because routing a
+            # click must not read a volume off disk.
+            self._mrs_viewer.set_file(path, root)
+            self._sidecar_form.set_file(None, None, None)
+            self._tsv_viewer.set_file(None, None)
+            self._nifti_viewer.set_file(None, None)
+            self._recording_viewer.set_file(None, None)
+            self._center_stack.setCurrentWidget(self._mrs_viewer)
         elif name.endswith(".nii") or name.endswith(".nii.gz"):
             self._nifti_viewer.set_file(path, root)
             self._sidecar_form.set_file(None, None, None)
             self._tsv_viewer.set_file(None, None)
             self._recording_viewer.set_file(None, None)
+            self._mrs_viewer.set_file(None, None)
             self._center_stack.setCurrentWidget(self._nifti_viewer)
         elif is_recording_path(path):
             self._show_recording(path)
@@ -996,24 +1071,15 @@ class EditorPanel(QWidget):
         Public so other widgets (the issues dialog, the validation
         pane's fix-button handler) can use it.
         """
-        target = str(path)
-        tree = self._tree_pane._tree
-
-        def visit(item) -> bool:
-            from .widgets.bids_tree_pane import PATH_ROLE
-            stored = item.data(0, PATH_ROLE)
-            if stored == target:
-                tree.setCurrentItem(item)
-                tree.scrollToItem(item)
-                return True
-            for i in range(item.childCount()):
-                if visit(item.child(i)):
-                    return True
-            return False
-
-        for i in range(tree.topLevelItemCount()):
-            if visit(tree.topLevelItem(i)):
-                return
+        # ``reveal`` opens the folders on the way down, which is also what
+        # CREATES the rows: a folder is drawn when it is opened, so a row
+        # deep in the dataset does not exist until something asks for it.
+        item = self._tree_pane.reveal(Path(path))
+        if item is not None:
+            tree = self._tree_pane._tree
+            tree.setCurrentItem(item)
+            tree.scrollToItem(item)
+            return
         # If the tree row can't be found (e.g. the file got renamed
         # between validation and the click), fall back to loading
         # the sidecar / TSV viewer directly so the click still works.
@@ -1107,8 +1173,14 @@ class EditorPanel(QWidget):
 
         One dialog for both, because underneath they are one operation: a
         session is an entity that happens to name a folder. Reached from the
-        Tools menu, where it acts on the tree selection, and from the tree's
-        right-click menu, which passes what was clicked.
+        Tools menu and from the tree's right-click menu, which passes what
+        was clicked.
+
+        It no longer refuses an empty selection. The dialog carries a scope
+        chooser, so opening it with nothing picked starts on the whole
+        dataset and the user narrows to a subject, a session or a datatype
+        there. Refusing meant "put every anatomical into a session" was only
+        reachable by selecting them all in the tree first.
 
         The refresh afterwards is the same one a rename needs, and for the
         same reason: files have moved, so every path a pane is holding may
@@ -1120,17 +1192,6 @@ class EditorPanel(QWidget):
         if root is None:
             return
         chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
-        if not chosen:
-            # Nothing picked means the dataset, which for Add is almost never
-            # what was meant. Say so rather than planning a rename of
-            # everything.
-            QMessageBox.information(
-                self, "Nothing selected",
-                "Select a subject, a session, a datatype folder or a "
-                "recording in the tree first. The change applies to what you "
-                "pick, and its sidecars and companion files travel with it.",
-            )
-            return
         dlg = EditEntitiesDialog(
             root, chosen, parent=self, mode=mode, session_mode=session_mode,
         )
@@ -1145,10 +1206,13 @@ class EditorPanel(QWidget):
     def _on_delete(self, targets: Optional[list] = None) -> None:
         """Delete recordings, datatypes or sessions, after showing the plan.
 
-        Reached from the Tools menu, where it acts on the tree selection, and
-        from the tree's right-click, which passes what was clicked. The
-        refresh afterwards is the one a rename needs, for a stronger reason:
-        every path a pane is holding may name a file that is now gone.
+        Reached from the Tools menu and from the tree's right-click, which
+        passes what was clicked. Opened with nothing picked it starts on the
+        first subject rather than refusing: the dialog's scope chooser is
+        how you say what to delete, and the whole dataset is deliberately
+        not one of its options. The refresh afterwards is the one a rename
+        needs, for a stronger reason: every path a pane is holding may name
+        a file that is now gone.
         """
         from .delete_dialog import DeleteDialog
 
@@ -1156,14 +1220,6 @@ class EditorPanel(QWidget):
         if root is None:
             return
         chosen = [Path(t) for t in (targets or self._tree_pane.selected_paths())]
-        if not chosen:
-            QMessageBox.information(
-                self, "Nothing selected",
-                "Select a session, a datatype folder or a recording in the "
-                "tree first. Deleting acts on what you pick, and its "
-                "companion files go with it.",
-            )
-            return
         dlg = DeleteDialog(root, chosen, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1174,6 +1230,80 @@ class EditorPanel(QWidget):
         self._tree_pane.set_root(root)
         if self._report is not None:
             self.start_dataset_validation()
+
+    def _on_links(self, targets: Optional[list] = None) -> None:
+        """Edit the fields that point from one file to another.
+
+        Opens on the whole dataset. A file may be passed in, which is what
+        the tree's right-click does, and it is used to start on that file
+        with a field it can actually carry. Nothing requires one: the dialog
+        lists the files that carry the field on the left, so opening it cold
+        is how you find the fieldmaps with nothing set.
+        """
+        from .linkage_dialog import LinkageDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        chosen = [
+            Path(t) for t in (targets or self._tree_pane.selected_paths())
+            if Path(t).is_file()
+        ]
+        dlg = LinkageDialog(root, chosen[0] if chosen else None, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._sidecar_form.set_file(None, None, None)
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_replace_value(self) -> None:
+        """Find one entity value and replace it, inside a chosen scope."""
+        from .replace_value_dialog import ReplaceValueDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dlg = ReplaceValueDialog(root, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
+        self._tree_pane.set_root(root)
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_pad_values(self) -> None:
+        """Give every value of an index entity the same width."""
+        from .pad_values_dialog import PadValuesDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dlg = PadValuesDialog(root, parent=self)
+        dlg.exec()
+        if dlg.applied_count():
+            # Files moved, so whatever the panes are holding may be gone.
+            self._sidecar_form.set_file(None, None, None)
+            self._reload_open_image()
+            self._tree_pane.set_root(root)
+            if self._report is not None:
+                self.start_dataset_validation()
+
+    def _on_coherence(self) -> None:
+        """Find where the dataset's files stop agreeing with each other."""
+        from .coherence_dialog import CoherenceDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dlg = CoherenceDialog(root, parent=self)
+        dlg.exec()
+        if dlg.applied_count():
+            self._sidecar_form.set_file(None, None, None)
+            self._tree_pane.set_root(root)
+            if self._report is not None:
+                self.start_dataset_validation()
 
     def _refresh_deface_action(self) -> None:
         """Grey the Deface entry out when it cannot run, and say why.
@@ -1829,6 +1959,7 @@ class EditorPanel(QWidget):
         self._bidsignore_pane.repaint_for_palette(pal)
         self._citation_pane.repaint_for_palette(pal)
         self._recording_viewer.repaint_for_palette(pal)
+        self._mrs_viewer.repaint_for_palette(pal)
         self._validation_pane.repaint_for_palette(pal)
         for frame in getattr(self, "_panel_frames", []):
             frame._refresh_icons()

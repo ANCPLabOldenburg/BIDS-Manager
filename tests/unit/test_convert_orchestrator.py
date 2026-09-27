@@ -55,7 +55,7 @@ def _write_inventory(
 def _row(
     *,
     series_uid: str,
-    bids_name: str = "sub-001",
+    participant: str = "sub-001",
     session: str = "",
     datatype: str = "anat",
     suffix: str = "T1w",
@@ -65,12 +65,12 @@ def _row(
     bids_guess_skip: str = "False",
 ) -> dict:
     return {
-        "BIDS_name": bids_name,
+        "participant_id": participant,
         "session": session,
         "include": include,
         "series_uid": series_uid,
-        "proposed_datatype": datatype,
-        "proposed_basename": basename or f"{bids_name}_{suffix}",
+        "datatype": datatype,
+        "bids_name": basename or f"{participant}_{suffix}",
         "bids_guess_suffix": suffix,
         "bids_guess_skip": bids_guess_skip,
         "dataset": dataset,
@@ -275,7 +275,7 @@ class TestFilteringAndDryRun:
             tmp_path,
             [
                 _row(series_uid="UID_A", basename="sub-001_T1w", dataset="study_a"),
-                _row(series_uid="UID_B", basename="sub-002_T1w", bids_name="sub-002", dataset="study_b"),
+                _row(series_uid="UID_B", basename="sub-002_T1w", participant="sub-002", dataset="study_b"),
             ],
             {"UID_A": [str(p) for p in dicoms_a],
              "UID_B": [str(p) for p in dicoms_b]},
@@ -296,7 +296,7 @@ class TestFilteringAndDryRun:
             tmp_path,
             [
                 _row(series_uid="UID_A", basename="sub-001_T1w", dataset="study_a"),
-                _row(series_uid="UID_B", basename="sub-002_T1w", bids_name="sub-002", dataset="study_b"),
+                _row(series_uid="UID_B", basename="sub-002_T1w", participant="sub-002", dataset="study_b"),
             ],
             {"UID_A": [str(p) for p in dicoms_a],
              "UID_B": [str(p) for p in dicoms_b]},
@@ -493,7 +493,7 @@ class TestFailureHandling:
 
     def test_missing_dataset_column_raises(self, tmp_path: Path) -> None:
         tsv = tmp_path / "inv.tsv"
-        pd.DataFrame([{"BIDS_name": "sub-001", "include": "1"}]).to_csv(
+        pd.DataFrame([{"participant_id": "sub-001", "include": "1"}]).to_csv(
             tsv, sep="\t", index=False,
         )
         # Sidecar must exist for the loader, but the dataset check fires first.
@@ -529,11 +529,11 @@ def _eeg_row(**over):
     base = {
         "source_file": "sub-01_task-rest.edf",
         "series_uid": "",
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "",
-        "proposed_datatype": "eeg",
+        "datatype": "eeg",
         "bids_guess_suffix": "eeg",
-        "proposed_basename": "sub-001_task-rest_eeg",
+        "bids_name": "sub-001_task-rest_eeg",
         "entities": json.dumps({"subject": "001", "task": "rest"}),
         "task": "rest",
         "run": "",

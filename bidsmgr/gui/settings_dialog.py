@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -274,6 +275,77 @@ class SettingsDialog(QDialog):
             "regex fallback layer)"
         )
         form.addRow("Classifier:", self._scan_skip_bids_guess)
+
+        # Index widths.
+        #
+        # A group rather than a row of spin boxes: the first version was six
+        # unlabelled numbers after the words "Index width", which says what
+        # the control IS and nothing about what it does or why anyone would
+        # touch it. The entities come from the schema, so a BIDS version that
+        # adds one is offered it without an edit here.
+        from ..editor.values import index_entities
+
+        widths_box = QGroupBox("Index width in proposed names")
+        widths_outer = QVBoxLayout(widths_box)
+        widths_outer.setContentsMargins(12, 10, 12, 10)
+        widths_outer.setSpacing(8)
+
+        explain = QLabel(
+            "An <b>index</b> entity is one whose value is a number: run, "
+            "echo, and the others below. BIDS accepts <code>run-1</code> and "
+            "<code>run-01</code> equally, so this is a house style rather "
+            "than a correction.<br><br>"
+            "Setting a width here makes the inspection table propose that "
+            "width from the moment a scan finishes, so you never have to go "
+            "and repad the dataset afterwards. <b>As found</b> keeps whatever "
+            "the source gives, which is what every earlier version did and "
+            "what stays out of your way."
+        )
+        explain.setWordWrap(True)
+        explain.setObjectName("dlg-hint")
+        widths_outer.addWidget(explain)
+
+        self._index_widths: dict[str, QSpinBox] = {}
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(6)
+        for i, entity in enumerate(index_entities()):
+            try:
+                info = schema.entity_key_info(entity)
+                display, why = info.display_name, info.description.strip()
+            except KeyError:
+                display, why = entity, ""
+
+            box = QSpinBox()
+            box.setObjectName("ent-input")
+            box.setRange(0, 6)
+            box.setSpecialValueText("as found")
+            box.setSuffix(" digits")
+            box.setToolTip(why[:300] if why else f"The {entity} entity.")
+            self._index_widths[entity] = box
+
+            name = QLabel(f"<code>{entity}-</code>")
+            name.setToolTip(display)
+            sample = QLabel("")
+            sample.setObjectName("dlg-hint")
+            # Live example, because "2 digits" is abstract and
+            # "run-1 becomes run-01" is not.
+            def _sync(value, entity=entity, sample=sample):
+                sample.setText(
+                    f"{entity}-7 stays {entity}-7" if not value
+                    else f"{entity}-7 becomes {entity}-{str(7).zfill(value)}"
+                )
+            box.valueChanged.connect(_sync)
+            _sync(box.value())
+
+            row, col = divmod(i, 2)
+            grid.addWidget(name, row, col * 3)
+            grid.addWidget(box, row, col * 3 + 1)
+            grid.addWidget(sample, row, col * 3 + 2)
+        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(5, 1)
+        widths_outer.addLayout(grid)
+        form.addRow("", widths_box)
 
         v.addWidget(defaults)
         v.addStretch(1)
@@ -967,6 +1039,8 @@ class SettingsDialog(QDialog):
         self._scan_probe.setChecked(s.scan_probe_convert)
         self._scan_preview.setChecked(s.scan_converter_preview)
         self._scan_skip_bids_guess.setChecked(s.scan_skip_bids_guess)
+        for entity, box in self._index_widths.items():
+            box.setValue(int(s.scan_index_widths.get(entity, 0) or 0))
 
         self._convert_jobs.setValue(max(1, min(s.convert_n_jobs, cap)))
         idx = self._convert_on_existing.findData(s.convert_on_existing)
@@ -1059,6 +1133,12 @@ class SettingsDialog(QDialog):
         s.scan_probe_convert = self._scan_probe.isChecked()
         s.scan_converter_preview = self._scan_preview.isChecked()
         s.scan_skip_bids_guess = self._scan_skip_bids_guess.isChecked()
+        # Zero means "as found", so it is absent rather than stored as 0:
+        # the scan pass treats an empty map as nothing to do.
+        s.scan_index_widths = {
+            entity: box.value()
+            for entity, box in self._index_widths.items() if box.value()
+        }
 
         s.convert_n_jobs = self._convert_jobs.value()
         s.convert_on_existing = self._convert_on_existing.currentData() or "skip"

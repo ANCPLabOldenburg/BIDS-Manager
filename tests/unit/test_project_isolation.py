@@ -37,7 +37,7 @@ def _two_projects(tmp_path: Path) -> Path:
 def _state_a_name(tmp_path: Path, project: str, name: str) -> Path:
     tsv = tmp_path / project / "inv.tsv"
     pd.DataFrame([{
-        "include": "1", "proposed_basename": "sub-001_T1w", "series_uid": "1.2.3",
+        "include": "1", "bids_name": "sub-001_T1w", "series_uid": "1.2.3",
     }]).to_csv(tsv, sep="\t", index=False)
     spec = RecordingMetaSpec()
     dataset_description_from_bids(spec.dataset_description, {"Name": name})

@@ -26,6 +26,7 @@ from .primitives import (
     PathBar,
     VSep,
 )
+from .mrs_viewer_pane import MrsViewerPane
 from .recording_viewer_pane import RecordingViewerPane, is_recording_path
 from .sidecar_form_pane import SidecarFormPane, find_peer_files
 from .sidecar_row import SidecarRow
@@ -56,6 +57,7 @@ __all__ = [
     "PaneHeader",
     "PanelFrame",
     "PathBar",
+    "MrsViewerPane",
     "RecordingViewerPane",
     "SidecarFormPane",
     "SidecarRow",

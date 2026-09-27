@@ -154,7 +154,7 @@ def test_derive_suggestions_on_empty_tags() -> None:
 def _frame(**cols) -> pd.DataFrame:
     base = {
         "include": [1],
-        "proposed_issues": [""],
+        "issues": [""],
         "bids_guess_skip": [False],
         "bids_guess_datatype": [""],
         "bids_guess_suffix": [""],
@@ -200,13 +200,13 @@ def test_ct_companion_is_excluded_with_a_reason() -> None:
     _flag_ct_companion_rows(df)
     assert df.at[0, "include"] == 0
     assert df.at[0, "bids_guess_skip"] is True
-    assert CT_COMPANION_ISSUE_TOKEN in df.at[0, "proposed_issues"]
+    assert CT_COMPANION_ISSUE_TOKEN in df.at[0, "issues"]
 
 
 def test_ct_flag_preserves_an_existing_issue() -> None:
-    df = _frame(_dicom_modality="CT", proposed_issues="something earlier")
+    df = _frame(_dicom_modality="CT", issues="something earlier")
     _flag_ct_companion_rows(df)
-    assert "something earlier" in df.at[0, "proposed_issues"]
+    assert "something earlier" in df.at[0, "issues"]
 
 
 def test_suggestions_are_created_even_when_columns_are_absent() -> None:

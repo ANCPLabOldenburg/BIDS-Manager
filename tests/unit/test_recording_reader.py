@@ -1,9 +1,12 @@
 """Unit tests for the Qt-free recording read/summary helpers.
 
-These functions live in :mod:`bidsmgr.gui.widgets.recording_viewer_pane`
-(imported by the loader workers) but are pure logic: extension routing,
-MNE read, the display summary, and events.tsv resolution. No QApplication
-is created here.
+These functions are pure logic: extension routing, MNE read, the display
+summary, and events.tsv resolution. No QApplication is created here.
+
+They live in three modules now. ``recording_formats`` holds what counts as
+a recording and how its extension is spelled, because four things ask;
+``time_series_view`` holds the events lookup, because the view draws them;
+``recording_viewer_pane`` keeps the MNE read and the summary card.
 """
 
 from __future__ import annotations
@@ -16,13 +19,17 @@ import pytest
 
 mne = pytest.importorskip("mne")
 
+from bidsmgr.gui.widgets.recording_formats import (  # noqa: E402
+    full_ext as _full_ext,
+    is_recording_path,
+)
 from bidsmgr.gui.widgets.recording_viewer_pane import (  # noqa: E402
-    _events_sibling,
-    _full_ext,
-    _read_events_tsv,
     _read_raw,
     _summarize_raw,
-    is_recording_path,
+)
+from bidsmgr.gui.widgets.time_series_view import (  # noqa: E402
+    _events_sibling,
+    _read_events_tsv,
 )
 
 

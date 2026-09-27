@@ -21,6 +21,7 @@ from bidsmgr.editor.types import (
     SidecarField,
     ValidationReport,
 )
+from .conftest import open_every_folder
 from bidsmgr.gui.app_settings import AppSettings
 from bidsmgr.gui.widgets.bids_tree_pane import BidsTreePane, is_hidden_name
 from bidsmgr.gui.widgets.sidecar_form_pane import (
@@ -296,7 +297,7 @@ def test_a_folder_says_what_is_inside_it(qtbot, dataset: Path) -> None:
     pane = BidsTreePane()
     qtbot.addWidget(pane)
     pane.set_root(dataset)
-    pane._tree.expandAll()
+    open_every_folder(pane._tree)
 
     subject = _find(pane, "sub-02")
     assert subject is not None
@@ -310,7 +311,7 @@ def test_the_count_is_a_role_not_the_name(qtbot, dataset: Path) -> None:
     pane = BidsTreePane()
     qtbot.addWidget(pane)
     pane.set_root(dataset)
-    pane._tree.expandAll()
+    open_every_folder(pane._tree)
     assert _find(pane, "sub-01") is not None
     assert _find(pane, "anat") is not None
 
@@ -326,7 +327,7 @@ def test_the_tree_reports_every_selected_file(qtbot, dataset: Path) -> None:
     pane = BidsTreePane()
     qtbot.addWidget(pane)
     pane.set_root(dataset)
-    pane._tree.expandAll()
+    open_every_folder(pane._tree)
 
     seen: list[list[Path]] = []
     pane.selection_changed.connect(seen.append)

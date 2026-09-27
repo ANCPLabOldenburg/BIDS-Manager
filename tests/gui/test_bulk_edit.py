@@ -29,19 +29,19 @@ pytestmark = pytest.mark.gui
 
 def _row(**overrides) -> dict:
     base = {
-        "BIDS_name": "sub-001",
+        "participant_id": "sub-001",
         "session": "ses-pre",
         "include": 1,
         "modality": "mri",
-        "proposed_datatype": "func",
-        "proposed_basename": "sub-001_ses-pre_task-rest_bold",
-        "Proposed BIDS name": "sub-001_ses-pre_task-rest_bold",
+        "datatype": "func",
+        "bids_name": "sub-001_ses-pre_task-rest_bold",
+        "bids_path": "sub-001_ses-pre_task-rest_bold",
         "bids_guess_classifier": "dcm2niix_bidsguess",
         "bids_guess_datatype": "func",
         "bids_guess_suffix": "bold",
         "bids_guess_confidence": "0.97",
         "bids_guess_skip": False,
-        "proposed_issues": "",
+        "issues": "",
         "entities": json.dumps(
             {"subject": "001", "session": "pre", "task": "rest"},
             sort_keys=True,
@@ -68,16 +68,16 @@ def make_df(rows) -> pd.DataFrame:
 def test_bulk_set_subject_updates_bids_name_and_basename() -> None:
     df = make_df([
         _row(series_uid="1"),
-        _row(BIDS_name="sub-002", series_uid="2"),
-        _row(BIDS_name="sub-003", series_uid="3"),
+        _row(participant_id="sub-002", series_uid="2"),
+        _row(participant_id="sub-003", series_uid="3"),
     ])
     model = InventoryTableModel(df)
     n = model.bulk_set([0, 1, 2], "id", "099")
     assert n == 3
     out = model.dataframe()
-    assert (out["BIDS_name"] == "sub-099").all()
+    assert (out["participant_id"] == "sub-099").all()
     # The basename column reflects the new subject across all rows.
-    assert out["proposed_basename"].str.startswith("sub-099").all()
+    assert out["bids_name"].str.startswith("sub-099").all()
     # Entities JSON was updated too.
     for ent in out["entities"]:
         assert json.loads(ent)["subject"] == "099"
@@ -101,22 +101,22 @@ def test_bulk_set_task_rebuilds_basename() -> None:
     assert n == 2
     out = model.dataframe()
     assert (out["task"] == "motor").all()
-    assert out["proposed_basename"].str.contains("task-motor").all()
+    assert out["bids_name"].str.contains("task-motor").all()
 
 
 def test_bulk_set_datatype_preserves_per_row_suffix() -> None:
     """When changing datatype, the original suffix for each row is kept."""
     df = make_df([
-        _row(proposed_datatype="func", bids_guess_suffix="bold", series_uid="1"),
-        _row(proposed_datatype="anat", bids_guess_suffix="T1w", series_uid="2",
-             proposed_basename="sub-001_ses-pre_T1w"),
+        _row(datatype="func", bids_guess_suffix="bold", series_uid="1"),
+        _row(datatype="anat", bids_guess_suffix="T1w", series_uid="2",
+             bids_name="sub-001_ses-pre_T1w"),
     ])
     model = InventoryTableModel(df)
     # Change both to "func" — the second row's suffix stays "T1w".
     n = model.bulk_set([0, 1], "datatype", "func")
     assert n >= 1  # at least the second row changed datatype
     out = model.dataframe()
-    assert (out["proposed_datatype"] == "func").all()
+    assert (out["datatype"] == "func").all()
     # Suffix not touched.
     assert out.at[0, "bids_guess_suffix"] == "bold"
     assert out.at[1, "bids_guess_suffix"] == "T1w"
@@ -238,8 +238,8 @@ def _select_column(dlg, key) -> None:
 
 
 def test_dialog_line_freq_is_fixed_dropdown(qtbot) -> None:
-    df = make_df([_row(proposed_datatype="eeg", series_uid="", source_file="a.edf",
-                       line_freq="", proposed_basename="sub-001_task-rest_eeg")])
+    df = make_df([_row(datatype="eeg", series_uid="", source_file="a.edf",
+                       line_freq="", bids_name="sub-001_task-rest_eeg")])
     model = InventoryTableModel(df)
     dlg = BulkEditDialog(model, rows=[0])
     qtbot.addWidget(dlg)
@@ -251,8 +251,8 @@ def test_dialog_line_freq_is_fixed_dropdown(qtbot) -> None:
 
 
 def test_dialog_montage_is_dropdown(qtbot) -> None:
-    df = make_df([_row(proposed_datatype="eeg", series_uid="", source_file="a.edf",
-                       montage="", proposed_basename="sub-001_task-rest_eeg")])
+    df = make_df([_row(datatype="eeg", series_uid="", source_file="a.edf",
+                       montage="", bids_name="sub-001_task-rest_eeg")])
     model = InventoryTableModel(df)
     dlg = BulkEditDialog(model, rows=[0])
     qtbot.addWidget(dlg)
@@ -264,11 +264,11 @@ def test_dialog_montage_is_dropdown(qtbot) -> None:
 
 def test_dialog_apply_combo_value(qtbot) -> None:
     df = make_df([
-        _row(proposed_datatype="eeg", series_uid="", source_file="a.edf",
-             line_freq="", proposed_basename="sub-001_task-rest_eeg"),
-        _row(BIDS_name="sub-002", proposed_datatype="eeg", series_uid="",
+        _row(datatype="eeg", series_uid="", source_file="a.edf",
+             line_freq="", bids_name="sub-001_task-rest_eeg"),
+        _row(participant_id="sub-002", datatype="eeg", series_uid="",
              source_file="b.edf", line_freq="",
-             proposed_basename="sub-002_task-rest_eeg"),
+             bids_name="sub-002_task-rest_eeg"),
     ])
     model = InventoryTableModel(df)
     dlg = BulkEditDialog(model, rows=[0, 1])
@@ -278,3 +278,199 @@ def test_dialog_apply_combo_value(qtbot) -> None:
     dlg._on_apply()
     assert dlg.changed_count() == 2
     assert (model.dataframe()["line_freq"] == "60").all()
+
+
+# ---------------------------------------------------------------------------
+# Targeting: the selection is where it starts, not what it does
+#
+# It used to write into every selected row, full stop, so "change task-rest
+# but leave the localizers alone" meant going back to the table and
+# re-selecting. The Editor's rename tool had the better model: find the rows
+# that say a particular thing, and change those.
+
+
+def _mixed_model() -> InventoryTableModel:
+    """Four rows: three say task-rest, one says task-nback."""
+    return InventoryTableModel(make_df([
+        _row(series_uid="1"),
+        _row(series_uid="2"),
+        _row(series_uid="3"),
+        _row(series_uid="4", task="nback",
+             entities=json.dumps(
+                 {"subject": "001", "session": "pre", "task": "nback"},
+                 sort_keys=True,
+             ),
+             bids_name="sub-001_ses-pre_task-nback_bold"),
+    ]))
+
+
+def _pick_column(dlg: BulkEditDialog, key: str) -> None:
+    dlg._col_combo.setCurrentIndex(dlg._col_combo.findData(key))
+
+
+def _set_value(dlg: BulkEditDialog, value: str) -> None:
+    if dlg._value_is_combo:
+        dlg._value_combo.setCurrentText(value)
+    else:
+        dlg._value_edit.setText(value)
+    dlg._replan_timer.stop()
+    dlg._replan()
+
+
+def _preview(dlg: BulkEditDialog) -> list[tuple[str, str, str]]:
+    return [
+        (dlg._preview.topLevelItem(i).text(0),
+         dlg._preview.topLevelItem(i).text(1),
+         dlg._preview.topLevelItem(i).text(2))
+        for i in range(dlg._preview.topLevelItemCount())
+    ]
+
+
+class TestTheModelCanBeRead:
+    def test_bulk_value_reads_what_bulk_set_writes(self):
+        model = _mixed_model()
+        assert model.bulk_value(0, "task") == "rest"
+        model.bulk_set([0], "task", "x")
+        assert model.bulk_value(0, "task") == "x"
+
+    def test_it_reads_an_entity_with_no_column(self):
+        model = _mixed_model()
+        model.bulk_set([0], "entity:acq", "fm2")
+        assert model.bulk_value(0, "entity:acq") == "fm2"
+        assert model.bulk_value(1, "entity:acq") == ""
+
+    def test_id_reads_the_subject_entity(self):
+        assert _mixed_model().bulk_value(0, "id") == "001"
+
+    def test_a_row_is_named_by_its_bids_name(self):
+        assert _mixed_model().row_label(0) == "sub-001_ses-pre_task-rest_bold"
+
+
+class TestNarrowingByValue:
+    def test_every_value_in_use_is_offered_with_its_count(self, qtbot):
+        model = _mixed_model()
+        dlg = BulkEditDialog(model, [0, 1, 2, 3])
+        qtbot.addWidget(dlg)
+        _pick_column(dlg, "task")
+        offered = [
+            dlg._target_combo.itemText(i)
+            for i in range(dlg._target_combo.count())
+        ]
+        assert "every selected row (4)" in offered
+        assert "only the rows that say rest (3)" in offered
+        assert "only the rows that say nback (1)" in offered
+
+    def test_picking_one_confines_the_change(self, qtbot):
+        model = _mixed_model()
+        dlg = BulkEditDialog(model, [0, 1, 2, 3])
+        qtbot.addWidget(dlg)
+        _pick_column(dlg, "task")
+        dlg._target_combo.setCurrentIndex(dlg._target_combo.findData("rest"))
+        _set_value(dlg, "restingstate")
+        dlg._on_apply()
+
+        tasks = list(model.dataframe()["task"])
+        assert tasks == ["restingstate", "restingstate", "restingstate", "nback"]
+
+    def test_rows_that_say_nothing_are_their_own_choice(self, qtbot):
+        """Blank is a value people want to fill, and an empty string in a
+        dropdown is invisible."""
+        model = InventoryTableModel(make_df([
+            _row(series_uid="1"),
+            _row(series_uid="2", run="", task="rest"),
+        ]))
+        dlg = BulkEditDialog(model, [0, 1])
+        qtbot.addWidget(dlg)
+        _pick_column(dlg, "run")
+        offered = [
+            dlg._target_combo.itemText(i)
+            for i in range(dlg._target_combo.count())
+        ]
+        assert any("say nothing (2)" in o for o in offered)
+
+    def test_everything_is_the_default(self, qtbot):
+        """Opening it and pressing Apply must behave as it always did."""
+        model = _mixed_model()
+        dlg = BulkEditDialog(model, [0, 1, 2, 3])
+        qtbot.addWidget(dlg)
+        _pick_column(dlg, "task")
+        _set_value(dlg, "x")
+        dlg._on_apply()
+        assert list(model.dataframe()["task"]) == ["x"] * 4
+
+
+class TestThePreview:
+    def test_it_says_what_each_row_says_now_and_would_say(self, qtbot):
+        model = _mixed_model()
+        dlg = BulkEditDialog(model, [0, 3])
+        qtbot.addWidget(dlg)
+        _pick_column(dlg, "task")
+        _set_value(dlg, "x")
+        assert _preview(dlg) == [
+            ("sub-001_ses-pre_task-rest_bold", "rest", "x"),
+            ("sub-001_ses-pre_task-nback_bold", "nback", "x"),
+        ]
+
+    def test_a_row_that_already_says_it_is_not_listed(self, qtbot):
+        """It would be a no-op, and a preview full of no-ops hides the
+        rows that do change."""
+        model = _mixed_model()
+        dlg = BulkEditDialog(model, [0, 1, 2, 3])
+        qtbot.addWidget(dlg)
+        _pick_column(dlg, "task")
+        _set_value(dlg, "rest")
+        assert [row[0] for row in _preview(dlg)] == [
+            "sub-001_ses-pre_task-nback_bold"
+        ]
+
+    def test_unticking_a_row_leaves_it_alone(self, qtbot):
+        """The case no filter can express: these three, but not that one."""
+        from PyQt6.QtCore import Qt
+
+        model = _mixed_model()
+        dlg = BulkEditDialog(model, [0, 1, 2, 3])
+        qtbot.addWidget(dlg)
+        _pick_column(dlg, "task")
+        _set_value(dlg, "x")
+        dlg._preview.topLevelItem(1).setCheckState(0, Qt.CheckState.Unchecked)
+        dlg._on_apply()
+
+        tasks = list(model.dataframe()["task"])
+        assert tasks.count("x") == 3
+        assert tasks[1] == "rest"
+
+    def test_apply_is_dead_with_nothing_ticked(self, qtbot):
+        from PyQt6.QtCore import Qt
+
+        model = _mixed_model()
+        dlg = BulkEditDialog(model, [0, 1, 2, 3])
+        qtbot.addWidget(dlg)
+        _pick_column(dlg, "task")
+        _set_value(dlg, "x")
+        dlg._set_all(Qt.CheckState.Unchecked)
+        assert not dlg._apply_btn.isEnabled()
+        dlg._on_apply()
+        assert list(model.dataframe()["task"]) == ["rest"] * 3 + ["nback"]
+
+    def test_the_button_says_how_many(self, qtbot):
+        model = _mixed_model()
+        dlg = BulkEditDialog(model, [0, 1, 2, 3])
+        qtbot.addWidget(dlg)
+        _pick_column(dlg, "task")
+        _set_value(dlg, "x")
+        assert "4" in dlg._apply_btn.text()
+
+    def test_a_value_typed_inside_the_debounce_still_counts(self, qtbot):
+        """Typing and pressing Apply within the delay would otherwise write
+        the plan from BEFORE the value was typed."""
+        model = _mixed_model()
+        dlg = BulkEditDialog(model, [0, 1, 2, 3])
+        qtbot.addWidget(dlg)
+        _pick_column(dlg, "task")
+        if dlg._value_is_combo:
+            dlg._value_combo.setCurrentText("typed")
+        else:
+            dlg._value_edit.setText("typed")
+        assert dlg._replan_timer.isActive()
+        dlg._on_apply()
+        assert list(model.dataframe()["task"]) == ["typed"] * 4

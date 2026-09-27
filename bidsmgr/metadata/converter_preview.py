@@ -45,7 +45,14 @@ def _is_answer(value: Any) -> bool:
     """
     if value is None:
         return False
-    if isinstance(value, str) and value.strip().lower() in ("n/a", "na", ""):
+    if isinstance(value, str) and value.strip().lower() in (
+        # mne-bids writes "n/a" when BIDS requires a key it cannot answer.
+        "n/a", "na", "",
+        # dcm2niix v1.0.20260724 writes the literal "None" for a field the
+        # DICOM does not state. Offering that as an answer would tell the
+        # user the department is called None and stop the form asking.
+        "none",
+    ):
         return False
     if isinstance(value, (list, dict)) and not value:
         return False
@@ -122,7 +129,7 @@ def preview_from_inventory(df) -> dict[str, dict[str, Any]]:
     for _, row in df.iterrows():
         if str(row.get("include", "1")).strip() in ("0", "False", "false"):
             continue
-        datatype = str(row.get("proposed_datatype", "") or "").strip()
+        datatype = str(row.get("datatype", "") or "").strip()
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
         if not datatype or not suffix:
             continue
@@ -161,7 +168,7 @@ def preview_from_probe(df, probe_stats: Optional[dict] = None) -> dict[str, dict
     kind_of: dict[str, tuple[str, str]] = {}
     for _, row in df.iterrows():
         uid = str(row.get("series_uid", "") or "").strip()
-        datatype = str(row.get("proposed_datatype", "") or "").strip()
+        datatype = str(row.get("datatype", "") or "").strip()
         if not datatype:
             datatype = str(row.get("bids_guess_datatype", "") or "").strip()
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
@@ -229,7 +236,7 @@ def preview_by_row(df) -> dict[str, dict[str, Any]]:
         if not isinstance(derived, dict):
             continue
 
-        datatype = str(row.get("proposed_datatype", "") or "").strip()
+        datatype = str(row.get("datatype", "") or "").strip()
         suffix = str(row.get("bids_guess_suffix", "") or "").strip()
         kept = {
             name: value

@@ -72,8 +72,8 @@ class TestUnifiedColumnContract:
     def test_finalize_fills_missing_with_empty_string(self) -> None:
         """``concat`` introduces NaN; finalize replaces with ``""``."""
         df = pd.DataFrame([
-            {"BIDS_name": "sub-001", "series_uid": "1.2.3"},
-            {"BIDS_name": "sub-002", "source_file": "rec.edf"},
+            {"participant_id": "sub-001", "series_uid": "1.2.3"},
+            {"participant_id": "sub-002", "source_file": "rec.edf"},
         ])
         out = _finalize_unified_dataframe(df)
         # No NaN cells anywhere.
@@ -168,5 +168,5 @@ class TestRunScanDispatch:
         header = out_tsv.read_text().splitlines()[0]
         cols = header.split("\t")
         assert "task" in cols  # EEG/MEG column
-        assert "BIDS_name" in cols  # MRI column
+        assert "participant_id" in cols  # MRI column
         assert "dataset" in cols

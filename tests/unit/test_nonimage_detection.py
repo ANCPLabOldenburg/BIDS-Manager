@@ -4,7 +4,7 @@ A DICOM series whose files carry no Image Pixel module (Rows/Columns) is a
 DERIVED non-image object (e.g. a Siemens diffusion ``TENSOR`` map or a
 ``PhoenixZIPReport``). dcm2niix cannot convert it to NIfTI, so the scanner
 flags it: excluded from conversion (``include=0`` / ``bids_guess_skip``)
-with a ``non-image series`` note in ``proposed_issues`` so it surfaces in
+with a ``non-image series`` note in ``issues`` so it surfaces in
 the inventory table highlighted rather than failing dcm2niix with ``rc=2``.
 
 Covers the engine layer:
@@ -142,29 +142,29 @@ def test_is_nonimage_flag(val, expected: bool) -> None:
 
 def test_flag_nonimage_rows_excludes_and_annotates() -> None:
     df = pd.DataFrame([
-        {"_has_pixel_data": True,  "include": 1, "bids_guess_skip": False, "proposed_issues": ""},
-        {"_has_pixel_data": False, "include": 1, "bids_guess_skip": False, "proposed_issues": ""},
-        {"_has_pixel_data": False, "include": 1, "bids_guess_skip": False, "proposed_issues": "trivial: x"},
+        {"_has_pixel_data": True,  "include": 1, "bids_guess_skip": False, "issues": ""},
+        {"_has_pixel_data": False, "include": 1, "bids_guess_skip": False, "issues": ""},
+        {"_has_pixel_data": False, "include": 1, "bids_guess_skip": False, "issues": "trivial: x"},
     ])
     _flag_nonimage_rows(df)
 
     # Image row untouched.
     assert df.at[0, "include"] == 1
     assert not bool(df.at[0, "bids_guess_skip"])
-    assert df.at[0, "proposed_issues"] == ""
+    assert df.at[0, "issues"] == ""
 
     # Non-image row excluded + annotated.
     assert df.at[1, "include"] == 0
     assert bool(df.at[1, "bids_guess_skip"])
-    assert NONIMAGE_ISSUE_TOKEN in df.at[1, "proposed_issues"]
+    assert NONIMAGE_ISSUE_TOKEN in df.at[1, "issues"]
 
     # Existing issue preserved after the prepended non-image note.
-    assert NONIMAGE_ISSUE_TOKEN in df.at[2, "proposed_issues"]
-    assert "trivial: x" in df.at[2, "proposed_issues"]
+    assert NONIMAGE_ISSUE_TOKEN in df.at[2, "issues"]
+    assert "trivial: x" in df.at[2, "issues"]
 
 
 def test_flag_nonimage_rows_noop_without_column() -> None:
-    df = pd.DataFrame([{"include": 1, "bids_guess_skip": False, "proposed_issues": ""}])
+    df = pd.DataFrame([{"include": 1, "bids_guess_skip": False, "issues": ""}])
     _flag_nonimage_rows(df)  # no _has_pixel_data column -> no-op
     assert df.at[0, "include"] == 1
 
@@ -175,21 +175,21 @@ def test_physio_rows_are_exempt_from_nonimage_flag() -> None:
     df = pd.DataFrame([
         # physio identified by suffix
         {"_has_pixel_data": False, "include": 1, "bids_guess_skip": False,
-         "proposed_issues": "", "bids_guess_suffix": "physio", "modality": "physio",
-         "proposed_basename": "sub-001_task-rest_physio"},
+         "issues": "", "bids_guess_suffix": "physio", "modality": "physio",
+         "bids_name": "sub-001_task-rest_physio"},
         # a genuine non-image object (TENSOR) for contrast
         {"_has_pixel_data": False, "include": 1, "bids_guess_skip": False,
-         "proposed_issues": "", "bids_guess_suffix": "TENSOR", "modality": "dwi",
-         "proposed_basename": "sub-001_desc-TENSOR_dwi"},
+         "issues": "", "bids_guess_suffix": "TENSOR", "modality": "dwi",
+         "bids_name": "sub-001_desc-TENSOR_dwi"},
     ])
     _flag_nonimage_rows(df)
 
     # Physio row untouched.
     assert df.at[0, "include"] == 1
     assert not bool(df.at[0, "bids_guess_skip"])
-    assert NONIMAGE_ISSUE_TOKEN not in df.at[0, "proposed_issues"]
+    assert NONIMAGE_ISSUE_TOKEN not in df.at[0, "issues"]
 
     # TENSOR row still flagged.
     assert df.at[1, "include"] == 0
     assert bool(df.at[1, "bids_guess_skip"])
-    assert NONIMAGE_ISSUE_TOKEN in df.at[1, "proposed_issues"]
+    assert NONIMAGE_ISSUE_TOKEN in df.at[1, "issues"]

@@ -42,8 +42,79 @@ SOFTWARE.
 """
 
 import json
+import re
 
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# BIDS entity labels
+#
+# CHANGED IN THE VENDORED COPY. See bidsmgr/vendor/README.md.
+#
+# The signal label read out of a recording goes straight into the filename as
+# ``_recording-<label>``, and a source is free to call a channel whatever it
+# likes: a Siemens PMU dump yields ``external_trigger``, which produced
+#
+#     sub-001_task-x_recording-external_trigger_physio.tsv.gz
+#
+# That is not a BIDS name. ``recording`` is an ENTITY whose value must match
+# the standard's ``label`` format, and an underscore is not in it. Worse, the
+# underscore is the entity SEPARATOR, so the name does not merely fail
+# validation: it reads as an entity ``recording-external`` followed by a
+# stray token, and every tool that parses BIDS names sees a different file
+# from the one that was written.
+#
+# What the standard allows, checked against every version bidsval ships:
+#
+#     1.8.0, 1.9.0, 1.10.0      [0-9a-zA-Z]+
+#     1.10.1, 1.11.0, 1.11.1    [0-9a-zA-Z+]+
+#
+# The plus sign arrived in 1.10.1, and it means something specific there
+# (concatenating several applicable labels), so it is not a separator to
+# reach for. Alphanumeric-only is therefore the one spelling that is valid
+# under every version of the standard, which is what this produces.
+_LABEL_SEPARATORS = re.compile(r'[^0-9a-zA-Z]+')
+
+
+def bids_label(raw, fallback='signal'):
+    """Turn a recording's own name into a valid BIDS entity label.
+
+    ``external_trigger`` becomes ``externalTrigger``: the characters the
+    standard does not allow are removed, and the word boundary they marked
+    is kept by capitalising what followed, so the label still reads as the
+    words it came from.
+
+    A name with nothing usable in it (``"---"``) falls back rather than
+    producing an empty label, because ``recording-`` with no value is a
+    worse name than one that says little.
+    """
+    words = [w for w in _LABEL_SEPARATORS.split(str(raw or '')) if w]
+    if not words:
+        return fallback
+    return words[0] + ''.join(w[:1].upper() + w[1:] for w in words[1:])
+
+
+def unique_bids_labels(raws, fallback='signal'):
+    """:func:`bids_label` over several names, with collisions broken apart.
+
+    Two channels called ``ecg lead`` and ``ecg_lead`` sanitise to the same
+    label, and two recordings with one name means the second overwrites the
+    first. A numeric suffix is appended in that case, which is still a valid
+    label and is visibly a disambiguation rather than a reading of the
+    source.
+    """
+    out = []
+    seen = {}
+    for raw in raws:
+        label = bids_label(raw, fallback=fallback)
+        if label in seen:
+            seen[label] += 1
+            label = '{0}{1}'.format(label, seen[label])
+        else:
+            seen[label] = 1
+        out.append(label)
+    return out
 
 
 class PhysioSignal(object):
@@ -414,8 +485,14 @@ class PhysioData(object):
 
         else:
 
+            # Sanitised together, so two channel names that clean up to the
+            # same label do not write one file twice.
+            rec_labels = unique_bids_labels(
+                [self.signals[idx_un[i]].label for i in range(len(unique_sr_ts))]
+            )
+
             for idx, [sr,ts] in enumerate( unique_sr_ts ):
-                rec_label = self.signals[idx_un[idx]].label
+                rec_label = rec_labels[idx]
 
                 rec_fName = '{0}_recording-{1}_physio'.format(self.bidsPrefix, rec_label)
                 # create a new PhysioData object with just the signals with matching sampling rate and t_start:
@@ -559,6 +636,12 @@ class PhysioData(object):
         )
         print('')
 
+        # Sanitised together, so two channel names that clean up to the same
+        # label do not write one file twice.
+        rec_labels = unique_bids_labels(
+            [labels_no_trigger[idx_un[i]] for i in range(len(unique_sr_ts))]
+        )
+
         for idx, [sr,ts] in enumerate( unique_sr_ts ):
 
             ###   Get filename   ###
@@ -577,7 +660,7 @@ class PhysioData(object):
                 print('Saving physio data')
 
             else:
-                rec_label = labels_no_trigger[idx_un[idx]]
+                rec_label = rec_labels[idx]
                 rec_fName = '{0}_recording-{1}_physio'.format(self.bidsPrefix, rec_label)
                 print('Saving {0} waveform'.format(rec_label))
 

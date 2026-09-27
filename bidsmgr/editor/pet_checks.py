@@ -103,6 +103,44 @@ def _check_dose_plausible(data: dict) -> list[Issue]:
     )]
 
 
+def specific_activity_bq_per_g(
+    dose, dose_units, mass, mass_units,
+) -> Optional[float]:
+    """Specific activity in Bq/g from an injected dose and mass, or ``None``.
+
+    ONE implementation, used by the check below AND by the conversion fixup
+    that fills the field when the user supplied only two of the three. They
+    must not be allowed to drift: a derivation and a check of the same
+    quantity that disagree is worse than having neither, because the check
+    would then flag the tool's own output.
+
+    Returns ``None`` rather than guessing whenever the inputs are not
+    directly comparable: a missing value, a non-positive mass, or a unit
+    pair this does not understand. A study using an exotic unit is left
+    alone, not warned about wrongly and not filled in wrongly.
+
+    The arithmetic, spelled out because it is the thing pypet2bids gets
+    wrong by a factor of 1e12 (it multiplies where it should divide when
+    converting micrograms to grams, and contradicts two other branches of
+    its own function in doing so)::
+
+        Bq/g = (dose in MBq) x 1e6      <- MBq to Bq
+               ------------------
+               (mass in ug)  x 1e-6     <- ug  to g
+    """
+    dose_f = _as_float(dose)
+    mass_f = _as_float(mass)
+    if dose_f is None or mass_f is None or mass_f <= 0:
+        return None
+    if str(mass_units or "").strip() != "ug":
+        return None
+    factor = _TO_MBQ.get(str(dose_units or "").strip())
+    if factor is None:
+        return None
+    value = (dose_f * factor * 1e6) / (mass_f * 1e-6)
+    return value if value > 0 else None
+
+
 def _check_specific_radioactivity(data: dict) -> list[Issue]:
     """Specific activity should follow from dose over mass.
 
@@ -111,22 +149,17 @@ def _check_specific_radioactivity(data: dict) -> list[Issue]:
     left alone rather than warned about wrongly.
     """
     activity = _as_float(data.get("SpecificRadioactivity"))
-    dose = _as_float(data.get("InjectedRadioactivity"))
-    mass = _as_float(data.get("InjectedMass"))
-    if activity is None or dose is None or mass is None or mass <= 0:
+    if activity is None:
         return []
     if str(data.get("SpecificRadioactivityUnits") or "").strip() != "Bq/g":
         return []
-    dose_units = str(data.get("InjectedRadioactivityUnits") or "").strip()
-    if str(data.get("InjectedMassUnits") or "").strip() != "ug":
-        return []
-    factor = _TO_MBQ.get(dose_units)
-    if factor is None:
-        return []
-
-    # dose (MBq -> Bq) over mass (ug -> g)
-    expected = (dose * factor * 1e6) / (mass * 1e-6)
-    if expected <= 0:
+    expected = specific_activity_bq_per_g(
+        data.get("InjectedRadioactivity"),
+        data.get("InjectedRadioactivityUnits"),
+        data.get("InjectedMass"),
+        data.get("InjectedMassUnits"),
+    )
+    if expected is None:
         return []
     ratio = activity / expected
     if 0.5 <= ratio <= 2.0:
@@ -256,4 +289,8 @@ def pet_issues_for(fp: Path) -> list[Issue]:
     return check_pet_sidecar(data)
 
 
-__all__ = ["check_pet_sidecar", "pet_issues_for"]
+__all__ = [
+    "check_pet_sidecar",
+    "pet_issues_for",
+    "specific_activity_bq_per_g",
+]

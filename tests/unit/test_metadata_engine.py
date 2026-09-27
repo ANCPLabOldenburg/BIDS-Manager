@@ -209,7 +209,7 @@ class TestParticipants:
         # Synthesise a tiny bidsmgr-shaped inventory TSV.
         inv = tmp_path / "inv.tsv"
         pd.DataFrame([{
-            "BIDS_name": "sub-001",
+            "participant_id": "sub-001",
             "GivenName": "Alice",
             "FamilyName": "Smith",
             "PatientID": "PID42",
@@ -254,7 +254,7 @@ class TestParticipants:
         # Run with inventory enrichment.
         inv = tmp_path / "inv.tsv"
         pd.DataFrame([{
-            "BIDS_name": "sub-001",
+            "participant_id": "sub-001",
             "GivenName": "Alice",
             "FamilyName": "Smith",
             "PatientID": "PID42",
@@ -700,7 +700,7 @@ class TestDatasetDescriptionFromScaffold:
             RecordingMetaSpec, dump_spec, scaffold_sidecar_path,
         )
         inv = tmp_path / "inv.tsv"
-        inv.write_text("BIDS_name\nsub-001\n")
+        inv.write_text("participant_id\nsub-001\n")
         spec = RecordingMetaSpec()
         for key, value in fields.items():
             setattr(spec.dataset_description, key, value)
@@ -791,7 +791,7 @@ class TestAgeNormalisation:
         root = _make_minimal_bids(tmp_path)
         inv = tmp_path / "inv.tsv"
         pd.DataFrame([{
-            "BIDS_name": "sub-001", "PatientAge": "065Y", "PatientSex": "M",
+            "participant_id": "sub-001", "PatientAge": "065Y", "PatientSex": "M",
             "include": 1,
         }]).to_csv(inv, sep="\t", index=False)
 

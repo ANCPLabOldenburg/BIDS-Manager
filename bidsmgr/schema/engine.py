@@ -625,3 +625,46 @@ __all__ = [
 # definition keeps that list in one readable place.
 for _cached in (_entity_index_lookup, _format_pattern, _datatype_groups, _declared_type):
     register_cache(_cached)
+
+
+def warm_pairs(pairs) -> None:
+    """Warm only the datatype and suffix pairs given.
+
+    :func:`warm_caches` walks all 111 suffixes and takes about 1.2 seconds,
+    which is right at start-up and too slow to win a race against a short
+    scan. A scan knows exactly which pairs it produced, so it warms those
+    on its own worker thread just before handing the result over: a dozen
+    lookups, and the table then binds without touching the schema at all.
+    """
+    for datatype, suffix in pairs:
+        if not datatype or not suffix:
+            continue
+        try:
+            sidecar_fields(datatype, suffix)
+        except Exception:  # noqa: BLE001 - warming is advisory
+            continue
+
+
+def warm_caches() -> None:
+    """Fill the schema lookups the GUI needs before it needs them.
+
+    Answering "which sidecar fields apply to this datatype and suffix" is a
+    full walk of the standard's rule tree, and the results are cached for
+    the life of the process. The first walk therefore costs a few hundred
+    milliseconds and every one after it costs nothing.
+
+    Left alone, that first walk happened on the GUI thread the moment a
+    scan finished, when the spinner had already stopped: measured at 393 ms
+    of dead window, with the second scan in the same session at 15 ms. So
+    it is paid here instead, on a background thread at start-up, while the
+    user is still choosing a folder.
+
+    Safe to call more than once and safe to call from any thread: every
+    cache underneath is a ``functools.lru_cache``.
+    """
+    for datatype in list_datatypes():
+        for suffix in list_suffixes(datatype):
+            try:
+                sidecar_fields(datatype, suffix)
+            except Exception:  # noqa: BLE001 - warming is advisory
+                continue

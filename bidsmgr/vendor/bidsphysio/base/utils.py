@@ -4,6 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .bidsphysio import bids_label
+
 
 def check_bidsphysio_outputs(outPrefix,
                              expectedPhysioLabels,
@@ -41,7 +43,12 @@ def check_bidsphysio_outputs(outPrefix,
         if len(expectedPhysioLabels) == 1:
             expectedFileBaseName = Path(outPrefix).name + '_physio'
         else:
-            expectedFileBaseName = Path(str(outPrefix) + '_recording-' + ''.join(label) + '_physio').name
+            # ``bids_label`` here too, or this test helper asserts the
+            # unsanitised name the writer no longer produces.
+            expectedFileBaseName = Path(
+                str(outPrefix) + '_recording-'
+                + bids_label(''.join(label)) + '_physio'
+            ).name
         expectedFileName = outPrefix.parent / expectedFileBaseName
         assert expectedFileName.with_suffix('.json') in json_files
         assert expectedFileName.with_suffix('.tsv.gz') in data_files

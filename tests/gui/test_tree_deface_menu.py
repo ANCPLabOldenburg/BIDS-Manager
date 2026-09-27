@@ -18,6 +18,7 @@ pytest.importorskip("PyQt6")
 from PyQt6.QtCore import QPoint  # noqa: E402
 from PyQt6.QtWidgets import QMenu, QTreeWidgetItemIterator  # noqa: E402
 
+from .conftest import open_every_folder
 from bidsmgr.gui.widgets.bids_tree_pane import PATH_ROLE, BidsTreePane  # noqa: E402
 
 pytestmark = pytest.mark.gui
@@ -46,7 +47,7 @@ def pane(qtbot, dataset: Path) -> BidsTreePane:
 
 def _item_for(pane: BidsTreePane, name: str):
     """Find the tree row whose path ends in *name*, expanding as needed."""
-    pane._tree.expandAll()
+    open_every_folder(pane._tree)
     it = QTreeWidgetItemIterator(pane._tree)
     while it.value():
         item = it.value()

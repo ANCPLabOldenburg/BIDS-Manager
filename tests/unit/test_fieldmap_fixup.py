@@ -180,3 +180,93 @@ class TestApplyFieldmapRenames:
             "sub-001_phase1.nii.gz",
             "sub-001_phase2.nii.gz",
         ])
+
+
+class TestSuffixComesFromTheSidecar:
+    """dcm2niix's filename token is not a BIDS suffix.
+
+    A Siemens ``gre_field_mapping`` acquires two echoes and reconstructs ONE
+    phase image from the pair. dcm2niix names that file ``_e2_ph`` because
+    it belongs to the second echo, while calling it ``phasediff`` in the
+    sidecar it writes beside it. Reading only the token produced
+    ``phase2``, which is both the wrong thing (it is a phase DIFFERENCE)
+    and an impossible dataset (``phase2`` without ``phase1`` is not one of
+    the four fieldmap forms the standard defines).
+    """
+
+    PHASEDIFF = {
+        "ImageType": ["ORIGINAL", "PRIMARY", "P", "NONE", "PHASE"],
+        "EchoNumber": 2, "EchoTime": 0.00765,
+        "EchoTime1": 0.00519, "EchoTime2": 0.00765,
+        "BidsGuess": ["fmap", "_acq-fm2_phasediff"],
+    }
+
+    def test_two_echo_times_mean_phasediff(self):
+        from bidsmgr.fixups.fieldmaps import rename_for_fmap_token
+        assert rename_for_fmap_token(
+            "sub-001_magnitude1_e2_ph.nii.gz", self.PHASEDIFF
+        ) == "sub-001_phasediff.nii.gz"
+
+    def test_a_single_echo_time_means_phase_at_that_echo(self):
+        """The other form the standard defines: phase1 AND phase2."""
+        from bidsmgr.fixups.fieldmaps import rename_for_fmap_token
+        for echo in (1, 2):
+            sidecar = {
+                "ImageType": ["ORIGINAL", "PRIMARY", "P", "PHASE"],
+                "EchoNumber": echo, "EchoTime": 0.005,
+            }
+            assert rename_for_fmap_token(
+                f"sub-001_magnitude1_e{echo}_ph.nii.gz", sidecar
+            ) == f"sub-001_phase{echo}.nii.gz"
+
+    def test_magnitude_follows_its_echo_number(self):
+        from bidsmgr.fixups.fieldmaps import rename_for_fmap_token
+        sidecar = {"ImageType": ["ORIGINAL", "PRIMARY", "M", "MAGNITUDE"],
+                   "EchoNumber": 2, "EchoTime": 0.00765}
+        assert rename_for_fmap_token(
+            "sub-001_magnitude1_e2.nii.gz", sidecar
+        ) == "sub-001_magnitude2.nii.gz"
+
+    def test_no_sidecar_falls_back_to_the_token(self):
+        from bidsmgr.fixups.fieldmaps import rename_for_fmap_token
+        assert rename_for_fmap_token(
+            "sub-001_magnitude1_e2_ph.nii.gz"
+        ) == "sub-001_phase2.nii.gz"
+
+    def test_a_guess_the_schema_rejects_is_ignored(self):
+        """dcm2niix gets a voice, not obedience."""
+        from bidsmgr.fixups.fieldmaps import rename_for_fmap_token
+        sidecar = {"BidsGuess": ["fmap", "_acq-x_notAThing"]}
+        assert rename_for_fmap_token(
+            "sub-001_magnitude1_e1.nii.gz", sidecar
+        ) == "sub-001_magnitude1.nii.gz"
+
+    def test_the_triplet_lands_together(self, tmp_path):
+        """The ordering defect: the sidecar decides the suffix AND is one of
+        the files being renamed, so the plan is built before anything moves.
+        Renaming the JSON first left the image reading a sidecar that was no
+        longer there, and the pair landed under two different suffixes."""
+        import json
+        from bidsmgr.fixups.fieldmaps import apply_fieldmap_renames
+
+        fmap = tmp_path / "fmap"
+        fmap.mkdir()
+        groups = {
+            "sub-001_magnitude1_e1": {
+                "ImageType": ["ORIGINAL", "PRIMARY", "M", "MAGNITUDE"],
+                "EchoNumber": 1, "EchoTime": 0.00519},
+            "sub-001_magnitude1_e2": {
+                "ImageType": ["ORIGINAL", "PRIMARY", "M", "MAGNITUDE"],
+                "EchoNumber": 2, "EchoTime": 0.00765},
+            "sub-001_magnitude1_e2_ph": self.PHASEDIFF,
+        }
+        for stem, meta in groups.items():
+            (fmap / f"{stem}.json").write_text(json.dumps(meta))
+            (fmap / f"{stem}.nii.gz").write_bytes(b"x")
+
+        apply_fieldmap_renames(tmp_path)
+        assert sorted(p.name for p in fmap.iterdir()) == [
+            "sub-001_magnitude1.json", "sub-001_magnitude1.nii.gz",
+            "sub-001_magnitude2.json", "sub-001_magnitude2.nii.gz",
+            "sub-001_phasediff.json", "sub-001_phasediff.nii.gz",
+        ]

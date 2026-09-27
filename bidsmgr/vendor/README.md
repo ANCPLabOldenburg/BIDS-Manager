@@ -164,7 +164,38 @@ entirely.
    it additionally fixes an upstream `np.argmax` edge bug that left a
    gap in the very first sampling interval unfilled. Covered by
    `tests/unit/test_bidsphysio_plug_missing_data.py`.
-4. Otherwise no behavioural changes. Every other function and class
+4. One correctness fix in `base/bidsphysio.py`, with a matching change
+   to the `bids_label` call in `base/utils.py`: the recording label is
+   now sanitised into a valid BIDS entity label before it goes into a
+   filename. Upstream puts the SIGNAL'S OWN NAME straight in, and a
+   source calls a channel whatever it likes: a Siemens PMU dump yields
+   `external_trigger`, producing
+
+       sub-001_task-x_recording-external_trigger_physio.tsv.gz
+
+   which is not a BIDS name. `recording` is an entity whose value must
+   match the standard's `label` format, and the underscore is not in it.
+   Worse, the underscore is the entity SEPARATOR, so the name does not
+   merely fail validation: every tool that parses BIDS names reads an
+   entity `recording-external` followed by a stray token and sees a
+   different file from the one that was written.
+
+   New `bids_label` and `unique_bids_labels` produce
+   `recording-externalTrigger`: characters the standard disallows are
+   removed and the word boundary they marked is kept by capitalising
+   what followed, so the label still reads as the words it came from.
+   Names that clean up to the same label are numbered apart, because two
+   recordings with one name means the second overwrites the first.
+
+   Alphanumeric-only, deliberately. The `label` pattern differs by BIDS
+   version: `[0-9a-zA-Z]+` through 1.10.0 and `[0-9a-zA-Z+]+` from
+   1.10.1, where the plus sign means "several applicable labels" rather
+   than being a separator. Alphanumeric is the one spelling valid under
+   every version. `tests/unit/test_physio_labels.py` checks the produced
+   labels against every schema the installed `bidsval` ships, so this
+   claim is verified rather than asserted.
+
+5. Otherwise no behavioural changes. Every other function and class
    body is verbatim. Original per-file MIT headers are preserved.
 
 **What's in the tree:**
@@ -196,3 +227,40 @@ upstream patch is genuinely worth chasing. If the upstream resumes
 work, we can re-sync. If we extend the code, we keep it in-tree and
 upstream is welcome to take the diff back. Either way the file
 headers stay attributed to the original authors.
+
+
+### `bidsmgr.vendor.dcm2niix_win`
+
+**Upstream:** `dcm2niix` (Chris Rorden and contributors). BSD 2-Clause,
+shipped unchanged as `LICENSE` beside the binary, as clause 2 requires of
+any redistribution in binary form. Source:
+<https://github.com/rordenlab/dcm2niix>, branch `development`, commit
+`fda9c11`.
+
+**What it is:** not source, unlike the other two. One compiled
+`dcm2niix.exe` for Windows x86-64, built with MinGW-w64 GCC and a linker
+stack reserve of exactly 16,777,216 bytes. The MinGW runtime is linked
+statically: the executable imports only `KERNEL32`, `ADVAPI32` and the
+Universal CRT, all present on any Windows that can run Python 3.10, so it
+does not depend on a toolchain being installed.
+
+**Why vendored:** the released Windows dcm2niix cannot convert MR
+spectroscopy. It reserves 16,388,608 bytes of stack, the frames an MSVC
+build emits for a Siemens `svs_se` series need more, and Windows kills the
+process with `0xC00000FD` (`STATUS_STACK_OVERFLOW`) and an empty stderr.
+Measured, how it was built and why a GCC build at the SAME reserve works:
+`dcm2niix_win/PROVENANCE.md`.
+
+**How it is used:** as a fallback only, never in preference to the wheel.
+`classifier.dcm2niix_bidsguess.run_dcm2niix` runs the pinned wheel binary
+first and retries with this one only on that exact exit code, so a genuine
+conversion failure is reported as itself. It is a narrower build (JPEG 2000,
+JPEG-LS, TurboJPEG, Jasper and Zstandard are off), which is why it is never
+the first choice. `vendored_dcm2niix()` returns `None` off Windows and on
+Windows for any architecture but x86-64.
+
+**When to delete it:** when a released `dcm2niix` wheel reserves
+16,777,216. The fix is submitted upstream from `karellopez/dcm2niix`, branch
+`fix/windows-msvc-stack-spectroscopy`. Delete the directory, its
+`package-data` entry in `pyproject.toml` and the fallback branch of
+`run_dcm2niix` together.
