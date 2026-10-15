@@ -181,7 +181,7 @@ def test_apply_user_exclusions_sequence_match() -> None:
     assert df.at[0, "include"] == 1
     assert df.at[1, "include"] == 0
     assert bool(df.at[1, "bids_guess_skip"]) is True
-    assert scan.USER_EXCLUDED_ISSUE_TOKEN in df.at[1, "issues"]
+    assert ur.USER_EXCLUDED_ISSUE_TOKEN in df.at[1, "issues"]
     assert "existing note" in df.at[1, "issues"]   # prepended, not clobbered
     assert df.at[2, "include"] == 1
     # Reversible: no rows dropped.

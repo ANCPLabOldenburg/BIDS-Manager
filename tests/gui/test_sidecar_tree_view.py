@@ -332,8 +332,13 @@ def test_view_pill_swap_persists_choice(
     assert pane.view_mode() == "tree"
     assert pane._view_stack.currentIndex() == 1
     assert AppSettings.load().editor_sidecar_view == "tree"
-    # Tree view is now populated from the cache.
-    assert pane._tree_view.topLevelItemCount() == 2
+    # Tree view is now populated from the cache: the file's two keys, plus
+    # the fields the standard declares and the file lacks, as placeholders.
+    tree = pane._tree_view
+    keys = {tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())}
+    placeholders = tree.placeholder_keys()
+    assert len(keys - placeholders) == 2
+    assert placeholders and placeholders <= keys
 
 
 def test_tree_edit_marks_pane_dirty(

@@ -24,11 +24,8 @@ import pytest
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, MRImageStorage, generate_uid
 
-from bidsmgr.cli.scan import (
-    NONIMAGE_ISSUE_TOKEN,
-    _flag_nonimage_rows,
-    _is_nonimage_flag,
-)
+from bidsmgr.cli.scan import _flag_nonimage_rows, _is_nonimage_flag
+from bidsmgr.inventory.types import NONIMAGE_ISSUE_TOKEN
 from bidsmgr.inventory.mri_dicom import _read_one, scan_dicoms_long
 
 

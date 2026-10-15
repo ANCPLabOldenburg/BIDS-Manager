@@ -16,6 +16,8 @@ Pipeline per (dataset, subject, session)::
 
     Phase 3   sequential per-subject merge commit:
               new subject  -> os.rename(<staging>/sub-<id>, <bids_root>/sub-<id>)
+              (on Windows, retried while a reader holds the tree
+              open; see _retry_while_held)
               existing subject -> merge staged files in (add new ses/datatype;
               keep or, with --overwrite, back-up-and-replace colliding files)
 
@@ -43,6 +45,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Iterable, Optional
@@ -52,6 +55,7 @@ from joblib import delayed  # pools are built by bidsmgr.util.parallel
 
 import bidsmgr
 
+from ..util.oplog import add_log_arguments, dataset_root_for, log_keywords, logged
 from ..converter import (
     ConvertResult,
     ConvertTask,
@@ -63,6 +67,7 @@ from ..metadata.preserve import is_mergeable, merge_file
 from ..fixups import (
     apply_fieldmap_renames,
     attach_companion_files,
+    parse_companions,
     clean_mrs_outputs,
     prune_identifiers,
     convert_blood_files,
@@ -70,6 +75,7 @@ from ..fixups import (
     enrich_pet_sidecars,
     enrich_physio_sidecars,
     enrich_recording_sidecars,
+    place_stimulus_presentation,
     populate_intended_for,
     repair_converter_output,
     update_scans_tsv,
@@ -84,6 +90,8 @@ from ..recording_meta import (
     resolve_effective,
     scaffold_sidecar_path,
 )
+from ..converter.sourcedata import MODALITIES as SOURCEDATA_MODALITIES
+from ..converter.sourcedata import SourcedataOptions
 from ..util.cancel import OperationCancelled, is_cancelled
 from ..util.paths import safe_path_component
 from ._scaffold import ensure_bidsignore, ensure_dataset_description
@@ -253,6 +261,14 @@ def _apply_pet_metadata_json(spec, path: Path, df) -> object:
     return spec.model_copy(update={"pet_overrides": overrides})
 
 
+@logged("convert", lambda a: (
+    dataset_root_for(Path(a["tsv"]).parent)
+    or (Path(a["bids_parent"]) / a["dataset"] if a["dataset"] else None),
+    {"inventory": a["tsv"], "output": a["bids_parent"], "dataset": a["dataset"],
+     "source data": a["raw_root"], "workers": a["n_jobs"],
+     "existing files": a["on_existing"] or ("replace" if a["overwrite"] else "skip"),
+     "dry run": a["dry_run"], "deface": a["deface"],
+     "source data kept": a["sourcedata"]}))
 def run_convert(
     tsv: Path,
     bids_parent: Path,
@@ -273,6 +289,10 @@ def run_convert(
     deface: bool = False,
     deface_engine: str = DEFACE_DEFAULT_ENGINE,
     cancel_check=None,
+    intended_for: str = "uri",
+    b0_field: bool = True,
+    sourcedata: str = "none",
+    sourcedata_modalities=SOURCEDATA_MODALITIES,
 ) -> int:
     """Convert every commit-ready row in ``tsv`` to BIDS under ``bids_parent``.
 
@@ -296,8 +316,14 @@ def run_convert(
     ``*_scans.tsv`` field by field instead of overwriting, so metadata somebody
     curated in the Editor survives a re-conversion of the same subject. Pass
     False to have the fresh conversion win outright.
+
+    ``sourcedata`` (``none``, ``copy``, ``archive``) keeps each subject's
+    source files in ``<dataset>/sourcedata/`` for ``sourcedata_modalities``
+    (``converter/sourcedata``). Refused before anything is written when the
+    disk cannot hold them.
     """
     tsv = Path(tsv)
+    src_options = SourcedataOptions.parse(sourcedata, sourcedata_modalities)
     bids_parent = Path(bids_parent)
 
     # Resolve the existing-subject policy. ``--overwrite`` is the back-compat
@@ -387,6 +413,15 @@ def run_convert(
         and (df["series_uid"].astype(str).str.len() > 0).any()
     )
     files_by_uid = _load_files_by_uid_sidecar(tsv, required=has_mri_rows)
+    if raw_root is not None and files_by_uid:
+        # The DICOM paths are absolute, from the scan. When the data has
+        # been moved and ``raw_root`` says where to (a relink in the GUI, or
+        # --raw-root), they are re-based onto it; otherwise unchanged.
+        from ..inventory.sources import ScanSources, scanned_root
+
+        files_by_uid = ScanSources(
+            Path(raw_root), scanned_root(df, files_by_uid, recorded=raw_root), files_by_uid,
+        ).relocated_files_by_uid()
 
     if df.empty:
         log.warning("no rows to convert (after filtering)")
@@ -424,6 +459,26 @@ def run_convert(
     # primary backend for MRI rows.
     primary = select_backend("mri", dcm2niix_bin=dcm2niix_bin)
     dcm2niix_version = _dcm2niix_version_string(primary.binary)
+
+    if src_options.enabled and not dry_run:
+        # Nothing is written before the copies are known to fit.
+        from ..converter import sourcedata as _sd
+
+        needed = 0
+        for _name, dataset_df in df.groupby("dataset"):
+            for _subject, subject_df in dataset_df.groupby("participant_id"):
+                needed += _sd.estimate(_sd.plan(_build_tasks_for_subject(
+                    subject_df, bids_parent, files_by_uid,
+                    source_search_roots=source_search_roots,
+                    skip_residuals=skip_residuals, force_edf=force_edf, spec=spec,
+                ), src_options))[1]
+        problem = _sd.space_problem(bids_parent, needed)
+        if problem:
+            log.error("%s Nothing was converted.", problem)
+            return 1
+        log.info("source data kept in sourcedata/ (%s, %s): %s", src_options.form,
+                 ", ".join(m for m in SOURCEDATA_MODALITIES if m in src_options.modalities),
+                 _sd.human_size(needed))
 
     n_failed = 0
     n_new = 0
@@ -492,6 +547,9 @@ def run_convert(
                     preserve_curation=preserve_curation,
                     deface=deface,
                     deface_engine=deface_engine,
+                    intended_for=intended_for,
+                    b0_field=b0_field,
+                    sourcedata=src_options,
                 )
                 if existed:
                     n_merged += 1
@@ -543,8 +601,12 @@ def _convert_subject(
     preserve_curation: bool = True,
     deface: bool = False,
     deface_engine: str = DEFACE_DEFAULT_ENGINE,
+    intended_for: str = "uri",
+    b0_field: bool = True,
+    sourcedata: Optional[SourcedataOptions] = None,
 ) -> None:
-    """Run Phases 1–3 for a single (dataset, subject, session) group."""
+    """Run Phases 1–3 for a single (dataset, subject, session) group, then
+    keep its source data when asked."""
     subject = tasks[0].subject
     # Subject label is inventory-derived (user-editable). Sanitise into
     # a portable path component so a stray ``|``, ``:`` or trailing dot
@@ -552,6 +614,7 @@ def _convert_subject(
     subj_segment = f"sub-{safe_path_component(subject)}"
     staging = bids_root / ".tmp_bidsmgr" / subj_segment
     staging.mkdir(parents=True, exist_ok=True)
+    source_staging = bids_root / ".tmp_bidsmgr" / "sourcedata" / subj_segment
 
     results: list[ConvertResult] = []
     failed_phase: Optional[str] = None
@@ -568,6 +631,8 @@ def _convert_subject(
         n_scans_tsv = update_scans_tsv(staging, rename_map)
         n_intended_for = populate_intended_for(
             staging, subject=subject, session=tasks[0].session,
+            form=intended_for, b0_field=b0_field,
+            links=_user_fieldmap_links(results, rename_map),
         )
         # EEG/MEG sidecar/channels/events enrichment from the recording-
         # metadata spec (no-op for MRI-only subjects or when spec is None).
@@ -595,6 +660,9 @@ def _convert_subject(
         # Copy any per-row curated companion files (events/beh/stim/...) into
         # the staged tree (place + name only; no conversion).
         n_enriched += attach_companion_files(staging, tasks)
+        # The screen an eye tracker measured gaze on, beside the run's events
+        # (which the line above may just have attached).
+        n_enriched += place_stimulus_presentation(staging, tasks)
         # A PET run's blood curves, which ARE converted: PMOD exports become the
         # BIDS blood tables, named for the run they belong to. Source data the
         # user pointed at, so it belongs to the conversion.
@@ -659,6 +727,9 @@ def _convert_subject(
             dcm2niix_version=dcm2niix_version, n_enriched=n_enriched,
         )
         log.info("committed sub-%s to %s", subject, target)
+        if sourcedata is not None and sourcedata.enabled:
+            _keep_source_data(tasks, sourcedata, bids_root, subj_segment, source_staging,
+                              on_existing=on_existing, cancel_check=cancel_check)
 
     except OperationCancelled:
         # User Stop, not a failure: no forensic error log. The ``finally``
@@ -688,6 +759,12 @@ def _convert_subject(
         # Always wipe staging (success or fail; forensic data is in the error log).
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+        if source_staging.exists():
+            shutil.rmtree(source_staging, ignore_errors=True)
+        try:
+            source_staging.parent.rmdir()
+        except OSError:
+            pass
         # Try to remove the empty .tmp_bidsmgr container too.
         # mne-bids may have written dataset-level files there (README,
         # dataset_description.json, participants.tsv/json) when it
@@ -763,8 +840,9 @@ def _phase1_parallel_dcm2niix(
     # data" -> IndexError). dcm2niix (MRI) and physio tasks write only their
     # own independent outputs and are safe to parallelise. So split the work:
     # mne-bids-backed tasks run sequentially, the rest run in the pool.
-    serial = [t for t in tasks if t.datatype in _MNE_BIDS_DATATYPES]
-    parallel_tasks = [t for t in tasks if t.datatype not in _MNE_BIDS_DATATYPES]
+    serial = [t for t in tasks if t.datatype in _MNE_BIDS_DATATYPES
+              and t.modality != "eyetrack"]
+    parallel_tasks = [t for t in tasks if t not in serial]
 
     out: list[ConvertResult] = []
 
@@ -913,6 +991,139 @@ def _log_existing_subject_summary(bids_root: Path, dataset_df, on_existing: str)
     log.info(msg)
 
 
+def sourcedata_estimate(df: pd.DataFrame, sources, options: SourcedataOptions
+                        ) -> tuple[int, int, list[str]]:
+    """``(files, bytes, modalities)`` that keeping the source data of the
+    rows a conversion would convert adds, for the confirmation before Run.
+    ``sources`` is the scan's :class:`~bidsmgr.inventory.sources.ScanSources`
+    (where the data is now)."""
+    from ..converter import sourcedata as _sd
+
+    if not options.enabled:
+        return 0, 0, []
+    rows = _filter_convertible_rows(df.fillna("").astype(str))
+    n = size = 0
+    kinds: set[str] = set()
+    for _, row in rows.iterrows():
+        kind = _sd.kind_for(row.get("modality", ""), row.get("datatype", ""),
+                            str(row.get("bids_name", "")).rsplit("_", 1)[-1])
+        if kind not in options.modalities:
+            continue
+        uid = str(row.get("series_uid", "")).strip()
+        if uid:
+            files = sources.series_files(uid)
+        else:
+            found = sources.file(str(row.get("source_file", "")))
+            files = _sd.recording_files(found) if found is not None else []
+        if not files:
+            continue
+        kinds.add(kind)
+        items = [_sd.Item(kind=kind, destination="", files=[(f, f.name) for f in files])]
+        count, nbytes = _sd.estimate(items)
+        n += count
+        size += nbytes
+    return n, size, [k for k in _sd.MODALITIES if k in kinds]
+
+
+def _keep_source_data(tasks, options: SourcedataOptions, bids_root: Path, subj_segment: str,
+                      staging: Path, *, on_existing: str, cancel_check=None) -> None:
+    """Keep the subject's source data in ``sourcedata/``, after the subject
+    itself committed. A failure here is said and does not undo the
+    conversion; a stop is a stop."""
+    from ..converter import sourcedata as _sd
+
+    try:
+        report = _sd.keep_subject(
+            tasks, options, staging=staging,
+            target=bids_root / _sd.SOURCEDATA / subj_segment, on_existing=on_existing,
+            backup_root=bids_root / ".bidsmgr" / "backup", stamp=_utc_stamp(),
+            cancel_check=cancel_check)
+    except OperationCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the conversion itself succeeded
+        log.warning("%s: the source data could not be kept in sourcedata/ (%s: %s)",
+                    subj_segment, type(exc).__name__, exc)
+        return
+    if report is not None:
+        log.info("%s: source data in sourcedata/: %s", subj_segment, report.summary())
+        for line in report.failed[:10]:
+            log.warning("%s: not copied to sourcedata/: %s", subj_segment, line)
+
+
+#: How long the commit keeps trying to move a staged file or tree into place
+#: while Windows reports it as held open, and how long it waits between tries.
+#: Windows only; see :func:`_retry_while_held`. Ten seconds is two orders of
+#: magnitude more than any blocker measured here (worst case 156 ms, under a
+#: load harsher than a real session's) and still bounded, so a handle that is
+#: genuinely stuck — a staged file open in another program — is reported
+#: rather than waited on forever.
+_COMMIT_RETRY_DEADLINE_S = 10.0
+_COMMIT_RETRY_SLEEP_S = 0.05
+
+
+def _retry_while_held(move, what: Path) -> None:
+    """Run ``move`` and, on Windows only, retry it while the OS says "held".
+
+    Everywhere else ``move`` is called exactly once and its exception
+    propagates untouched, which is what the commit has always done: POSIX
+    renames a path no matter who is reading it.
+
+    Windows refuses with ``WinError 5`` while ANY process holds a handle
+    anywhere inside the tree being moved, and merely ENUMERATING a directory
+    holds one. Conversion stages into ``<bids_root>/.tmp_bidsmgr/``, which
+    lives inside the dataset the GUI is watching, so a single tree refresh,
+    validation pass, antivirus scan or open Explorer window is enough to break
+    the commit. Measured on this machine: with one background
+    ``schema.warm_dataset`` pass running — which the Editor now does on every
+    tree refresh — 4 of 12 commits failed. That is the bug this exists for.
+
+    Such a blocker is transient, so the move is simply retried. Past the
+    deadline the original error is raised, so a stuck handle still fails the
+    subject the way it did before, with nothing half-committed.
+    """
+    if os.name != "nt":
+        move()
+        return
+    deadline = time.monotonic() + _COMMIT_RETRY_DEADLINE_S
+    while True:
+        try:
+            move()
+            return
+        except PermissionError:
+            # WinError 5 (access denied) and 32 (sharing violation) both land
+            # here. A target that already exists raises FileExistsError and is
+            # NOT retried: that is a logic error, not a held handle.
+            if time.monotonic() >= deadline:
+                log.error(
+                    "%s is still held open by another program after %.0fs; on "
+                    "Windows a directory cannot be moved while anything is "
+                    "reading inside it. Close anything open under the dataset "
+                    "(a viewer, an Explorer window, a backup or antivirus "
+                    "scan) and convert again.",
+                    what, _COMMIT_RETRY_DEADLINE_S,
+                )
+                raise
+            time.sleep(_COMMIT_RETRY_SLEEP_S)
+
+
+def _rename_into_place(staging_subject: Path, target: Path) -> None:
+    """Move a staged subject tree wholesale onto its final name.
+
+    The atomic fast path of :func:`_merge_commit`, kept atomic: one
+    ``os.rename``, retried on Windows while a reader holds the tree open.
+    """
+    _retry_while_held(lambda: os.rename(staging_subject, target), staging_subject)
+
+
+def _move_staged_file(src: Path, dst: Path) -> None:
+    """Move one staged file to its place in the dataset.
+
+    ``shutil.move`` everywhere but Windows, where a reader holding this one
+    file gets the same patience the wholesale move gets.
+    """
+    _retry_while_held(lambda: shutil.move(str(src), str(dst)), src)
+
+
 def _merge_commit(
     staging_subject: Path, target: Path, *, on_existing: str,
     preserve_curation: bool = True,
@@ -948,7 +1159,7 @@ def _merge_commit(
 
     if not target.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(staging_subject, target)
+        _rename_into_place(staging_subject, target)
         return (len(staged), 0, 0)
 
     colliding = [p for p in staged if (target / p.relative_to(staging_subject)).exists()]
@@ -968,7 +1179,7 @@ def _merge_commit(
         dst = target / rel
         if not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
+            _move_staged_file(src, dst)
             added += 1
             continue
         # Colliding file.
@@ -993,7 +1204,7 @@ def _merge_commit(
         # ordinary replace, with the original already backed up above.
         dst.unlink()
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dst))
+        _move_staged_file(src, dst)
         replaced += 1
     if preserved:
         shown = ", ".join(preserved[:6])
@@ -1017,6 +1228,29 @@ def _merge_commit(
 # ---------------------------------------------------------------------------
 # Task construction from TSV rows
 # ---------------------------------------------------------------------------
+
+
+def _user_fieldmap_links(results: list[ConvertResult],
+                         rename_map: dict) -> dict[str, list[str]]:
+    """The user's own fieldmap choices, from row ids to the image names the
+    conversion produced: ``{fieldmap image: [run images]}``."""
+    images: dict[str, list[str]] = {}
+    for res in results:
+        names = []
+        for path in res.staged_files:
+            final = Path(rename_map.get(path, path))
+            if final.name.endswith((".nii", ".nii.gz")):
+                names.append(final.name)
+        images[res.task.row_id] = names
+    links: dict[str, list[str]] = {}
+    for res in results:
+        chosen = res.task.fieldmap_targets
+        if not chosen:
+            continue
+        targets = [name for rid in chosen for name in images.get(rid, [])]
+        for name in images.get(res.task.row_id, []):
+            links[name] = targets
+    return links
 
 
 def _filter_convertible_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -1172,37 +1406,28 @@ def _row_to_task_mri(
         session=session,
         datatype=datatype,
         suffix=suffix,
+        modality=str(row.get("modality", "")).strip().lower(),
         entities=entities_dict,
         basename=basename,
         expected_outputs=expected_outputs,
         repetition_type=str(row.get("repetition_type", "")).strip(),
         skip_residuals=skip_residuals,
-        companion_files=_parse_companion(row),
+        companion_files=parse_companions(row.get("companion_files", "")),
+        fieldmap_targets=_parse_fieldmap_targets(row),
     )
 
 
-def _parse_companion(row: pd.Series) -> tuple[tuple[str, str], ...]:
-    """Parse the row's ``companion_files`` JSON column into (suffix, path) pairs.
-
-    Format: a JSON list of ``{"suffix": "events", "path": "/abs/file.tsv"}``.
-    Returns ``()`` on missing/malformed input.
-    """
-    raw = str(row.get("companion_files", "") or "").strip()
+def _parse_fieldmap_targets(row: pd.Series) -> tuple[str, ...]:
+    """The runs the user chose for a fieldmap row (``fieldmap_targets``, a
+    JSON list of row ids); ``()`` when the rule decides."""
+    raw = str(row.get("fieldmap_targets", "") or "").strip()
     if not raw:
         return ()
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):
         return ()
-    out: list[tuple[str, str]] = []
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                suffix = str(item.get("suffix", "")).strip()
-                path = str(item.get("path", "")).strip()
-                if suffix and path:
-                    out.append((suffix, path))
-    return tuple(out)
+    return tuple(str(x) for x in data) if isinstance(data, list) else ()
 
 
 def _parse_entities_json(row: pd.Series) -> dict[str, str]:
@@ -1253,7 +1478,8 @@ def _row_to_task_file_based(
         session = None
 
     datatype = str(row.get("datatype", "")).strip().lower()
-    if datatype not in _FILE_BASED_DATATYPES:
+    eyetrack = str(row.get("modality", "")).strip().lower() == "eyetrack"
+    if datatype not in _FILE_BASED_DATATYPES and not eyetrack:
         # Either not actually a file-based row, or the user clobbered the
         # column. Skip.
         return None
@@ -1374,6 +1600,7 @@ def _row_to_task_file_based(
         session=session,
         datatype=datatype,
         suffix=suffix,
+        modality=str(row.get("modality", "")).strip().lower(),
         entities=entities,
         basename=basename,
         expected_outputs=expected_outputs,
@@ -1383,8 +1610,18 @@ def _row_to_task_file_based(
         eeg_reference=eeg_reference,
         eeg_ground=eeg_ground,
         force_edf=force_edf,
-        companion_files=_parse_companion(row),
+        companion_files=parse_companions(row.get("companion_files", "")),
+        eyetrack=_eyetrack_settings(spec, source_file) if eyetrack else {},
     )
+
+
+def _eyetrack_settings(spec: Optional[RecordingMetaSpec], row_id: str) -> dict:
+    """What the user said about an eye-tracking recording (screen, timing)."""
+    from ..recording_meta import resolve_eyetrack
+
+    if spec is None:
+        return {}
+    return resolve_eyetrack(spec, row_id).model_dump(exclude_none=True)
 
 
 def _suffix_from_basename(basename: str) -> str:
@@ -1392,6 +1629,75 @@ def _suffix_from_basename(basename: str) -> str:
     if not basename:
         return ""
     return basename.rsplit("_", 1)[-1]
+
+
+def preview_row(row, work_dir: Path, sources) -> list[Path]:
+    """What converting this one row makes, for a look before the real thing.
+
+    ``row`` is an inventory row (a mapping), ``sources`` the scan's
+    :class:`~bidsmgr.inventory.sources.ScanSources` (where its data is now).
+    The row goes through the conversion's own task builder and backends
+    (dcm2niix, bidsphysio for physiology, nibabel for ECAT) into
+    ``work_dir``, then the fieldmap renames, so what is shown is split and
+    named the way the dataset will have it: a fieldmap's magnitude images
+    and phase difference, a physio recording's table, a spectrum.
+
+    An EEG or MEG recording is not converted: the viewer reads the source
+    file as it is. A series the plan does not convert (a scout, an
+    unclassified series) has no task, and is converted plainly by dcm2niix,
+    which is still the quickest way to find out what it is.
+
+    Returns the files a viewer opens; raises with the reason otherwise.
+    """
+    from ..fixups.fieldmaps import apply_fieldmap_renames
+    from ..inventory.probe_convert import preview_series, series_files
+    from ..viz.data.formats import is_recording_path, kind_of
+
+    row = pd.Series({k: ("" if v is None else v) for k, v in dict(row).items()})
+    uid = str(row.get("series_uid", "")).strip()
+    source_file = str(row.get("source_file", "")).strip()
+    if not uid:
+        if not source_file:
+            raise ValueError("this row names no source data")
+        path = sources.file(source_file)
+        if path is None:
+            raise FileNotFoundError(f"{source_file} is not in {sources.root}")
+        # An EyeLink .edf shares its extension with an EEG recording and is
+        # nothing like one: it is converted (to the BEP020 physio tables the
+        # signal viewer plots), not read as it is.
+        eyetrack = str(row.get("modality", "")).strip().lower() == "eyetrack"
+        if is_recording_path(path) and not eyetrack:
+            return [path]
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    files_by_uid: dict[str, list[str]] = {}
+    if uid:
+        uids = [u for u in uid.split("|") if u]
+        files_by_uid = {u: [str(p) for p in sources.series_files(u)] for u in uids}
+        if not any(files_by_uid.values()):
+            # A scan without its files_by_uid record: look in the row's folder.
+            folder = sources.folder(str(row.get("source_folder", "")))
+            if folder is not None:
+                files_by_uid = {u: series_files(folder, u) for u in uids}
+        if not any(files_by_uid.values()):
+            raise FileNotFoundError(
+                f"no DICOM of this series was found under {sources.root}")
+    roots = (sources.root,) if sources.root is not None else ()
+    task = _row_to_task(row, work_dir, files_by_uid, source_search_roots=roots)
+    if task is None:
+        if uid:
+            return preview_series([f for files in files_by_uid.values() for f in files],
+                                  work_dir)
+        raise ValueError("the plan for this row converts nothing")
+    staging = work_dir / f"sub-{safe_path_component(task.subject)}"
+    result = _phase1_one(default_backends(), task, staging)
+    if not result.success:
+        raise RuntimeError(result.error or "the conversion made nothing")
+    apply_fieldmap_renames(staging)
+    shown = sorted(p for p in staging.rglob("*") if p.is_file() and kind_of(p))
+    if not shown:
+        raise RuntimeError("the conversion made no file that can be shown")
+    return shown
 
 
 # ---------------------------------------------------------------------------
@@ -1693,6 +1999,25 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--intended-for", choices=("uri", "relative"), default="uri",
+        help="How a fieldmap's IntendedFor names its runs: BIDS URIs (default) or "
+             "paths relative to the subject (with the session). Older fMRIPrep "
+             "(sdcflows 2.10 and earlier) ignores URIs; B0FieldIdentifier is read by "
+             "every version.")
+    parser.add_argument(
+        "--no-b0-field-identifier", action="store_true",
+        help="Do not write B0FieldIdentifier / B0FieldSource next to IntendedFor.")
+    parser.add_argument(
+        "--sourcedata", choices=("none", "copy", "archive"), default="none",
+        help="Keep each subject's source files in <dataset>/sourcedata/: as they are "
+             "(copy) or one .tar.gz per series (archive). Default: none. The copies are "
+             "not anonymised.")
+    parser.add_argument(
+        "--sourcedata-modalities", default=",".join(SOURCEDATA_MODALITIES),
+        metavar="LIST",
+        help="Which source data --sourcedata keeps, comma separated, from "
+             f"{', '.join(SOURCEDATA_MODALITIES)} (default: all).")
+    parser.add_argument(
         "--raw-root", default=None, type=Path,
         help=(
             "Folder the scan was run against. Used as the first "
@@ -1758,6 +2083,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
 
+    add_log_arguments(parser)
     args = parser.parse_args(argv)
     # One version for the whole run, adopted before any schema question is
     # asked. Without this the flag would reach the validator alone and a
@@ -1798,6 +2124,18 @@ def _main(argv: Optional[list[str]] = None) -> int:
         if "dataset" in df.columns:
             df["dataset"] = bids_root.name
         df.to_csv(version.inventory, sep="\t", index=False)
+        # Where the scan's data is: its files are believed over its record,
+        # and an explicit --raw-root over both.
+        from ..inventory import sources
+
+        found, seen = sources.resolve(
+            df, sources.load_files_by_uid(version.inventory),
+            recorded=version.raw_root, label=version.source_label,
+        )
+        source_root = args.raw_root or found.root
+        if args.raw_root is None and seen.state in ("missing", "partial"):
+            print(f"warning: {sources.describe(seen, found.root)} Pass --raw-root "
+                  "<where the folder is now>, or locate it in the GUI.", file=sys.stderr)
         return run_convert(
             version.inventory,
             bids_root.parent,
@@ -1810,12 +2148,17 @@ def _main(argv: Optional[list[str]] = None) -> int:
             recording_meta=args.recording_meta,
             pet_spreadsheet=args.pet_spreadsheet,
             pet_metadata=args.pet_metadata,
-            raw_root=Path(version.raw_root) if version.raw_root else args.raw_root,
+            raw_root=source_root,
             skip_residuals=not args.keep_residuals,
             preserve_curation=not args.overwrite_curation,
             force_edf=args.force_edf,
             deface=args.deface,
             deface_engine=args.deface_engine,
+            intended_for=args.intended_for,
+            b0_field=not args.no_b0_field_identifier,
+            sourcedata=args.sourcedata,
+            sourcedata_modalities=args.sourcedata_modalities,
+            **log_keywords(args),
         )
 
     if not args.tsv or not args.bids_parent:
@@ -1839,6 +2182,11 @@ def _main(argv: Optional[list[str]] = None) -> int:
         force_edf=args.force_edf,
         deface=args.deface,
         deface_engine=args.deface_engine,
+        intended_for=args.intended_for,
+        b0_field=not args.no_b0_field_identifier,
+        sourcedata=args.sourcedata,
+        sourcedata_modalities=args.sourcedata_modalities,
+        **log_keywords(args),
     )
 
 

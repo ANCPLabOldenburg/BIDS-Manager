@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QAbstractItemView, QTableWidget, QTabWidget
+from PyQt6.QtWidgets import QTableWidget
 
 from bidsmgr.gui.app_settings import AppSettings
 from bidsmgr.gui.settings_dialog import SettingsDialog
@@ -15,9 +15,7 @@ pytestmark = pytest.mark.gui
 def test_dialog_has_scan_rules_tab(qtbot) -> None:
     dlg = SettingsDialog(AppSettings(), None)
     qtbot.addWidget(dlg)
-    tabs = dlg.findChild(QTabWidget)
-    titles = [tabs.tabText(i) for i in range(tabs.count())]
-    assert "Scan rules" in titles
+    assert "Scan rules" in dlg.page_titles()
     # Editable tables present.
     assert isinstance(dlg._excl_table, QTableWidget)
     assert isinstance(dlg._hint_table, QTableWidget)

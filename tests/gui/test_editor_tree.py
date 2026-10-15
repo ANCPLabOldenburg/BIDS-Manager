@@ -154,7 +154,7 @@ def test_folder_recording_collapses_to_leaf(qapp, qtbot, bids_root: Path) -> Non
     # The folder-recording has no children — we do NOT descend into it.
     assert ds_item.childCount() == 0
     # And it's colored like a recording (``text``), not like a dir.
-    assert ds_item.data(0, COLOR_TOKEN_ROLE) == "text"
+    assert ds_item.data(0, COLOR_TOKEN_ROLE) == "tree_recording"
 
 
 def test_color_tokens_match_kinds(qapp, qtbot, bids_root: Path) -> None:
@@ -163,14 +163,21 @@ def test_color_tokens_match_kinds(qapp, qtbot, bids_root: Path) -> None:
     pane.set_root(bids_root)
     items = _collect_items(pane._tree)
     by_label = {label: token for _, label, token in items}
-    # Subject / session / datatype directories are accent.
-    assert by_label["sub-01"] == "accent"
-    assert by_label["ses-01"] == "accent"
-    assert by_label["anat"] == "accent"
-    # File kinds.
-    assert by_label["sub-01_ses-01_T1w.nii.gz"] == "text"
-    assert by_label["sub-01_ses-01_T1w.json"] == "purple"
-    assert by_label["participants.tsv"] == "teal"
+    # Each kind has its own token, the user's to recolour (Settings >
+    # Display); by default folders are the accent and every file kind the
+    # theme's own colour, never the plain text colour.
+    assert by_label["sub-01"] == "tree_folder"
+    assert by_label["ses-01"] == "tree_folder"
+    assert by_label["anat"] == "tree_folder"
+    assert by_label["sub-01_ses-01_T1w.nii.gz"] == "tree_image"
+    assert by_label["sub-01_ses-01_T1w.json"] == "tree_sidecar"
+    assert by_label["participants.tsv"] == "tree_table"
+    from bidsmgr.gui.theme_manager import PALETTES
+
+    pal = PALETTES["dark"]
+    assert pal["tree_folder"] == pal["accent"]
+    kinds = {pal[f"tree_{k}"] for k in ("image", "sidecar", "table", "recording")}
+    assert len(kinds) == 4 and pal["text"] not in kinds
 
 
 def test_file_selected_signal_emits_path(qapp, bids_root: Path, qtbot) -> None:

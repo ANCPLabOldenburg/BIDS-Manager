@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
 )
 
 import bidsmgr
+from .typefaces import code
 
 
 _ASSETS = Path(__file__).parent / "assets"
@@ -90,7 +91,7 @@ class AboutDialog(QDialog):
         b.addWidget(title)
 
         version = QLabel(
-            f"version <code>{bidsmgr.__version__}</code>"
+            f"version {code(bidsmgr.__version__)}"
         )
         version.setObjectName("about-version")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)

@@ -138,6 +138,10 @@ def _extension_of(name: str) -> str:
 
 
 def _is_recording(path: Path, datatype: Optional[str] = None) -> bool:
+    return _is_recording_name(path.name, datatype)
+
+
+def _is_recording_name(name: str, datatype: Optional[str] = None) -> bool:
     """Is this file a recording, as opposed to metadata about one?
 
     Decided from the SCHEMA: the suffix has to be one the standard declares
@@ -148,7 +152,6 @@ def _is_recording(path: Path, datatype: Optional[str] = None) -> bool:
     """
     from ..schema import list_extensions, list_suffixes
 
-    name = path.name
     if _extension_of(name) in _NOT_A_RECORDING_EXTS:
         return False
     suffix = _suffix_of(name)
@@ -170,32 +173,56 @@ def find_missing(root: Path) -> list[MissingAssociation]:
     even before the dataset has been validated.
     """
     root = Path(root)
-    out: list[MissingAssociation] = []
+    files = []
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or ".bidsmgr" in path.parts:
-            continue
-        datatype = _datatype_of(path, root)
-        if datatype is None or not _is_recording(path, datatype):
-            continue
-        stem = _stem(path.name)
-        ent = _entities(path.name)
+        if path.is_file() and ".bidsmgr" not in path.parts:
+            try:
+                files.append(path.relative_to(root).as_posix())
+            except ValueError:
+                continue
+    return [
+        MissingAssociation(target=root / target, rel=target, kind=kind,
+                           source=root / source, derivable=derivable)
+        for target, kind, source, derivable in missing_for(files)
+    ]
 
+
+def missing_for(files) -> list[tuple[str, str, str, bool]]:
+    """The companions the recordings among ``files`` should have and that
+    are not among them: ``(target, kind, source, derivable)``, POSIX paths
+    relative to the dataset root.
+
+    The rule on names alone, so the same answer serves a dataset on disk
+    (:func:`find_missing`) and the BIDS preview of one not converted yet.
+    A companion two recordings share (a run's BOLD and its SBRef name one
+    events table) is listed once.
+    """
+    present = set(files)
+    out: list[tuple[str, str, str, bool]] = []
+    seen: set[str] = set()
+
+    def need(target: str, kind: str, source: str, derivable: bool) -> None:
+        if target not in present and target not in seen:
+            seen.add(target)
+            out.append((target, kind, source, derivable))
+
+    for rel in sorted(present):
+        parts = rel.split("/")
+        if len(parts) < 2 or ".bidsmgr" in parts:
+            continue
+        datatype, name = parts[-2], parts[-1]
+        if not _is_recording_name(name, datatype):
+            continue
+        folder = "/".join(parts[:-1])
+        stem = _stem(name)
         # A JSON sidecar, for anything.
-        sidecar = path.parent / f"{stem}.json"
-        if not sidecar.exists():
-            out.append(_missing(root, sidecar, "sidecar", path, False))
-
+        need(f"{folder}/{stem}.json", "sidecar", rel, False)
         # An events table, when the recording names a task.
-        if datatype in _datatypes_with("events") and "task" in ent:
-            events = path.parent / f"{_strip_suffix(stem)}_events.tsv"
-            if not events.exists():
-                out.append(_missing(root, events, "events", path, False))
-
+        if datatype in _datatypes_with("events") and "task" in _entities(name):
+            need(f"{folder}/{_strip_suffix(stem)}_events.tsv", "events", rel, False)
         # A channels table, derivable from the recording itself.
         if datatype in _datatypes_with("channels"):
-            channels = path.parent / f"{_strip_suffix(stem)}_channels.tsv"
-            if not channels.exists():
-                out.append(_missing(root, channels, "channels", path, True))
+            need(f"{folder}/{_strip_suffix(stem)}_channels.tsv", "channels", rel, True)
     return out
 
 
@@ -228,7 +255,7 @@ def _missing(
 # Generating
 
 
-def _events_stub() -> str:
+def events_stub() -> str:
     """A header and one TODO row.
 
     Not an empty table: an empty ``events.tsv`` is indistinguishable from a
@@ -263,11 +290,14 @@ def _channels_from_recording(source: Path) -> Optional[str]:
 
 def _sidecar_stub(source: Path, root: Path) -> str:
     """A sidecar with the fields the standard requires, each a TODO."""
-    datatype = _datatype_of(source, root)
-    suffix = None
     parts = _stem(source.name).split("_")
-    if parts and "-" not in parts[-1]:
-        suffix = parts[-1]
+    suffix = parts[-1] if parts and "-" not in parts[-1] else None
+    return sidecar_stub(_datatype_of(source, root), suffix)
+
+
+def sidecar_stub(datatype: Optional[str], suffix: Optional[str]) -> str:
+    """The JSON a missing sidecar is generated as: every field the standard
+    requires of this kind of file, each a TODO."""
     data: dict[str, object] = {}
     if datatype and suffix:
         try:
@@ -312,7 +342,7 @@ def generate(
                     if text is None:
                         text = f"name\ttype\tunits\n{TODO}\t{TODO}\t{TODO}\n"
                 elif item.kind == "events":
-                    text = _events_stub()
+                    text = events_stub()
                 else:
                     text = _sidecar_stub(item.source, Path(root))
                 op.write_text(item.target, text)
@@ -323,4 +353,5 @@ def generate(
     return created, failed
 
 
-__all__ = ["MissingAssociation", "TODO", "find_missing", "generate"]
+__all__ = ["MissingAssociation", "TODO", "events_stub", "find_missing", "generate",
+           "missing_for", "sidecar_stub"]

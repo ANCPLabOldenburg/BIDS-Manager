@@ -69,10 +69,14 @@ def default_backends(
     """
     from .backends.dcm2niix_direct import Dcm2niixDirect
     from .backends.ecat_direct import EcatDirect
+    from .backends.eyelink import EyelinkBackend
     from .backends.mne_bids import MneBidsBackend
     from .backends.physio_dcm import PhysioDcmBackend
 
     return [
+        # First: an eye-tracking row may sit in eeg/ or meg/ beside the
+        # recording it accompanies, where mne-bids would otherwise claim it.
+        EyelinkBackend(),
         PhysioDcmBackend(),
         EcatDirect(),
         MneBidsBackend(),

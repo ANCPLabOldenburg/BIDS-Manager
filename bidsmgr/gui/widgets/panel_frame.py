@@ -17,22 +17,26 @@ to get two affordances:
   ``QSplitter``, so two panes (inspection + properties) detach as one unit.
 
 The frame hides the pane's own ``PaneHeader`` so there is a single header.
-A pane that has buttons belonging NEXT to its title can name a child widget
-:data:`HEADER_EXTRAS` and the frame lifts it into that one header; it is
-handed back when the pane detaches, so the buttons travel with the pane.
-State is not persisted across restarts.
+A pane that has controls belonging in that header can name child widgets for
+it: :data:`HEADER_LEAD` sits right after the title (what the panel shows, a
+view switch) and :data:`HEADER_EXTRAS` in the corner before the detach button
+(what to do with it). The frame lifts them into its header and hands them back
+to the slot they came from when the pane detaches, so they travel with the
+pane. State is not persisted across restarts.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QSplitter,
     QToolButton,
     QVBoxLayout,
@@ -44,12 +48,141 @@ from .primitives import PaneHeader
 
 _QWIDGETSIZE_MAX = (1 << 24) - 1
 _STRIP_PX = 24  # collapsed vertical-strip thickness
-_BAR_PX = 26    # horizontal title-bar height
+_BAR_PX = 30    # horizontal title-bar height
+
+#: The gap between two cards (the handle of a ``card-split`` splitter).
+CARD_GAP_PX = 8
+
+
+def card_canvas(content: QWidget) -> QWidget:
+    """``content`` (cards in a splitter) with the canvas showing around it."""
+    holder = QWidget()
+    holder.setObjectName("card-canvas")
+    lay = QVBoxLayout(holder)
+    lay.setContentsMargins(CARD_GAP_PX, CARD_GAP_PX // 2, CARD_GAP_PX, CARD_GAP_PX)
+    lay.setSpacing(0)
+    lay.addWidget(content)
+    return holder
+
 
 # Object name a pane gives a child widget to have it rendered beside the
 # frame's title instead of inside the pane. One name rather than a per-pane
 # argument, so a pane stays buildable on its own and the frame stays generic.
 HEADER_EXTRAS = "pane-header-extras"
+#: The same for a control that belongs right AFTER the title, on the left of
+#: the bar: what the panel shows (the Inspection's Table / Overview switch).
+HEADER_LEAD = "pane-header-lead"
+
+
+def _layout_holding(widget: QWidget):
+    """The layout ``widget`` actually sits in: its parent's layout or one
+    nested inside it. Taking the parent's top layout put a control kept in a
+    row of its own at the BOTTOM of a floating pane, stretched across it."""
+    top = widget.parentWidget().layout()
+    stack = [top]
+    while stack:
+        layout = stack.pop()
+        if layout is None:
+            continue
+        if layout.indexOf(widget) >= 0:
+            return layout
+        stack.extend(layout.itemAt(i).layout() for i in range(layout.count()))
+    return top
+
+
+class FoldStrip(QWidget):
+    """The handle of a panel that folds sideways, clickable ANYWHERE on it
+    (a caret button in a strip was a target the size of the caret). Painted
+    like the viewer's controls tab: open, a slim strip with a chevron;
+    folded, the chevron and the panel's name written down the strip."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, title: str, edge: str, parent=None) -> None:
+        super().__init__(parent)
+        self.title = title
+        self.edge = edge
+        self.collapsed = False
+        self.setObjectName("panel-frame-strip")
+        self.setFixedWidth(_STRIP_PX)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._sync_tip()
+
+    def set_collapsed(self, on: bool) -> None:
+        self.collapsed = bool(on)
+        self._sync_tip()
+        self.update()
+
+    def _sync_tip(self) -> None:
+        self.setToolTip(f"{'Open' if self.collapsed else 'Fold away'} "
+                        f"{self.title or 'this panel'}")
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
+                event.position().toPoint()):
+            self.clicked.emit()
+
+    def enterEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().leaveEvent(event)
+        self.update()
+
+    def _points_left(self) -> bool:
+        # Open, the chevron points the way the panel folds (toward its
+        # edge); folded, the way it opens.
+        toward_edge = self.edge == "left"
+        return toward_edge != self.collapsed
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt override
+        from ...viz.theme import parse_colour
+        from ..viz import fonts
+        from ..viz.bridge import ThemeHub
+
+        theme = ThemeHub.instance().theme
+        hover = self.underMouse()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(2.0, 3.0, -2.0, -3.0)
+        if hover or self.collapsed:
+            path = QPainterPath()
+            path.addRoundedRect(r, 6.0, 6.0)
+            p.fillPath(path, QColor(*parse_colour(theme.token(
+                "surface3" if hover else "surface2", "#161b22"))))
+        ink = QColor(*parse_colour(theme.text if hover else theme.dim))
+        cx = r.center().x()
+        name = (self.title or "").upper()
+        font = fonts.font(10, bold=True)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.8)
+        text_len = QFontMetricsF(font).horizontalAdvance(name) if self.collapsed else 0.0
+        group = 10.0 + (12.0 + text_len if text_len else 0.0)
+        top = max(r.top() + 8.0, r.center().y() - group / 2.0)
+        y = top + 5.0
+        half = fonts.px(4)
+        pen = QPen(ink, 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        if self._points_left():
+            pts = [QPointF(cx + half * 0.5, y - half), QPointF(cx - half * 0.5, y),
+                   QPointF(cx + half * 0.5, y + half)]
+        else:
+            pts = [QPointF(cx - half * 0.5, y - half), QPointF(cx + half * 0.5, y),
+                   QPointF(cx - half * 0.5, y + half)]
+        p.drawPolyline(pts)
+        if text_len:
+            p.setFont(font)
+            p.save()
+            p.translate(cx, y + 12.0)
+            p.rotate(90)
+            p.drawText(QRectF(0, -9, text_len + 4.0, 18),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+            p.restore()
+        p.end()
 
 
 class PanelFrame(QFrame):
@@ -82,10 +215,14 @@ class PanelFrame(QFrame):
         self._grow_target: Optional[QWidget] = None
         self._saved_extent: Optional[int] = None
 
-        # Buttons the pane wants beside the title rather than under it. Kept
-        # with the layout they came from, so detaching can hand them back.
+        # Controls the pane wants in the title bar rather than under it. Kept
+        # with the layout and slot they came from, so detaching can hand them
+        # back where they were.
         self._extras: Optional[QWidget] = None
         self._extras_home = None
+        self._lead: Optional[QWidget] = None
+        self._lead_home = None
+        self._homes: dict[int, int] = {}
 
         if hide_inner_header:
             hdr = inner.findChild(PaneHeader)
@@ -94,7 +231,13 @@ class PanelFrame(QFrame):
             extras = inner.findChild(QWidget, HEADER_EXTRAS)
             if extras is not None:
                 self._extras = extras
-                self._extras_home = extras.parentWidget().layout()
+                self._extras_home = _layout_holding(extras)
+                self._homes[id(extras)] = self._extras_home.indexOf(extras)
+            lead = inner.findChild(QWidget, HEADER_LEAD)
+            if lead is not None:
+                self._lead = lead
+                self._lead_home = _layout_holding(lead)
+                self._homes[id(lead)] = self._lead_home.indexOf(lead)
 
         # Placeholder shown in place of the body while detached.
         self._placeholder = QLabel("Detached - close the window to dock it back.")
@@ -108,8 +251,23 @@ class PanelFrame(QFrame):
         self._refresh_icons()
 
     # ------------------------------------------------------------------
+    def make_card(self) -> "PanelFrame":
+        """Draw this panel as a card: a rounded, outlined surface on the
+        window's canvas (the stylesheet's ``QFrame[card="true"]``). Only a
+        panel at the top of a layout is a card; panels nested in it stay
+        flat, so there are no cards inside cards."""
+        self.setProperty("card", True)
+        # One pixel in from the outline, so the content does not paint over it.
+        self.layout().setContentsMargins(1, 1, 1, 1)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        return self
+
     def _build_controls(self) -> None:
-        self._caret = QToolButton()
+        # Parented: a side panel never puts its caret in a layout (the strip
+        # is its handle), and a parentless widget made visible is a window
+        # of its own (a stray 28 px window after every re-dock).
+        self._caret = QToolButton(self)
         self._caret.setObjectName("panel-frame-caret")
         self._caret.setAutoRaise(True)
         self._caret.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -137,27 +295,32 @@ class PanelFrame(QFrame):
         bl.setSpacing(4)
         if not self._vertical_fold:
             bl.addWidget(self._caret)
-        bl.addWidget(self._title_lbl, 1)
+        bl.addWidget(self._title_lbl)
+        if self._lead is not None:
+            bl.addSpacing(6)
+            bl.addWidget(self._lead)
+        bl.addStretch(1)
         if self._extras is not None:
             bl.addWidget(self._extras)
         bl.addWidget(self._detach_btn)
 
-        # Side strip (left/right only): a thin vertical bar with the caret
-        # centred vertically.
-        self._strip: Optional[QFrame] = None
+        # Side strip (left/right only): the whole strip is the handle.
+        self._strip: Optional[FoldStrip] = None
         if self._vertical_fold:
-            self._strip = QFrame()
-            self._strip.setObjectName("panel-frame-strip")
-            self._strip.setFixedWidth(_STRIP_PX)
-            self._strip.setToolTip(self._title)
-            sl = QVBoxLayout(self._strip)
-            sl.setContentsMargins(0, 4, 0, 4)
-            sl.setSpacing(4)
-            sl.addStretch(1)
-            sl.addWidget(self._caret, 0, Qt.AlignmentFlag.AlignHCenter)
-            sl.addStretch(1)
-
-        self._caret.setVisible(self._collapsible)
+            self._strip = FoldStrip(self._title, self._edge)
+            self._strip.clicked.connect(self.toggle_collapsed)
+            self._strip.setVisible(self._collapsible)
+            self._caret.setVisible(False)
+        else:
+            self._caret.setVisible(self._collapsible)
+            if self._collapsible:
+                # A top or bottom panel folds from anywhere on its title bar
+                # (its buttons keep their own clicks).
+                self._bar.setProperty("foldable", True)
+                self._bar.setCursor(Qt.CursorShape.PointingHandCursor)
+                self._bar.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+                self._bar.setToolTip(f"Fold or open {self._title or 'this panel'}")
+                self._bar.installEventFilter(self)
         self._detach_btn.setVisible(self._detachable)
 
     def _assemble(self) -> None:
@@ -197,6 +360,20 @@ class PanelFrame(QFrame):
                 outer.addWidget(self._placeholder, 1)
                 self._content_index = 1
 
+    def set_title(self, title: str) -> None:
+        """Rename the panel (a pane whose title follows what it shows): the
+        title bar, the fold strip, the tooltip and a floating window's title."""
+        self._title = title
+        self._title_lbl.setText(title.upper())
+        if self._strip is not None:
+            self._strip.title = title
+            self._strip._sync_tip()
+            self._strip.update()
+        if self._collapsible and not self._vertical_fold:
+            self._bar.setToolTip(f"Fold or open {title or 'this panel'}")
+        if self._detached is not None:
+            self._detached.setWindowTitle(f"BIDS-Manager - {title}" if title else "BIDS-Manager")
+
     # ------------------------------------------------------------------
     # Splitter wiring
     # ------------------------------------------------------------------
@@ -217,6 +394,16 @@ class PanelFrame(QFrame):
 
     def is_detached(self) -> bool:
         return self._detached is not None
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt override
+        from PyQt6.QtCore import QEvent
+
+        if (obj is self._bar and event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+                and self._bar.rect().contains(event.position().toPoint())):
+            self.toggle_collapsed()
+            return True
+        return super().eventFilter(obj, event)
 
     def toggle_collapsed(self) -> None:
         self.set_collapsed(not self._collapsed)
@@ -323,19 +510,24 @@ class PanelFrame(QFrame):
     # ------------------------------------------------------------------
 
     def _return_extras(self) -> None:
-        """Put the pane's buttons back where the pane built them."""
-        if self._extras is None or self._extras_home is None:
-            return
-        self._extras_home.addWidget(self._extras)
-        self._extras.setVisible(True)
+        """Put the pane's controls back in the slots the pane built them in."""
+        for widget, home in ((self._lead, self._lead_home), (self._extras, self._extras_home)):
+            if widget is None or home is None:
+                continue
+            home.insertWidget(self._homes.get(id(widget), home.count()), widget)
+            widget.setVisible(True)
 
     def _take_extras(self) -> None:
-        """Lift them back into the title bar."""
-        if self._extras is None:
-            return
+        """Lift them back into the title bar: the lead after the title, the
+        extras before the detach button."""
         layout = self._bar.layout()
-        layout.insertWidget(layout.count() - 1, self._extras)
-        self._extras.setVisible(True)
+        if self._lead is not None:
+            # After the title and the spacing that follows it.
+            layout.insertWidget(layout.indexOf(self._title_lbl) + 2, self._lead)
+            self._lead.setVisible(True)
+        if self._extras is not None:
+            layout.insertWidget(layout.indexOf(self._detach_btn), self._extras)
+            self._extras.setVisible(True)
 
     def reattach(self) -> None:
         if not self.is_detached():
@@ -349,7 +541,7 @@ class PanelFrame(QFrame):
         self._inner.setVisible(True)
         self._take_extras()
         self._placeholder.setVisible(False)
-        self._caret.setVisible(self._collapsible)
+        self._caret.setVisible(self._collapsible and not self._vertical_fold)
         self._detach_btn.setVisible(self._detachable)
         self._detach_btn.setToolTip("Detach into a floating window")
         self._refresh_icons()
@@ -372,17 +564,14 @@ class PanelFrame(QFrame):
             inner_repaint(pal)
 
     def _refresh_icons(self) -> None:
-        if self._vertical_fold:
-            if self._edge == "left":
-                glyph = "panel_expand" if self._collapsed else "chevron_left"
-            else:  # right
-                glyph = "chevron_left" if self._collapsed else "panel_expand"
-        else:
-            glyph = "panel_expand" if self._collapsed else "panel_collapse"
+        if self._strip is not None:
+            self._strip.set_collapsed(self._collapsed)
+        glyph = "panel_expand" if self._collapsed else "panel_collapse"
         self._caret.setIcon(icons.icon(glyph))
         self._detach_btn.setIcon(
             icons.icon("reattach" if self.is_detached() else "detach")
         )
 
 
-__all__ = ["PanelFrame"]
+__all__ = ["CARD_GAP_PX", "FoldStrip", "HEADER_EXTRAS", "HEADER_LEAD", "PanelFrame",
+           "card_canvas"]

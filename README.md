@@ -1,6 +1,6 @@
 <h1 align="center">
   <br>
-  <img src="miscellaneous/images/app-icon.png" alt="" width="132">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/images/app-icon.png" alt="" width="132">
   <br>
   BIDS Manager
   <br>
@@ -11,12 +11,12 @@
 <p align="center">
   <a href="https://pypi.org/project/bids-manager/"><img alt="PyPI" src="https://img.shields.io/pypi/v/bids-manager?color=4FC3F7&label=PyPI"></a>
   <a href="https://pypi.org/project/bids-manager/"><img alt="Python" src="https://img.shields.io/pypi/pyversions/bids-manager?color=4FC3F7"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/pypi/l/bids-manager?color=4FC3F7"></a>
+  <a href="https://github.com/ANCPLabOldenburg/BIDS-Manager/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/pypi/l/bids-manager?color=4FC3F7"></a>
   <a href="https://ancplaboldenburg.github.io/bids_manager_documentation/"><img alt="Docs" src="https://img.shields.io/badge/docs-online-4FC3F7"></a>
 </p>
 
 <p align="center">
-  <img src="miscellaneous/hero.gif" alt="Reviewing an inventory, editing a sidecar, and inspecting a volume, in one window" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/hero.gif" alt="Reviewing an inventory, editing a sidecar, and inspecting a volume, in one window" width="100%">
 </p>
 
 ## What is BIDS Manager?
@@ -50,7 +50,7 @@ native desktop launcher, so no existing Python install is required. The
 
 With Python already set up, `pip install bids-manager` works too.
 
-Launch the interface with `bidsmgr`. Prefer the command line? Nine verbs cover
+Launch the interface with `bidsmgr`. Prefer the command line? Ten verbs cover
 the whole pipeline:
 
 ```
@@ -62,6 +62,7 @@ bidsmgr-convert    convert, routing each row to the right engine
 bidsmgr-metadata   dataset_description, participants, phenotype
 bidsmgr-deface     remove faces, or keep only the brain as a derivative
 bidsmgr-validate   validate, with a report you can hand to a colleague
+bidsmgr-qc         a fast quality check of anatomical and diffusion images
 bidsmgr-project    list a project's saved scan versions
 ```
 
@@ -70,14 +71,14 @@ flag, and a tutorial per modality with a sample dataset you can download and
 work through.
 
 [docs]:    https://ancplaboldenburg.github.io/bids_manager_documentation/
-[install]: https://ancplaboldenburg.github.io/bids_manager_documentation/installation.html
+[install]: https://ancplaboldenburg.github.io/bids_manager_documentation/start/install/
 
 ## The workflow
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/workflow-dark.svg">
-    <img src="docs/workflow.svg" alt="Raw MRI, MR spectroscopy, PET, EEG, MEG, physio and blood recordings enter at Scan, then Review, Convert, Enrich, Curate and Validate, producing one BIDS dataset with every step recorded in the project log" width="100%">
+    <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/docs/workflow.svg" alt="Raw MRI, MR spectroscopy, PET, EEG, MEG, physio and blood recordings enter at Scan, then Review, Convert, Enrich, Curate and Validate, producing one BIDS dataset with every step recorded in the project log" width="100%">
   </picture>
 </p>
 
@@ -99,7 +100,7 @@ sets aside says why: a scanner report with no image data in it, a localiser, a
 series it cannot classify.
 
 <p align="center">
-  <img src="miscellaneous/see.gif" alt="The inventory table: every series, its proposed BIDS name, and the properties panel" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/see.gif" alt="The inventory table: every series, its proposed BIDS name, and the properties panel" width="100%">
 </p>
 
 ### 2. Convert with confidence
@@ -122,7 +123,7 @@ Conversion runs per subject into a staging folder and is committed only when
 that subject finishes, so a failure never leaves a half-converted tree.
 
 <p align="center">
-  <img src="miscellaneous/convert.gif" alt="Bulk-editing entities in the inventory and watching the predicted filenames update" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/convert.gif" alt="Bulk-editing entities in the inventory and watching the predicted filenames update" width="100%">
 </p>
 
 ### 3. Say what the files cannot say
@@ -145,7 +146,7 @@ is written as `n/a`, not as 50: 50 Hz is right in Europe and wrong across most
 of the Americas, and nothing in the file would say it had been assumed.
 
 <p align="center">
-  <img src="miscellaneous/fix.gif" alt="A JSON sidecar as a schema-aware form, colour-coded by requirement level" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/fix.gif" alt="A JSON sidecar as a schema-aware form, colour-coded by requirement level" width="100%">
 </p>
 
 ### 4. Curate the dataset you converted
@@ -195,7 +196,7 @@ metabolite positions, the chemical shift axis the right way round, line
 broadening, phasing, and the free induction decay on a second page.
 
 <p align="center">
-  <img src="miscellaneous/inspect.gif" alt="The NIfTI viewer: sagittal, coronal and axial sharing one crosshair" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/inspect.gif" alt="The NIfTI viewer: sagittal, coronal and axial sharing one crosshair" width="100%">
 </p>
 
 ### 6. Take out what identifies a person
@@ -234,8 +235,25 @@ entity the standard does not allow for that kind of file, a sidecar left behind
 next to no data file at all.
 
 <p align="center">
-  <img src="miscellaneous/validate.gif" alt="Validating a dataset: findings by scope, each naming its schema rule" width="100%">
+  <img src="https://raw.githubusercontent.com/ANCPLabOldenburg/BIDS-Manager/main/miscellaneous/validate.gif" alt="Validating a dataset: findings by scope, each naming its schema rule" width="100%">
 </p>
+
+A valid dataset can still hold a bad image. The quality check measures every
+anatomical and diffusion image in seconds, with nothing extra to install (no
+FSL, AFNI or ANTs): the brain and the tissue classes come from brainchop's
+networks and the registration from niimath, the tools defacing already uses.
+It reports noise and contrast, artefacts in the air, tissue classes, the bias
+field, a field of view that cuts the brain, a face still present; for
+diffusion the gradient table, head motion, slice dropout, interleave
+artefacts, spikes, signal drift and b-vectors that look flipped. The air
+around the head is measured only in images that are not defaced. In the
+viewer the result is docked beside the image, each mask or map a checkbox
+over it and each finding a click from its evidence; the Editor's **Quality
+check** lists the whole dataset with the images that stand out coloured, and
+the results are written as a BIDS derivative (`derivatives/bidsmgr-qc/`).
+Every measure and QC plot explains what it measures and how to read it, and
+every method and threshold is a setting (Settings > Quality control, or a JSON
+file for `bidsmgr-qc --config`).
 
 ### 8. Provenance built in
 
@@ -244,10 +262,14 @@ a decision taken in a session weeks ago, or reopen last month's scan and convert
 it again against the same answers. Curation is resumable rather than something
 you redo from the raw files each time.
 
-A dataset converted by some other tool can be adopted, from the Editor's
-**Track changes** or with `bidsmgr-adopt`, so the edits you make to it are
-recorded and reversible in the same way. Adopting writes nothing outside
-`.bidsmgr/`, so the dataset validates exactly as it did before.
+A dataset converted by some other tool can be adopted, by opening it as the
+project (**Open folder...** in the Editor, or **Open dataset folder...** on the
+Home page) or with `bidsmgr-adopt`, so the edits you make to it are recorded
+and reversible in the same way. `bidsmgr-adopt` writes nothing outside
+`.bidsmgr/`; opening it as the project also adds a README, `.bidsignore` or
+dataset description where one is missing. A folder you only want to look at,
+BIDS or not, opens in the Editor for viewing only, with nothing written into
+it.
 
 ## Modalities
 
@@ -276,7 +298,7 @@ Carl von Ossietzky Universität Oldenburg.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](https://github.com/ANCPLabOldenburg/BIDS-Manager/blob/main/LICENSE).
 
 Physio conversion code under `bidsmgr/vendor/bidsphysio/` is derived
 from [`bidsphysio`](https://github.com/cbinyu/bidsphysio) by Pablo
@@ -284,6 +306,12 @@ Velasco and Chrysa Papadaniil (NYU Center for Brain Imaging), used
 under the MIT License. See `bidsmgr/vendor/bidsphysio/LICENSE` and
 `bidsmgr/vendor/README.md` for the full attribution and what
 changed during vendoring.
+
+The quality check registers images to the MNI ICBM 152 Nonlinear
+Asymmetrical template 2009c (Fonov et al.), shipped as 8-bit copies under
+`bidsmgr/qc/templates/` with the McConnell Brain Imaging Centre notice its
+licence requires; `PROVENANCE.md` there records the source, checksums and the
+conversion.
 
 The Windows `dcm2niix.exe` under `bidsmgr/vendor/dcm2niix_win/` is a
 build of Chris Rorden's
@@ -296,13 +324,13 @@ can be removed.
 
 ```
 López Vilaret, K. M. and Rieger, J.
-BIDS Manager (v1.4.1). 2026. https://github.com/ANCPLabOldenburg/BIDS-Manager
+BIDS Manager (v1.5.0). 2026. https://github.com/ANCPLabOldenburg/BIDS-Manager
 ```
 
 <p align="center">
   <a href="https://ancplaboldenburg.github.io/bids_manager_documentation/">Documentation</a>
   &middot;
-  <a href="https://ancplaboldenburg.github.io/bids_manager_documentation/updates.html">What changed</a>
+  <a href="https://ancplaboldenburg.github.io/bids_manager_documentation/updates/">What changed</a>
   &middot;
   <a href="https://github.com/ANCPLabOldenburg/BIDS-Manager/issues">Report a bug</a>
   &middot;

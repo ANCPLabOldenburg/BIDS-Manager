@@ -167,6 +167,26 @@ class WrapLabel(QLabel):
         self.updateGeometry()
 
 
+def stat(label: str, value: str, tone: str = "text") -> QWidget:
+    """One headline number with its name under it (``stat-value-<tone>``,
+    ``stat-caption``): the Editor's Dashboard and the Converter's Overview.
+    The number is the label ``number``, the caption ``caption``, so a caller
+    can update both in place."""
+    box = QWidget()
+    layout = QVBoxLayout(box)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(1)
+    number = QLabel(value, box)
+    number.setObjectName(f"stat-value-{tone}")
+    caption = QLabel(label, box)
+    caption.setObjectName("stat-caption")
+    layout.addWidget(number)
+    layout.addWidget(caption)
+    box.number = number
+    box.caption = caption
+    return box
+
+
 def hint(text: str) -> QLabel:
     """The quiet explanatory line a dialog uses under a heading or in a footer.
 
@@ -182,6 +202,7 @@ def hint(text: str) -> QLabel:
 
 __all__ = [
     "WrapLabel",
+    "stat",
     "build_footer",
     "build_footer_with",
     "build_header",

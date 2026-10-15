@@ -179,6 +179,9 @@ class ValidationPane(QWidget):
     # Emitted by the File section's "Highlight in editor" button: highlight
     # every shown error/warning field (JSON) or column (TSV) for this file.
     highlight_all_requested = pyqtSignal(object)  # (Path | None)
+    # A finding about an image's header: show the image with the header
+    # inspector open on the row that is the evidence. ``(Path, rule_id)``.
+    header_requested = pyqtSignal(object, str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -376,11 +379,13 @@ class ValidationPane(QWidget):
     def _render(self) -> None:
         """Tear down + rebuild the three sections from current state."""
         self._allowed = self._allowed_severities()
-        # Drop existing section widgets. ``setParent(None)`` is the
-        # critical detach — otherwise the deleteLater is deferred and
-        # the old sections paint over the new ones briefly.
+        # Drop existing section widgets: hidden (so a show Qt queued when
+        # they were added cannot open them as windows once detached), then
+        # detached, so the old sections never paint over the new ones while
+        # their deleteLater waits.
         for w in self._section_widgets:
             self._body_layout.removeWidget(w)
+            w.hide()
             w.setParent(None)
             w.deleteLater()
         self._section_widgets.clear()
@@ -529,6 +534,10 @@ class ValidationPane(QWidget):
             empty.setWordWrap(True)
             sl.addWidget(empty)
         else:
+            from ...viz.inspect import HEADER_RULES
+
+            is_image = target_file is not None and str(target_file).lower().endswith(
+                (".nii", ".nii.gz"))
             for issue in issues:
                 msg = ValMessage(
                     severity=(
@@ -541,6 +550,11 @@ class ValidationPane(QWidget):
                     fix_label=issue.fix_label,
                     field=issue.field,
                     schema_rule=issue.schema_rule,
+                    view_label=("Show in the header"
+                                if is_image and issue.rule_id in HEADER_RULES else None),
+                )
+                msg.view_requested.connect(
+                    lambda rule, p=target_file: self.header_requested.emit(p, rule)
                 )
                 # Re-emit fix clicks with the file context so the host
                 # panel can jump to the right place.

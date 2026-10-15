@@ -146,7 +146,7 @@ def check_dataset(root: Path, report=None) -> list[Check]:
         + ("table present" if participants.exists() else "no table"),
         "A dataset with several subjects and no participants table gives an "
         "analyst nothing to group or model by.",
-        "" if ok else "Fix ups: Stamp TODO placeholders runs the metadata step",
+        "" if ok else "Fix ups: Write TODOs runs the metadata step",
     ))
 
     # TODO placeholders, which are notes to self and not values.

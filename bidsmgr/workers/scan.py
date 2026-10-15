@@ -95,6 +95,7 @@ class ScanWorker(QThread):
         user_hints=None,
         exclusions=None,
         index_widths=None,
+        classifier_config=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -112,6 +113,7 @@ class ScanWorker(QThread):
         self._user_hints = user_hints
         self._exclusions = exclusions
         self._index_widths = index_widths
+        self._classifier_config = classifier_config
         # Cooperative stop flag. ``run_scan`` polls ``_stop.is_set`` at
         # DICOM-read boundaries and raises ``OperationCancelled`` when set.
         self._stop = threading.Event()
@@ -181,6 +183,7 @@ class ScanWorker(QThread):
                 user_hints=self._user_hints,
                 exclusions=self._exclusions,
                 index_widths=self._index_widths,
+                classifier_config=self._classifier_config,
             )
             # Warm the schema for the types this scan actually produced,
             # HERE, on the worker thread. Binding the table asks "which

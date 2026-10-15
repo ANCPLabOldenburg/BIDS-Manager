@@ -82,3 +82,18 @@ def open_every_folder(tree) -> None:
         visit(tree.topLevelItem(i))
     for item in was_open:
         item.setExpanded(False)
+
+
+@pytest.fixture(autouse=True)
+def fresh_viewer_settings(isolated_settings) -> Iterator[None]:
+    """The viewer library caches its settings per process (one hub, so every
+    viewer follows a change at once). Each test has its own QSettings file,
+    so the cache has to be forgotten around each test, or a preference set by
+    one test would be read by the next."""
+    from bidsmgr.gui.viz.bridge import SettingsHub
+
+    SettingsHub.reset_instance()
+    try:
+        yield
+    finally:
+        SettingsHub.reset_instance()

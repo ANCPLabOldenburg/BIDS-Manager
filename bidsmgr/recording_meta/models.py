@@ -308,6 +308,26 @@ def is_varies(value: Any) -> bool:
     return isinstance(value, str) and value.strip().upper() == VARIES
 
 
+class EyetrackSpec(_Model):
+    """The eye-tracking block: what an EyeLink file cannot say.
+
+    The file knows the tracker, the eye, the calibration and the screen's
+    resolution. It does not know how large the screen was or how far away,
+    which the standard requires for gaze measured on a screen, nor how the
+    recording lines up with the run it belongs to. All optional; unset means
+    "say nothing" (``StartTime`` is then 0: the recording starts the run).
+    """
+
+    screen_size: Optional[list[float]] = None        # [width, height] in m -> ScreenSize
+    screen_distance: Optional[float] = None          # m -> ScreenDistance
+    screen_origin: Optional[list[str]] = None        # -> ScreenOrigin (EyeLink: top, left)
+    eye_tracker_distance: Optional[float] = None     # m -> EyeTrackerDistance
+    #: The text of the message that marks the run's start (the scanner's first
+    #: trigger, say): StartTime is the first sample's time before it.
+    sync_message: Optional[str] = None
+    start_time: Optional[float] = None               # s -> StartTime, when known outright
+
+
 class DatasetDescriptionSpec(_Model):
     """What goes in ``dataset_description.json``, held where it can persist.
 
@@ -385,6 +405,10 @@ class RecordingMetaSpec(_Model):
     # load unchanged.
     pet_defaults: PetAcquisitionSpec = PetAcquisitionSpec()
     pet_overrides: dict[str, PetAcquisitionSpec] = {}
+    # Eye tracking's pair, the same way: the screen and the timing, for every
+    # recording and per recording. Older scaffolds load unchanged.
+    eyetrack_defaults: EyetrackSpec = EyetrackSpec()
+    eyetrack_overrides: dict[str, EyetrackSpec] = {}
     # The dataset's own description. Agnostic: it says who made the dataset and
     # under what terms, which has nothing to do with what recorded it. Older
     # scaffolds have no such block and load unchanged.

@@ -104,10 +104,13 @@ class NiftiPickerDialog(QDialog):
         title: str = "Choose an image",
         start: Optional[Path] = None,
         parent: Optional[QWidget] = None,
+        browse_filter: str = NIFTI_FILTER,
+        accept_text: str = "",
     ) -> None:
         super().__init__(parent)
         self._root = Path(root) if root else None
         self._start = Path(start) if start else None
+        self._browse_filter = browse_filter
         self._chosen: Optional[Path] = None
         self._images: list[Path] = []
 
@@ -156,6 +159,8 @@ class NiftiPickerDialog(QDialog):
         )
         self._ok = buttons.button(QDialogButtonBox.StandardButton.Open)
         self._ok.setObjectName("tb-btn-primary")
+        if accept_text:
+            self._ok.setText(accept_text)
         self._ok.setEnabled(False)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -175,7 +180,7 @@ class NiftiPickerDialog(QDialog):
             )
             return
 
-        self._images = find_images(self._root)
+        self._images = [p for p in find_images(self._root) if self._include(p)]
         if not self._images:
             self._status.setText(
                 f"No NIfTI images under {self._root.name}. Use Browse… to "
@@ -246,7 +251,7 @@ class NiftiPickerDialog(QDialog):
                 Path(path).relative_to(self._root).as_posix()
                 if self._root else Path(path).name
             )
-            visible = matches(rel, query)
+            visible = matches(rel, query) and self._keep(Path(path))
             leaf.setHidden(not visible)
             shown += int(visible)
 
@@ -263,6 +268,17 @@ class NiftiPickerDialog(QDialog):
             f"{shown} of {total} image(s) shown." if query
             else f"{total} image(s) in this dataset."
         )
+
+    # -- hooks for a picker with a purpose ---------------------------------
+
+    def _include(self, path: Path) -> bool:
+        """Whether ``path`` is offered at all (default: every image)."""
+        return True
+
+    def _keep(self, path: Path) -> bool:
+        """Whether ``path`` is shown under the current options, besides the
+        filter text (default: always)."""
+        return True
 
     def _groups_deepest_first(self) -> list[QTreeWidgetItem]:
         groups: list[QTreeWidgetItem] = []
@@ -309,7 +325,7 @@ class NiftiPickerDialog(QDialog):
     def _on_browse(self) -> None:
         start = str(self._root) if self._root else ""
         chosen, _ = QFileDialog.getOpenFileName(
-            self, self.windowTitle(), start, NIFTI_FILTER,
+            self, self.windowTitle(), start, self._browse_filter,
         )
         if chosen:
             self._chosen = Path(chosen)

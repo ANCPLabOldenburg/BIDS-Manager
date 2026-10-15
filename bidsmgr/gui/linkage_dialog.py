@@ -52,7 +52,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -62,6 +61,7 @@ from PyQt6.QtWidgets import (
 from ..editor import linkage
 from ..editor import values as ev
 from .dialog_chrome import build_footer_with, build_header, card, hint
+from .widgets.splitter import Splitter
 
 log = logging.getLogger(__name__)
 
@@ -69,13 +69,23 @@ log = logging.getLogger(__name__)
 #: DIALOG, and it has to read differently from the four the engine reports.
 _EDITED = "edited, not saved"
 
-_COLOURS = {
-    _EDITED: "#58a6ff",
-    linkage.BROKEN: "#f85149",
-    linkage.DIFFERS: "#d29922",
-    linkage.IMPLIED: "#d29922",
-    linkage.UNSET: "#8b949e",
+#: Each state's palette token: the colour follows the theme (a literal
+#: colour was right in the dark theme only).
+_TOKENS = {
+    _EDITED: "accent",
+    linkage.BROKEN: "error",
+    linkage.DIFFERS: "warning",
+    linkage.IMPLIED: "warning",
+    linkage.UNSET: "dim",
 }
+
+
+def _colour(status: str) -> Optional[str]:
+    """The current theme's colour for ``status``, or None."""
+    from .theme_manager import CUR
+
+    token = _TOKENS.get(status)
+    return CUR().get(token) if token else None
 
 # What the left list is filtered to.
 _ALL = "all"
@@ -130,7 +140,7 @@ class LinkageDialog(QDialog):
 
         bl.addWidget(self._build_controls())
 
-        split = QSplitter(Qt.Orientation.Horizontal)
+        split = Splitter(Qt.Orientation.Horizontal)
         split.addWidget(self._build_left())
         split.addWidget(self._build_middle())
         split.addWidget(self._build_right())
@@ -392,7 +402,7 @@ class LinkageDialog(QDialog):
             ])
             item.setData(0, _PATH_ROLE, str(row.path))
             item.setToolTip(0, self._rel(row.path))
-            colour = _COLOURS.get(status)
+            colour = _colour(status)
             if colour:
                 item.setForeground(2, QBrush(QColor(colour)))
         for column in range(3):
@@ -491,10 +501,10 @@ class LinkageDialog(QDialog):
                     continue
                 item = QTreeWidgetItem(self._right, [written, "missing"])
                 item.setForeground(
-                    1, QBrush(QColor(_COLOURS[linkage.BROKEN]))
+                    1, QBrush(QColor(_colour(linkage.BROKEN)))
                 )
                 item.setForeground(
-                    0, QBrush(QColor(_COLOURS[linkage.BROKEN]))
+                    0, QBrush(QColor(_colour(linkage.BROKEN)))
                 )
                 self._right.addTopLevelItem(item)
 
@@ -628,7 +638,7 @@ class LinkageDialog(QDialog):
             )
             item.setText(1, self._describe(self._targets_now(row), row))
             item.setText(2, status)
-            colour = _COLOURS.get(status)
+            colour = _colour(status)
             item.setForeground(
                 2, QBrush(QColor(colour)) if colour else QBrush()
             )

@@ -67,6 +67,10 @@ HIGHLIGHT_ROLE = Qt.ItemDataRole.UserRole + 6
 # the BIDS form showed 130, and nothing said why.
 PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 7
 
+# What the standard says the field is, so a search can find a field by what
+# it means ("echo") and not only by its name.
+DESCRIPTION_ROLE = Qt.ItemDataRole.UserRole + 8
+
 # Semi-transparent row tints; low alpha so the text stays readable over them.
 _HL_TINT: dict[str, "QColor"] = {
     "err":   QColor(207, 34, 46, 78),
@@ -330,6 +334,7 @@ class JsonTreeView(QTreeWidget):
         if unit:
             item.setText(2, (item.text(2) + f"  ({unit})").strip())
         description = describe.get(key, "")
+        item.setData(0, DESCRIPTION_ROLE, description)
         if description:
             tip = description
             if level:
@@ -339,6 +344,36 @@ class JsonTreeView(QTreeWidget):
             for column in range(self.columnCount()):
                 if not item.toolTip(column):
                     item.setToolTip(column, tip)
+
+    def set_filter(self, text: str) -> int:
+        """Show the rows whose key, value or description contains ``text``.
+
+        Case does not matter. A row inside a field stays with the fields
+        that hold it, which open so it can be seen; a match shows everything
+        inside it. An empty ``text`` shows every row again, folded as the
+        view first draws them. Returns how many top-level fields are shown.
+        """
+        text = text.strip().lower()
+        shown = 0
+        for i in range(self.topLevelItemCount()):
+            shown += self._filter_item(self.topLevelItem(i), text, False)
+        if not text:
+            self.collapseAll()
+            self.expandToDepth(0)
+        return shown
+
+    def _filter_item(self, item: QTreeWidgetItem, text: str, inside_match: bool) -> bool:
+        own = (not text or inside_match
+               or text in item.text(0).lower() or text in item.text(1).lower()
+               or text in str(item.data(0, DESCRIPTION_ROLE) or "").lower())
+        child_hit = False
+        for j in range(item.childCount()):
+            child_hit |= self._filter_item(item.child(j), text, bool(text) and own)
+        visible = own or child_hit
+        item.setHidden(not visible)
+        if text and child_hit:
+            item.setExpanded(True)
+        return visible
 
     def set_highlights(self, severities: dict[str, str]) -> None:
         """Tint top-level rows whose key is in ``severities`` ({name: sev});

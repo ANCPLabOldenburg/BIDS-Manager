@@ -482,7 +482,7 @@ class TestFillTodos:
         root.mkdir()
         _write_pair(root / "sub-001" / "pet", "sub-001_pet", sidecar={})
 
-        report = run_metadata(root, fill_todos=True)
+        report = run_metadata(root, fill_scope="recommended")
         sidecar = root / "sub-001" / "pet" / "sub-001_pet.json"
         data = json.loads(sidecar.read_text())
         assert data["TracerName"] == "TODO"
@@ -504,7 +504,7 @@ class TestFillTodos:
         root.mkdir()
         _write_pair(root / "sub-001" / "fmap", "sub-001_phase2", sidecar={})
 
-        report = run_metadata(root, fill_todos=True)
+        report = run_metadata(root, fill_scope="recommended")
         data = json.loads(
             (root / "sub-001" / "fmap" / "sub-001_phase2.json").read_text()
         )
@@ -526,7 +526,7 @@ class TestFillTodos:
         root.mkdir()
         _write_pair(root / "sub-001" / "dwi", "sub-001_dwi", sidecar={})
 
-        report = run_metadata(root, fill_todos=True)
+        report = run_metadata(root, fill_scope="recommended")
         data = json.loads(
             (root / "sub-001" / "dwi" / "sub-001_dwi.json").read_text()
         )
@@ -542,7 +542,7 @@ class TestFillTodos:
         _write_pair(root / "sub-001" / "fmap", "sub-001_phase2",
                     sidecar={"EchoTime": 0.005})
 
-        run_metadata(root, fill_todos=True)
+        run_metadata(root, fill_scope="recommended")
         data = json.loads(
             (root / "sub-001" / "fmap" / "sub-001_phase2.json").read_text()
         )
@@ -554,36 +554,62 @@ class TestFillTodos:
         root.mkdir()
         _write_pair(root / "sub-001" / "fmap", "sub-001_phase2", sidecar={})
 
-        run_metadata(root)  # no fill_todos
+        run_metadata(root)  # no fill_scope
         data = json.loads(
             (root / "sub-001" / "fmap" / "sub-001_phase2.json").read_text()
         )
         assert "EchoTime" not in data
 
-    def test_fills_dataset_description_recommended(
+    def test_fills_dataset_description_at_the_levels_the_schema_gives(
         self, tmp_path: Path,
     ) -> None:
-        """dataset_description.json gets License/Authors/etc. as TODO.
+        """dataset_description.json is marked by the schema's levels, nothing else.
 
-        The marker takes the field's own shape: a bare string where the schema
-        wants a string, and a one-element list where it wants an array of them.
-        ``["TODO"]`` is as greppable as ``"TODO"`` and, unlike it, valid.
+        Recommended covers License and, with no CITATION.cff, Authors. Funding,
+        EthicsApprovals and the rest are OPTIONAL since BIDS 1.10: a hand-kept
+        list used to mark them at "recommended", which the Editor then showed
+        as TODOs in optional fields. The marker takes the field's own shape: a
+        string where the schema wants one, a one-element list for an array.
         """
         root = _make_minimal_bids(tmp_path)
-        report = run_metadata(root, fill_todos=True)
+        report = run_metadata(root, fill_scope="recommended")
         dd = json.loads((root / "dataset_description.json").read_text())
-        for field in ("License", "Acknowledgements",
-                      "HowToAcknowledge", "DatasetDOI"):
-            assert dd[field] == "TODO", f"{field!r} not filled"
-        for field in ("Authors", "Funding", "EthicsApprovals",
-                      "ReferencesAndLinks"):
-            assert dd[field] == ["TODO"], f"{field!r} not filled as an array"
-
-        # And dataset_description.json appears in the todo_fills list.
+        assert dd["License"] == "TODO"
+        assert dd["Authors"] == ["TODO"]
+        for field in ("Acknowledgements", "HowToAcknowledge", "DatasetDOI",
+                      "Funding", "EthicsApprovals", "ReferencesAndLinks"):
+            assert field not in dd, f"{field!r} is optional"
         assert any(
             t.sidecar.name == "dataset_description.json"
             for t in report.todo_fills
         )
+
+        run_metadata(root, fill_scope="optional")
+        dd = json.loads((root / "dataset_description.json").read_text())
+        for field in ("Acknowledgements", "HowToAcknowledge", "DatasetDOI"):
+            assert dd[field] == "TODO", f"{field!r} not filled"
+        for field in ("Funding", "EthicsApprovals", "ReferencesAndLinks"):
+            assert dd[field] == ["TODO"], f"{field!r} not filled as an array"
+
+    def test_a_citation_file_keeps_its_fields_out_of_the_description(
+        self, tmp_path: Path,
+    ) -> None:
+        """With CITATION.cff, Authors in the description is an error and
+        License, HowToAcknowledge and ReferencesAndLinks a warning. A
+        placeholder must not bring them back, at any scope, and one an
+        earlier run wrote is taken back."""
+        root = _make_minimal_bids(tmp_path)
+        run_metadata(root, fill_scope="optional")
+        (root / "CITATION.cff").write_text("cff-version: 1.2.0\n")
+        report = run_metadata(root, fill_scope="optional")
+        dd = json.loads((root / "dataset_description.json").read_text())
+        for field in ("Authors", "License", "HowToAcknowledge",
+                      "ReferencesAndLinks"):
+            assert field not in dd, field
+        assert dd["Funding"] == ["TODO"]
+        taken = next(t for t in report.todo_removed
+                     if t.sidecar.name == "dataset_description.json")
+        assert "Authors" in taken.fields
 
     def test_dataset_description_existing_values_preserved(
         self, tmp_path: Path,
@@ -593,7 +619,7 @@ class TestFillTodos:
         root = _make_minimal_bids(tmp_path)
         meta = DatasetMetadata(name="study", license="CC0",
                                authors=["Alice"])
-        run_metadata(root, fill_todos=True, dataset_meta=meta)
+        run_metadata(root, fill_scope="optional", dataset_meta=meta)
         dd = json.loads((root / "dataset_description.json").read_text())
         assert dd["License"] == "CC0"
         assert dd["Authors"] == ["Alice"]
@@ -609,8 +635,8 @@ class TestFillTodos:
         root.mkdir()
         _write_pair(root / "sub-001" / "fmap", "sub-001_phase2", sidecar={})
 
-        run_metadata(root, fill_todos=True)
-        report2 = run_metadata(root, fill_todos=True)
+        run_metadata(root, fill_scope="recommended")
+        report2 = run_metadata(root, fill_scope="recommended")
 
         # Second run reports zero new TODO insertions for that sidecar.
         sidecar = root / "sub-001" / "fmap" / "sub-001_phase2.json"

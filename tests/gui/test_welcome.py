@@ -154,20 +154,55 @@ def test_resources_card_lists_links(qtbot, isolated_settings) -> None:
     links = [
         l for l in panel.findChildren(QLabel) if l.objectName() == "welcome-link"
     ]
-    # 3 resource links + 6 sample datasets + 1 link to the section that
-    # compares them + 1 update-notes link = 11 clickable links, all external.
-    assert len(links) == 11
-    assert all(l.openExternalLinks() for l in links)
+    # 3 resource links + 1 link to the section that compares the samples +
+    # What's new (opens the dialog) + the update notes = 6 links; the six
+    # samples are a menu now, not six links.
+    assert len(links) == 6
+    external = [l for l in links if l.openExternalLinks()]
+    assert len(external) == 5
     hrefs = " ".join(l.text() for l in links)
     assert "bids_manager_documentation" in hrefs       # docs site
     assert "github.com/ANCPLabOldenburg" in hrefs       # source
-    assert "cloud.uol.de" in hrefs                       # sample data, direct
-    assert "tutorial.html#datasets" in hrefs             # sample data, compared
-    assert "updates.html" in hrefs                       # update notes
+    assert "start/sample-data/" in hrefs                 # sample data, compared
+    assert "updates/" in hrefs                           # update notes
+    assert "cloud.uol.de" not in hrefs                   # the samples are in the menu
     # Raw URLs never show as the visible text: friendly labels only.
     assert ">Documentation website<" in hrefs
-    assert ">MEG Elekta sample dataset<" in hrefs
     assert ">Compare them, and see what each one demonstrates<" in hrefs
+
+
+def test_sample_datasets_are_one_dropdown(qtbot, isolated_settings, monkeypatch) -> None:
+    """Six downloads behind one button: the card no longer runs past the fold."""
+    from bidsmgr.gui import welcome_panel as wp
+
+    opened = []
+    monkeypatch.setattr(wp.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()))
+    panel = WelcomePanel()
+    qtbot.addWidget(panel)
+    menu = panel._samples_button.menu()
+    actions = menu.actions()
+    assert [a.text() for a in actions] == [label for label, _url in wp._SAMPLE_DATASETS]
+    assert [a.data() for a in actions] == [url for _label, url in wp._SAMPLE_DATASETS]
+    assert "MEG Elekta sample dataset" in [a.text() for a in actions]
+    actions[0].trigger()
+    assert opened == [wp._SAMPLE_DATASETS[0][1]]
+
+
+def test_whats_new_reopens_the_announcement(qtbot, isolated_settings, monkeypatch) -> None:
+    from PyQt6.QtWidgets import QLabel
+
+    from bidsmgr.gui import whats_new
+
+    shown = []
+    monkeypatch.setattr(whats_new, "show_dialog", lambda parent: shown.append(parent))
+    panel = WelcomePanel()
+    qtbot.addWidget(panel)
+    link = next(l for l in panel.findChildren(QLabel)
+                if l.objectName() == "welcome-link" and l.property("link_url") == "#whats-new")
+    assert not link.openExternalLinks()
+    assert f"BIDS Manager {whats_new.NEWS_FOR}" in link.text()
+    link.linkActivated.emit("#whats-new")
+    assert len(shown) == 1
 
 
 def test_recent_rows_carry_name_and_path(qtbot, isolated_settings, tmp_path) -> None:

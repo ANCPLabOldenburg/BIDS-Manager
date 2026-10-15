@@ -21,6 +21,9 @@ so the two halves agree. Three rules keep it from taking anything away:
 * **Selection still happens.** This runs on ``itemClicked``, which Qt emits
   after the selection has moved, so clicking a folder selects it AND folds
   it. The Editor's "Validate folder" still has something to act on.
+* **Not on a checkbox.** Qt reports a click on a row's check indicator as a
+  click on the row, so ticking a subject in the Filter tree would fold it
+  too. A press that lands on the indicator ticks and nothing else.
 
 A double click is ONE toggle, not two and not none. Qt is supposed to
 suppress ``clicked`` on the release that completes a double click, which
@@ -34,8 +37,8 @@ slower second click still folds the row back.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QElapsedTimer, QObject, Qt
-from PyQt6.QtWidgets import QApplication, QTreeWidget, QTreeWidgetItem
+from PyQt6.QtCore import QElapsedTimer, QEvent, QObject, QPoint, Qt
+from PyQt6.QtWidgets import QApplication, QStyle, QTreeWidget, QTreeWidgetItem
 
 #: Held down, these mean "extend the selection", not "open this folder".
 _SELECTION_MODIFIERS = (
@@ -54,9 +57,33 @@ class _ClickToggle(QObject):
 
     def __init__(self, tree: QTreeWidget) -> None:
         super().__init__(tree)
+        self._tree = tree
         self._last_item: object = None
         self._since = QElapsedTimer()
+        self._on_check = False
+        tree.viewport().installEventFilter(self)
         tree.itemClicked.connect(self.on_click)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt signature
+        """Note whether the press landed on a check indicator. Never eats it."""
+        if event.type() == QEvent.Type.MouseButtonPress:
+            self._on_check = self._hits_check(event.position().toPoint())
+        return False
+
+    def _hits_check(self, pos: QPoint) -> bool:
+        """Is ``pos`` on the check indicator of a checkable row?
+
+        The indicator is drawn first in the row, so the test is how far into
+        the row the press is, measured with the style's own indicator size.
+        """
+        tree = self._tree
+        index = tree.indexAt(pos)
+        if not index.isValid() or not (index.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            return False
+        style = tree.style()
+        reach = (style.pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth)
+                 + 2 * style.pixelMetric(QStyle.PixelMetric.PM_FocusFrameHMargin) + 4)
+        return 0 <= pos.x() - tree.visualRect(index).left() <= reach
 
     def on_click(self, item: QTreeWidgetItem, _column: int = 0) -> None:
         # ``childCount`` rather than "is this a directory": it is precisely
@@ -64,6 +91,8 @@ class _ClickToggle(QObject):
         # ``.ds``, an EGI ``.mff``) is a directory on disk that the tree
         # draws as a recording, and clicking it stays a plain selection.
         if item is None or item.childCount() == 0:
+            return
+        if self._on_check:
             return
         if QApplication.keyboardModifiers() & _SELECTION_MODIFIERS:
             return

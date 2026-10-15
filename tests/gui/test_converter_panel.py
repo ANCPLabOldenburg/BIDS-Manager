@@ -20,7 +20,6 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from PyQt6.QtCore import Qt
 
 from bidsmgr.gui.converter_panel import ConverterPanel
 from bidsmgr.gui.models import COLUMNS
@@ -345,36 +344,31 @@ def test_panel_uses_attached_project_for_edits(qtbot, tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_bottom_dock_split_layout(qtbot) -> None:
-    """Bottom dock is a horizontal splitter of two detach-only PanelFrames,
-    each wrapping a QTabWidget: Log on the left, BIDS preview + Statistics
-    on the right. The whole dock is wrapped in a collapse-to-bottom frame.
-    """
+def test_the_dock_is_the_log(qtbot) -> None:
+    """Under the columns there is one card, the Log: one header carrying its
+    buttons, folded from that header, detachable. The Preview panel that
+    repeated Filter / structure is gone (its Statistics became the
+    Inspection's Overview)."""
+    from PyQt6.QtWidgets import QTabWidget, QWidget
+
+    from bidsmgr.gui.widgets.panel_frame import HEADER_EXTRAS
+
     panel = ConverterPanel()
     qtbot.addWidget(panel)
-
-    # The dock's two tab groups are wrapped in detach PanelFrames; read the
-    # tab titles directly off the (kept) QTabWidget references.
-    left_tabs = panel._left_tabs
-    right_tabs = panel._right_tabs
-    left_titles = [left_tabs.tabText(i) for i in range(left_tabs.count())]
-    right_titles = [right_tabs.tabText(i) for i in range(right_tabs.count())]
-    assert any("Log" in t for t in left_titles)
-    # The Conflicts tab was removed; Log is the only left-hand tab now.
-    assert not any("Conflicts" in t for t in left_titles)
-    assert any("BIDS preview" in t for t in right_titles)
-    assert any("Statistics" in t for t in right_titles)
-
-    # The Log + preview groups are each independently detachable, and the
-    # whole dock collapses toward the bottom.
-    assert panel._log_frame.is_detached() is False
-    assert panel._preview_frame.is_detached() is False
-    panel._log_frame.detach()
-    assert panel._log_frame.is_detached() is True
-    panel._log_frame.reattach()
-    assert panel._dock_frame.is_collapsed() is False
-    panel._dock_frame.set_collapsed(True)
-    assert panel._dock_frame.is_collapsed() is True
+    frame = panel._log_frame
+    assert frame._title == "Log"
+    assert frame.property("card") is True
+    assert frame.findChild(QTabWidget) is None
+    assert frame._bar.findChild(QWidget, HEADER_EXTRAS) is not None
+    assert not hasattr(panel, "_preview_frame") and not hasattr(panel, "_bids_preview")
+    assert frame.is_detached() is False
+    frame.detach()
+    assert frame.is_detached() is True
+    frame.reattach()
+    assert frame.is_collapsed() is False
+    frame.set_collapsed(True)
+    assert frame.is_collapsed() is True
+    assert not panel._log_view.isVisible()
 
 
 def test_log_tab_appends_progress_messages(qtbot) -> None:
@@ -390,58 +384,51 @@ def test_log_tab_appends_progress_messages(qtbot) -> None:
     assert "second line" in text
 
 
-def test_bids_preview_rebuilds_from_model(qtbot, tmp_path: Path) -> None:
-    panel = ConverterPanel()
-    qtbot.addWidget(panel)
-    df = pd.DataFrame([_func_row()])
-    panel.load_inventory(df, output_tsv=tmp_path / "inv.tsv")
-
-    # The preview tree should have at least one top-level node and the
-    # basename should appear somewhere in it.
-    tree = panel._bids_preview
-    assert tree.topLevelItemCount() >= 1
+def _leaf_texts(tree, *, shown_only: bool = False) -> list[str]:
+    out = []
 
     def walk(item):
-        yield item.text(0)
+        if shown_only and item.isHidden():
+            return
+        if item.childCount() == 0:
+            out.append(item.text(0))
         for i in range(item.childCount()):
-            yield from walk(item.child(i))
+            walk(item.child(i))
 
-    text = "\n".join(
-        line for i in range(tree.topLevelItemCount()) for line in walk(tree.topLevelItem(i))
-    )
-    assert "sub-001_ses-pre_task-rest_bold" in text
+    for i in range(tree.topLevelItemCount()):
+        walk(tree.topLevelItem(i))
+    return out
 
 
-def test_bids_preview_omits_skipped_rows(qtbot, tmp_path: Path) -> None:
+def test_the_filter_tree_names_what_will_be_written(qtbot, tmp_path: Path) -> None:
+    """What the BIDS preview showed, the Filter tree shows: its leaves are
+    the BIDS names, and Hide rows left out leaves only what is written."""
     panel = ConverterPanel()
     qtbot.addWidget(panel)
     skipped = _func_row()
     skipped["include"] = 0
     skipped["series_uid"] = "9.9.9"
-    skipped["bids_name"] = "should-not-appear"
-    df = pd.DataFrame([_func_row(), skipped])
-    panel.load_inventory(df, output_tsv=tmp_path / "inv.tsv")
-
-    def walk(item):
-        yield item.text(0)
-        for i in range(item.childCount()):
-            yield from walk(item.child(i))
-
-    tree = panel._bids_preview
-    text = "\n".join(
-        line for i in range(tree.topLevelItemCount()) for line in walk(tree.topLevelItem(i))
-    )
-    assert "should-not-appear" not in text
+    skipped["bids_name"] = "sub-001_ses-pre_task-left_bold"
+    skipped["task"] = "left"
+    skipped["entities"] = json.dumps({"subject": "001", "session": "pre", "task": "left"})
+    panel.load_inventory(pd.DataFrame([_func_row(), skipped]), output_tsv=tmp_path / "inv.tsv")
+    tree = panel._filter_pane._tree
+    assert "sub-001_ses-pre_task-rest_bold" in _leaf_texts(tree)
+    assert "sub-001_ses-pre_task-left_bold" in _leaf_texts(tree), "shown, unticked"
+    panel._filter_pane.hide_left_out_btn.setChecked(True)
+    assert _leaf_texts(tree, shown_only=True) == ["sub-001_ses-pre_task-rest_bold"]
 
 
-def test_stats_label_updates_on_load(qtbot, tmp_path: Path) -> None:
+def test_the_overview_counts_on_load(qtbot, tmp_path: Path) -> None:
     panel = ConverterPanel()
     qtbot.addWidget(panel)
-    df = pd.DataFrame([_func_row()])
-    panel.load_inventory(df, output_tsv=tmp_path / "inv.tsv")
-    text = panel._stats_label.text()
-    assert "1 rows" in text
-    assert "1 subjects" in text
+    panel.show()
+    panel.set_inspection_view("overview")
+    panel.load_inventory(pd.DataFrame([_func_row()]), output_tsv=tmp_path / "inv.tsv")
+    qtbot.waitUntil(lambda: panel._overview.overview() is not None, timeout=5000)
+    ov = panel._overview.overview()
+    assert (ov.subjects, ov.sessions, ov.recordings) == (1, 1, 1)
+    assert panel._overview._tiles["subjects"].number.text() == "1"
 
 
 # ---------------------------------------------------------------------------

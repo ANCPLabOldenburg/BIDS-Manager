@@ -25,7 +25,6 @@ from typing import Optional, Sequence
 
 from PyQt6.QtWidgets import (
     QDialog,
-    QHBoxLayout,
     QLabel,
     QPushButton,
     QVBoxLayout,
@@ -33,9 +32,8 @@ from PyQt6.QtWidgets import (
 )
 
 from .deface_compare import size_to_screen
-from .widgets.compare_panes import ComparePanes
+from .viz.compare import ComparePanes
 from .widgets.nifti_picker import ask_for_image, is_nifti
-from .widgets.primitives import ElidedLabel
 
 log = logging.getLogger(__name__)
 
@@ -69,8 +67,8 @@ class CompareDialog(QDialog):
         outer.addWidget(header)
 
         subtitle = QLabel(
-            "One set of controls drives both: crosshair, slice, plane, "
-            "volume, 4-D graph, 3-D camera, effects and the cut plane. "
+            "One toolbar and one column of advanced controls drive both: crosshair, slice, "
+            "plane, volume, 4-D graph, 3-D camera, effects and the cut plane. "
             "Images of different sizes work too: the crosshair is matched by "
             "position in the scanner, not by voxel."
         )
@@ -78,17 +76,14 @@ class CompareDialog(QDialog):
         subtitle.setWordWrap(True)
         outer.addWidget(subtitle)
 
-        pickers = QHBoxLayout()
-        pickers.setSpacing(8)
-        self._left_label, left_btn = self._picker(pickers, "Left", self._pick_left)
-        self._right_label, right_btn = self._picker(
-            pickers, "Right", self._pick_right
-        )
-        outer.addLayout(pickers)
-        self._left_btn, self._right_btn = left_btn, right_btn
-
         self._panes = ComparePanes()
         outer.addWidget(self._panes, 1)
+        # Each half chooses its own image, in its own header: the two halves
+        # look the same, so neither reads as the main one.
+        self._left_btn = self._panes.add_chooser(
+            "left", self._pick_left, "Choose the image on the left")
+        self._right_btn = self._panes.add_chooser(
+            "right", self._pick_right, "Choose the image on the right")
 
         close = QPushButton("Close")
         close.clicked.connect(self.reject)
@@ -99,16 +94,6 @@ class CompareDialog(QDialog):
             self._show()
 
     # -- picking ----------------------------------------------------------
-
-    def _picker(self, row: QHBoxLayout, side: str, slot):
-        button = QPushButton(f"Choose {side.lower()}…")
-        button.setObjectName("tb-btn")
-        button.clicked.connect(slot)
-        row.addWidget(button)
-        label = ElidedLabel("")
-        label.setObjectName("dlg-hint")
-        row.addWidget(label, 1)
-        return label, button
 
     def _ask(self, side: str) -> Optional[Path]:
         """The dataset's own images, in a tree, with a filter box.
@@ -142,10 +127,9 @@ class CompareDialog(QDialog):
             self._show()
 
     def _refresh_labels(self) -> None:
-        for label, path in (
-            (self._left_label, self._left), (self._right_label, self._right),
-        ):
-            label.setText(self._describe(path) if path else "nothing chosen yet")
+        for side, path in (("left", self._left), ("right", self._right)):
+            self._panes.set_caption(
+                side, self._describe(path) if path else "nothing chosen yet")
 
     def _describe(self, path: Path) -> str:
         """The dataset-relative path when there is one, else the name."""
@@ -161,11 +145,21 @@ class CompareDialog(QDialog):
     # -- showing ----------------------------------------------------------
 
     def _show(self) -> None:
-        self._panes.show_images(
-            self._left, self._right, root=self._root,
-            left_title=f"Left: {self._describe(self._left)}",
-            right_title=f"Right: {self._describe(self._right)}",
-        )
+        self._panes.show_images(self._left, self._right, root=self._root)
+
+    @property
+    def panes(self) -> ComparePanes:
+        """The two linked viewers."""
+        return self._panes
+
+    @property
+    def chosen(self) -> tuple[Optional[Path], Optional[Path]]:
+        """The left and right image, as picked so far."""
+        return self._left, self._right
+
+    def captions(self) -> tuple[str, str]:
+        """What the two halves' headers say."""
+        return self._panes.caption("left"), self._panes.caption("right")
 
     # -- closing ----------------------------------------------------------
 

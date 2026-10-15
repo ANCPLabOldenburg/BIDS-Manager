@@ -43,6 +43,14 @@ class ConvertTask(BaseModel):
     session: Optional[str] = None
     datatype: str
     suffix: str
+    #: The inventory's ``modality`` (``mri``, ``eeg``, ``meg``, ``pet``, ...):
+    #: which source data a task is, for keeping it in ``sourcedata/``.
+    modality: str = ""
+    #: Eye tracking: what the file cannot say (``screen_size`` [w, h] and
+    #: ``screen_distance`` in m, ``screen_origin``, ``eye_tracker_distance``,
+    #: ``sync_message`` or ``start_time``), resolved from the recording
+    #: metadata (``recording_meta.EyetrackSpec``).
+    eyetrack: dict[str, Any] = Field(default_factory=dict)
     entities: dict[str, str] = Field(default_factory=dict)
     basename: str
     expected_outputs: tuple[str, ...] = (".nii.gz", ".json")
@@ -81,6 +89,9 @@ class ConvertTask(BaseModel):
     # The file is named ``<entity_prefix>_<suffix><ext>`` next to the
     # recording; an attached ``events`` replaces the auto-generated events.tsv.
     companion_files: tuple[tuple[str, str], ...] = ()
+    #: For a fieldmap: the row ids of the runs the USER chose for it to
+    #: correct (``fieldmap_targets`` in the inventory); empty = the rule.
+    fieldmap_targets: tuple[str, ...] = ()
 
     @model_validator(mode="before")
     @classmethod

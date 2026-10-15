@@ -214,9 +214,16 @@ class _TopHeader(QFrame):
         self._pill_group.addButton(self._converter_btn, 0)
         self._pill_group.addButton(self._editor_btn, 1)
         self._pill_group.idClicked.connect(self._on_pill_clicked)
-        h.addWidget(self._welcome_btn)
-        h.addWidget(self._converter_btn)
-        h.addWidget(self._editor_btn)
+        # The three views as one segmented control: a track with the chosen
+        # view raised in it.
+        track = QFrame()
+        track.setObjectName("nav-track")
+        tl = QHBoxLayout(track)
+        tl.setContentsMargins(3, 3, 3, 3)
+        tl.setSpacing(2)
+        for btn in (self._welcome_btn, self._converter_btn, self._editor_btn):
+            tl.addWidget(btn)
+        h.addWidget(track)
 
         # Project switcher (PyCharm-style), set apart from the Editor pill.
         # Shows the current dataset name + a project icon; its dropdown lists
@@ -260,18 +267,14 @@ class _TopHeader(QFrame):
         self._settings_btn.clicked.connect(self.settings_requested.emit)
         h.addWidget(self._settings_btn)
 
-        # Icon-only toggle. ``sun`` glyph in dark mode (click to lighten),
-        # ``moon`` glyph in light mode (click to darken). Re-tinted in
-        # ``repaint_for_palette`` on every theme swap.
+        # The theme: a menu of every theme, each with a swatch. The glyph
+        # says which kind is on (a sun in a dark theme, a moon in a light
+        # one); re-tinted in ``repaint_for_palette`` on every change.
         self._theme_btn = QPushButton()
         self._theme_btn.setObjectName("theme-toggle")
-        self._theme_btn.setToolTip("Toggle light / dark theme")
         self._theme_btn.setFixedSize(32, 28)
-        icons.apply_button(
-            self._theme_btn,
-            "sun" if theme.name == "dark" else "moon",
-        )
-        self._theme_btn.clicked.connect(self._on_toggle)
+        self._sync_theme_button()
+        self._theme_btn.clicked.connect(self._open_theme_menu)
         h.addWidget(self._theme_btn)
 
     def set_active_view(self, view: str) -> None:
@@ -375,12 +378,31 @@ class _TopHeader(QFrame):
         self._project_menu.close()
         self.project_switch_requested.emit(path)
 
-    def _on_toggle(self) -> None:
-        from .app_settings import AppSettings
+    def _sync_theme_button(self) -> None:
         from . import icons
-        new = self._theme.toggle()
-        icons.apply_button(self._theme_btn, "sun" if new == "dark" else "moon")
-        AppSettings.remember_theme(new)
+        from .theme_manager import theme_info
+
+        info = theme_info(self._theme.name)
+        icons.apply_button(self._theme_btn, "sun" if info.dark else "moon")
+        self._theme_btn.setToolTip(f"Theme: {info.label}. Click to choose another.")
+
+    def _open_theme_menu(self) -> None:
+        from PyQt6.QtCore import QPoint
+
+        from .theme_menu import build_theme_menu
+
+        self._theme_menu = build_theme_menu(self, self._theme.name, self.choose_theme)
+        self._theme_menu.popup(self._theme_btn.mapToGlobal(
+            QPoint(self._theme_btn.width() - self._theme_menu.sizeHint().width(),
+                   self._theme_btn.height() + 4)))
+
+    def choose_theme(self, theme_id: str) -> None:
+        """Apply ``theme_id`` and remember it."""
+        from .app_settings import AppSettings
+
+        self._theme.apply(theme_id)
+        self._sync_theme_button()
+        AppSettings.remember_theme(self._theme.name)
 
     @staticmethod
     def _largest_app_icon(assets: Path) -> Path:
@@ -482,10 +504,7 @@ class _TopHeader(QFrame):
         from . import icons
         icons.apply_button(self._settings_btn, "settings")
         icons.apply_button(self._project_btn, "project")
-        icons.apply_button(
-            self._theme_btn,
-            "sun" if self._theme.name == "dark" else "moon",
-        )
+        self._sync_theme_button()
 
 
 class MainWindow(QMainWindow):
@@ -535,6 +554,13 @@ class MainWindow(QMainWindow):
         self._header.about_requested.connect(self._show_about_dialog)
         self._header.settings_requested.connect(self._open_settings)
         self.welcome.project_opened.connect(self._on_project_opened)
+        # A folder that is not a BIDS dataset, chosen on Welcome to look at.
+        self.welcome.view_requested.connect(self._on_view_folder)
+        # The Editor's Open folder chose a BIDS dataset as the project.
+        self.editor.open_project_requested.connect(self._on_editor_open_project)
+        # The open project is never deleted from the Recent list.
+        self._project_root: Optional[Path] = None
+        self.welcome.current_project = lambda: self._project_root
         # Project-switcher dropdown: opening a recent reuses the Welcome
         # open-project flow (which re-emits project_opened -> _on_project_opened).
         self._header.project_switch_requested.connect(self._on_switch_project)
@@ -598,6 +624,7 @@ class MainWindow(QMainWindow):
             # Font scale first, then theme — a single Save can change both
             # and the theme re-apply re-substitutes the scaled QSS template.
             self.apply_font_scale(s.font_scale)
+            self._theme.set_appearance(s.appearance(), apply=False)
             self.apply_theme(s.theme)
             reload_fn = getattr(self.converter, "reload_app_settings", None)
             if callable(reload_fn):
@@ -703,21 +730,50 @@ class MainWindow(QMainWindow):
         Editor is pointed at the same root so both views work inside the project.
         """
         self._project = project
+        self._project_root = Path(bids_root)
         self.converter.set_project(project, Path(bids_root))
-        # Point the Editor at the same root so both views work inside the
-        # project. ``_set_root`` is the Editor's open-root primitive.
-        set_root = getattr(self.editor, "_set_root", None)
-        if callable(set_root):
-            try:
-                set_root(Path(bids_root), persist=False)
-            except Exception as exc:  # never block entering the project
-                log.warning("editor could not open %s: %s", bids_root, exc)
+        # The Editor shows the same dataset, editable: it is the project.
+        try:
+            self.editor.set_project_root(Path(bids_root))
+        except Exception as exc:  # never block entering the project
+            log.warning("editor could not open %s: %s", bids_root, exc)
         # Reveal + label the header project switcher.
         from .welcome_panel import _dataset_display_name
         self._header.set_active_project(
             _dataset_display_name(Path(bids_root)), Path(bids_root),
         )
-        self._apply_active_view("converter", persist=True)
+        self._apply_active_view(self._view_after_opening(Path(bids_root)), persist=True)
+
+    def _view_after_opening(self, bids_root: Path) -> str:
+        """Where a newly opened project lands. Switched from the Converter or
+        the Editor (the header's project switcher, the Editor's Open folder),
+        the user stays where they are. From Welcome, a dataset with nothing
+        converted yet goes to the Converter, which is all it can use; one with
+        subjects goes to the view last worked in."""
+        current = {0: "converter", 1: "editor"}.get(self.stack.currentIndex())
+        if current is not None:
+            return current
+        from .app_settings import AppSettings
+
+        has_data = any(p.is_dir() and p.name.startswith("sub-")
+                       for p in bids_root.iterdir()) if bids_root.is_dir() else False
+        return AppSettings.load().active_view if has_data else "converter"
+
+    def _on_editor_open_project(self, path: Path) -> None:
+        """The Editor's Open folder chose a BIDS dataset as the project."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        try:
+            self.welcome.open_project(Path(path))
+        except Exception as exc:  # noqa: BLE001 - said, never swallowed
+            log.warning("could not open %s as a project: %s", path, exc)
+            QMessageBox.warning(self, "Not opened",
+                                f"{path} could not be opened as a project:\n\n{exc}")
+
+    def _on_view_folder(self, path: Path) -> None:
+        """A folder to look at, not a project: the Editor shows it read only."""
+        self.editor.view_folder(Path(path))
+        self._apply_active_view("editor", persist=True)
 
     def _on_switch_project(self, path: Path) -> None:
         """A recent project was chosen from the header switcher.
@@ -745,6 +801,10 @@ class MainWindow(QMainWindow):
         # new palette instead of returning a cached previous-theme icon.
         from . import icons
         icons.refresh_for_palette(pal)
+        # Every library viewer, in this window or in any dialog, follows
+        # the theme through one hub (pyqtgraph and GL read no QSS).
+        from .viz.bridge import ThemeHub
+        ThemeHub.instance().publish(pal)
         # Brand logo gradient — rebuilt from the new palette.
         self._header.repaint_for_palette(pal)
         # Cascade into the Converter and Editor panels.

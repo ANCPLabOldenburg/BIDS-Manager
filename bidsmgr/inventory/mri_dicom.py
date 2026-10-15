@@ -26,6 +26,7 @@ no Pipeline orchestrator).
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections import defaultdict
@@ -42,7 +43,11 @@ from ..classifier.sequence_dict import (
     guess_sequence_kind,
     normalize_study_name,
 )
+from ..classifier.acquisition import features as acquisition_features
+from ..classifier.acquisition.features import file_facts
 from .subject_identity import IdentityTuple, cluster_subjects, normalize_tuple
+
+log = logging.getLogger(__name__)
 
 
 DICOM_EXTS = (".dcm", ".ima")
@@ -451,6 +456,9 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
         "study_date": study_date,
         "study_time": study_time,
         "has_pixels": has_pixels,
+        # What varies across the series' files and the classifier reads
+        # (echo time, b-value, orientation, ...): cheap, from this header.
+        "acq_facts": file_facts(ds),
         # The DICOM Modality tag (PT, CT, MR, ...). PET classification keys on
         # it, and a PET/CT or PET/MR study is exactly where a series' modality
         # cannot be inferred from the series description alone.
@@ -469,6 +477,15 @@ def _read_one(fpath: str, root_dir: Path) -> Optional[dict]:
             "StudyDescription": study,
         },
     }
+
+
+def _series_facts_of(path: str) -> dict:
+    """One file's series-wide header facts (for the classifier)."""
+    try:
+        ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+        return acquisition_features.series_facts(ds)
+    except Exception:  # noqa: BLE001 - a series without facts scores on its name
+        return {}
 
 
 def scan_dicoms_long(
@@ -524,6 +541,11 @@ def scan_dicoms_long(
     # ``probe_convert`` to symlink just one series's files into a per-row
     # work directory before invoking dcm2niix.
     files_by_uid: dict[str, list[str]] = defaultdict(list)
+    # Per-series acquisition facts of every file, for the parameter-based
+    # classifier (``classifier/acquisition``), and one file to read the
+    # series-wide (private) header from.
+    acq_facts: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    first_file: dict = defaultdict(lambda: defaultdict(dict))
     demo: dict = {}
 
     file_list: list[str] = []
@@ -573,6 +595,9 @@ def scan_dicoms_long(
             acq_times[subj_key][folder][key] = res["acq_time"]
         if key not in file_dirs[subj_key][folder]:
             file_dirs[subj_key][folder][key] = res["file_dir"]
+        if res.get("acq_facts"):
+            acq_facts[subj_key][folder][key].append(res["acq_facts"])
+        first_file[subj_key][folder].setdefault(key, res["file_path"])
         haspix[subj_key][folder][key] = (
             haspix[subj_key][folder].get(key, False) or bool(res.get("has_pixels"))
         )
@@ -657,6 +682,25 @@ def scan_dicoms_long(
             tup: f"ses-{idx + 1:d}" for idx, tup in enumerate(ordered)
         }
 
+    # The classifier's view of each series: its files' facts and one file's
+    # series-wide header (Siemens CSA and protocol included), read once per
+    # series on the same workers.
+    firsts = [(s, f, k, p) for s, by_folder in first_file.items()
+              for f, by_key in by_folder.items() for k, p in by_key.items()]
+    series_headers = run_parallel(
+        lambda: (delayed(_series_facts_of)(p) for _s, _f, _k, p in firsts),
+        n_jobs=n_jobs, consume=_collect, return_as="generator",
+    )
+    features: dict = defaultdict(lambda: defaultdict(dict))
+    for (s, f, k, _p), header in zip(firsts, series_headers):
+        try:
+            features[s][f][k] = acquisition_features.build(
+                acq_facts[s][f].get(k, []), header or {}, n_files=counts[s][f][k],
+            ).to_dict()
+        except Exception as exc:  # noqa: BLE001 - one odd series must not stop a scan
+            log.debug("acquisition features failed for %s: %s", k, exc)
+            features[s][f][k] = {}
+
     # Build rows.
     rows: list[dict] = []
     for subj_key in sorted(counts):
@@ -718,10 +762,17 @@ def scan_dicoms_long(
                     ),
                     "_pet_tags": pet_tags[subj_key][folder].get((series, uid), {}),
                     "_mrs_tags": mrs_tags[subj_key][folder].get((series, uid), {}),
+                    # Internal: how the series was acquired, for the
+                    # parameter-based classifier (cached beside the TSV).
+                    "_features": features[subj_key][folder].get((series, uid), {}),
                     **demo[subj_key],
                 })
 
     df = pd.DataFrame(rows)
+    # Every series' acquisition features by its UID, before the fieldmap
+    # collapse folds two series into one row (the classifier reads both).
+    features_by_uid = {r["series_uid"]: r["_features"] for r in rows
+                       if r.get("series_uid") and r.get("_features")}
 
     # Collapse magnitude/phase rows for fieldmaps (v0.2.5 behaviour).
     if not df.empty:
@@ -751,6 +802,7 @@ def scan_dicoms_long(
     # sequence without re-walking the disk. ``DataFrame.attrs`` survives
     # standard pandas ops (slicing, copy, to_csv).
     df.attrs["files_by_uid"] = {k: list(v) for k, v in files_by_uid.items()}
+    df.attrs["features_by_uid"] = features_by_uid
 
     visible_columns = (
         [c for c in TSV_COLUMNS if c in df.columns]

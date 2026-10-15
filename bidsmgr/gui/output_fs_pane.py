@@ -49,6 +49,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import icons
+from .icons import color_token_for
 from .theme_manager import CUR
 from .widgets import PaneHeader
 from .widgets.tree_click import toggle_on_click
@@ -79,22 +80,6 @@ _IS_DIR_ROLE = Qt.ItemDataRole.UserRole + 2
 _NODE_ROLE = Qt.ItemDataRole.UserRole + 3
 #: Marks the single stand-in child that keeps the expander arrow alive.
 _PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 4
-
-
-def _color_token_for(path_name: str) -> str:
-    """Pick the palette token used to color a leaf file.
-
-    Mirrors the BIDS-preview tree in the bottom dock: nii.gz = text,
-    json = purple, tsv = teal, anything else = dim.
-    """
-    lower = path_name.lower()
-    if lower.endswith(".nii.gz") or lower.endswith(".nii"):
-        return "text"
-    if lower.endswith(".json"):
-        return "purple"
-    if lower.endswith(".tsv") or lower.endswith(".tsv.gz"):
-        return "teal"
-    return "dim"
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +201,7 @@ def _walk_dir(
         if entry.name in _SKIP_DIRS:
             continue
         if entry.is_dir():
-            node = _TreeNode(name=entry.name, is_dir=True, color_token="accent")
+            node = _TreeNode(name=entry.name, is_dir=True, color_token="tree_folder")
             parent.children.append(node)
             dirs.append(entry.path)
             _walk_dir(Path(entry.path), node, depth=depth + 1, dirs=dirs)
@@ -224,7 +209,7 @@ def _walk_dir(
             node = _TreeNode(
                 name=entry.name,
                 is_dir=False,
-                color_token=_color_token_for(entry.name),
+                color_token=color_token_for(entry.name),
             )
             parent.children.append(node)
 

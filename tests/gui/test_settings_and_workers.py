@@ -97,14 +97,14 @@ def test_settings_dialog_save_writes_through(isolated_settings, qtbot) -> None:
     dlg = SettingsDialog(s)
     qtbot.addWidget(dlg)
     # Mutate a few controls then trigger _on_save.
-    dlg._theme_combo.setCurrentText("light")
+    dlg._theme_combo.setCurrentIndex(dlg._theme_combo.findData("nord"))
     dlg._scan_jobs.setValue(4)
     dlg._scan_probe.setChecked(True)
     dlg._post_run_metadata.setChecked(False)
     dlg._on_save()
 
     reloaded = AppSettings.load()
-    assert reloaded.theme == "light"
+    assert reloaded.theme == "nord"
     assert reloaded.scan_n_jobs == 4
     assert reloaded.scan_probe_convert is True
     assert reloaded.post_run_metadata is False

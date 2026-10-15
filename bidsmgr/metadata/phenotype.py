@@ -34,7 +34,7 @@ def _read_table(path: Path) -> Optional[pd.DataFrame]:
         return None
 
 
-def _measure_name(stem: str) -> str:
+def measure_name(stem: str) -> str:
     """Sanitise a file stem into a BIDS-safe measure label."""
     name = re.sub(r"[^A-Za-z0-9]+", "", stem)
     return name or "measure"
@@ -93,7 +93,7 @@ def write_phenotype(
             continue
 
         pheno_dir.mkdir(parents=True, exist_ok=True)
-        measure = _measure_name(path.stem)
+        measure = measure_name(path.stem)
 
         tsv_out = pheno_dir / f"{measure}.tsv"
         df.to_csv(tsv_out, sep="\t", index=False)
@@ -126,4 +126,4 @@ def write_phenotype(
         )
 
 
-__all__ = ["write_phenotype", "load_sidecar_dictionary"]
+__all__ = ["write_phenotype", "load_sidecar_dictionary", "measure_name"]

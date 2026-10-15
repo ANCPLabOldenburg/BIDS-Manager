@@ -82,14 +82,14 @@ class TestAZeroInversionTime:
         assert read_mrs_header(path)["InversionTime"] == 1.8
 
     def test_the_spectrum_still_reads_after_the_rewrite(self, tmp_path):
-        from bidsmgr.gui.widgets.mrs_spectrum import read_mrs
+        from bidsmgr.viz.data.spectrum import read_mrs
 
         path = _write(tmp_path, {**BASE, "InversionTime": 0, "DwellTime": 0.0005},
                       sidecar={})
         clean_mrs_file(path)
         data = read_mrs(path)
         assert data is not None
-        assert data["nucleus"] == "1H"
+        assert data.nucleus == "1H"
 
 
 class TestIdentifiers:

@@ -115,7 +115,7 @@ class FieldSpec:
     # _accepted_types / _accepts_free_text / _accepts_na, plus the anyOf
     # lookup added to _item_type). NOT in upstream bidsval 0.1.1: it is a
     # local addition, so refreshing this tree wholesale from upstream would
-    # delete it and break bidsmgr.metadata.engine._todo_value_for, which
+    # delete it and break bidsmgr.metadata.engine.todo_value_for, which
     # reads all three. Re-apply it, or better, get it upstream: "which types
     # does this field accept" is a fact about the schema, and CLAUDE.md guard
     # 8 says those are interpreted once, in bidsval. See vendor/README.md.
@@ -320,8 +320,13 @@ def dataset_description_fields(
         rule = _as_mapping(_get(rules, rule_name))
         if "fields" not in rule:
             continue
+        # VENDORED CHANGE (BIDS Manager): the entities are SUPPLIED, not
+        # invented: the path is fixed and carries none. Read as invented, the
+        # atlas description rule (`entities.atlas`) stayed possible and lent a
+        # raw dataset its Description, Curators, Species and the rest.
         state = _rule_applies(
             rule, context, sidecar_supplied=supplied,
+            entities_supplied=True,
             dataset_known=facts is not None,
         )
         if state == "never":
@@ -417,8 +422,13 @@ def invalidate_dataset_cache() -> None:
     A consumer that keeps a process alive across edits (an editor, a GUI) must
     call this when the tree may have changed, or a file added since the last
     call stays invisible.
+
+    VENDORED CHANGE (BIDS Manager): the per-dataset field answers are derived
+    from those facts and memoised separately, so they are dropped too; clearing
+    only the facts left every form reading the old answers.
     """
     _dataset_facts.cache_clear()
+    _sidecar_fields_with_dataset.cache_clear()
 
 
 # ----------------------------------------------------------------------

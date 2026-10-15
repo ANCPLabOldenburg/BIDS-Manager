@@ -56,6 +56,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import icons
+from ..icons import FOLDER_RECORDING_SUFFIXES, color_token_for
 from ..delegates.bids_tree import (
     BADGE_ROLE,
     COUNT_ROLE,
@@ -90,7 +91,6 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 
 # Directories whose contents are *one* BIDS recording — collapse them
 # to a leaf node and stop recursing.
-_FOLDER_RECORDING_SUFFIXES: tuple[str, ...] = (".ds", ".mff")
 
 # Item data roles.
 PATH_ROLE = Qt.ItemDataRole.UserRole          # absolute path string
@@ -106,30 +106,8 @@ PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 7
 # the tree.
 
 
-def _color_token_for(entry_name: str, is_dir: bool) -> str:
-    """Pick the palette token used to color a row.
-
-    Folder-recordings (``.ds`` / ``.mff``) are colored like data files
-    (``text``) even though they're directories on disk, because the
-    user thinks of them as recordings.
-    """
-    lower = entry_name.lower()
-    if is_dir and not lower.endswith(_FOLDER_RECORDING_SUFFIXES):
-        return "accent"
-    if lower.endswith(".nii.gz") or lower.endswith(".nii"):
-        return "text"
-    if lower.endswith(".json"):
-        return "purple"
-    if lower.endswith(".tsv") or lower.endswith(".tsv.gz"):
-        return "teal"
-    if lower.endswith(_FOLDER_RECORDING_SUFFIXES):
-        # CTF .ds / EGI .mff — folder-shaped recordings.
-        return "text"
-    return "dim"
-
-
 def _is_folder_recording(name: str) -> bool:
-    return name.lower().endswith(_FOLDER_RECORDING_SUFFIXES)
+    return name.lower().endswith(FOLDER_RECORDING_SUFFIXES)
 
 
 def _norm_path(p) -> str:
@@ -222,6 +200,7 @@ def _sweep(
     dirs: list[str],
     counts: dict[str, tuple[int, int, int]],
     show_hidden: bool,
+    watchable: bool = True,
 ) -> tuple[int, int]:
     """One scandir pass: every directory, and what is inside each.
 
@@ -240,6 +219,18 @@ def _sweep(
     A directory with nothing visible inside counts as one file, and a
     folder-recording (a CTF ``.ds``, an EGI ``.mff``) counts as one file
     rather than being descended into. Both match what the tree draws.
+
+    ``watchable`` is how a :data:`_SKIP_DIRS` subtree gets DRAWN but never
+    WATCHED. A watch is an open handle on the directory, and conversion
+    stages each subject in ``.tmp_bidsmgr/sub-<id>/`` inside the dataset:
+    on Windows a directory cannot be moved while a handle is open anywhere
+    inside it, so one watch there failed every commit with ``WinError 5``
+    for as long as the pane lived. Measured, with "Show hidden files" on:
+    4 watches land under ``.tmp_bidsmgr`` and the commit is refused;
+    ``removePaths`` and the same commit succeeds. Showing the folder costs
+    nothing, so only the handle is withheld — and on Linux that also stops
+    a transient staging tree from spending the inotify watches ``_watch``
+    is careful to cap.
     """
     if depth >= _MAX_DEPTH:
         return (0, 1)
@@ -257,10 +248,13 @@ def _sweep(
             continue
         seen += 1
         if entry.is_dir() and not _is_folder_recording(entry.name):
-            dirs.append(entry.path)
+            # Machinery, and everything below it: drawn, never handed a watch.
+            child_watchable = watchable and entry.name not in _SKIP_DIRS
+            if child_watchable:
+                dirs.append(entry.path)
             sub_sessions, sub_files = _sweep(
                 Path(entry.path), depth=depth + 1, dirs=dirs, counts=counts,
-                show_hidden=show_hidden,
+                show_hidden=show_hidden, watchable=child_watchable,
             )
             sessions += sub_sessions
             files += sub_files
@@ -379,9 +373,17 @@ class BidsTreePane(QWidget):
     compare_requested = pyqtSignal(list)
     #: Open the references tool on the clicked file. ``list[Path]``, one file.
     links_requested = pyqtSignal(list)
+    #: Draw the clicked image over another: ``(overlay, base)`` paths.
+    overlay_requested = pyqtSignal(object, object)
+    #: The dataset on disk may have changed: a new root, or a refresh after an
+    #: operation or a change the watcher saw. ``Path``, the root.
+    tree_changed = pyqtSignal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        #: The host's answer to "which image would the clicked one go over",
+        #: ``fn(clicked) -> Optional[Path]``. None: no overlay entry.
+        self.overlay_base = None
         self.setObjectName("pane")
         self._root: Optional[Path] = None
         # Remember the last severity badges so a live (watcher-driven) refresh
@@ -475,7 +477,7 @@ class BidsTreePane(QWidget):
         # to grow WILL grow: these two are a fixed-size control, not text.
         from ..theme_manager import scaled_px
         for button in (self._collapse_btn, self._expand_btn):
-            button.setFixedSize(scaled_px(30), scaled_px(22))
+            button.setFixedSize(scaled_px(24), scaled_px(22))
             button.setCursor(Qt.CursorShape.PointingHandCursor)
 
         header_line.addWidget(group, 0)
@@ -508,8 +510,8 @@ class BidsTreePane(QWidget):
         self._tree.customContextMenuRequested.connect(self._on_show_context_menu)
 
         self._hint = QLabel(
-            "No BIDS dataset opened.\n\n"
-            "Use “Open BIDS root…” in the toolbar."
+            "No folder opened.\n\n"
+            "Use “Open folder…” in the toolbar."
         )
         self._hint.setObjectName("pane-hint")
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -601,6 +603,9 @@ class BidsTreePane(QWidget):
         if hasattr(self, "_expand_btn"):
             self._expand_btn.setEnabled(self._next_folded_depth() is not None)
 
+    #: A folder open for viewing: the right-click offers no tool that writes.
+    read_only = False
+
     def set_root(self, path: Optional[Path]) -> None:
         """Switch the tree to a new BIDS root (or clear it with ``None``).
 
@@ -644,6 +649,7 @@ class BidsTreePane(QWidget):
         # to go down anyway.
         self.collapse_all()
         self._stack.setCurrentIndex(1)
+        self.tree_changed.emit(path)
 
     def refresh(self) -> None:
         """Re-walk the current root, preserving the user's view.
@@ -674,6 +680,7 @@ class BidsTreePane(QWidget):
         # markers are still valid for files that survived the change).
         if self._last_badges:
             self._apply_badge_map(self._last_badges, self._last_counts)
+        self.tree_changed.emit(self._root)
 
     def _populate(self, path: Path) -> list[str]:
         """Sweep ``path``, draw its first level, return the dirs to watch.
@@ -735,7 +742,7 @@ class BidsTreePane(QWidget):
                 continue
             is_dir = entry.is_dir()
             item = QTreeWidgetItem([entry.name])
-            token = _color_token_for(entry.name, is_dir)
+            token = color_token_for(entry.name, is_dir=is_dir)
             item.setData(0, PATH_ROLE, entry.path)
             item.setData(0, COLOR_TOKEN_ROLE, token)
             item.setData(0, IS_DIR_ROLE, is_dir)
@@ -1121,11 +1128,24 @@ class BidsTreePane(QWidget):
             compare_images.triggered.connect(
                 lambda _c=False, s=images[:2]: self.compare_requested.emit(s)
             )
+            base = self.overlay_base(images[0]) if (
+                self.overlay_base is not None and not pair) else None
+            if base is not None:
+                over = menu.addAction(f"Draw over {base.name}")
+                over.setToolTip(
+                    "Put this image over the one you were looking at: an atlas, "
+                    "a mask or a statistical map, resliced onto its grid."
+                )
+                over.triggered.connect(
+                    lambda _c=False, o=images[0], b=base: self.overlay_requested.emit(o, b)
+                )
 
         # References, offered only where a link field is worth having: on a
         # fieldmap, an MEG recording, a derivative. Offering it on every
         # file would be true and useless.
-        if self._root is not None and clicked_path.is_file():
+        # A folder open for viewing offers only what reads: comparing, and the
+        # path. Every tool below writes.
+        if self._root is not None and clicked_path.is_file() and not self.read_only:
             from ...editor import linkage as lk
             if lk.fields_for(self._root, clicked_path):
                 menu_section(menu, "Check and repair")
@@ -1144,8 +1164,9 @@ class BidsTreePane(QWidget):
         # Every entity the clicked row actually carries, so the menu offers
         # renaming exactly what is in front of the user. A folder named
         # sub-01 offers the subject; a func file offers task, run and echo.
-        renames = _renameable_entities(Path(path))
-        if renames or _can_restructure(Path(path)):
+        renames = [] if self.read_only else _renameable_entities(Path(path))
+        restructure = not self.read_only and _can_restructure(Path(path))
+        if renames or restructure:
             menu_section(menu, "Names and structure")
         if renames:
             for entity, value, label in renames:
@@ -1168,7 +1189,7 @@ class BidsTreePane(QWidget):
         chosen = self.selected_paths()
         clicked = Path(path)
         scope = chosen if clicked in chosen and len(chosen) > 1 else [clicked]
-        if _can_restructure(clicked):
+        if restructure:
             add_entity = menu.addAction("Add or change an entity...")
             add_entity.setToolTip(
                 "Give these files an entity the schema allows them, placed "

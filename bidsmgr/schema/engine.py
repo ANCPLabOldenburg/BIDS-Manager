@@ -239,42 +239,113 @@ def _format_pattern(format_name: str) -> str:
 
 def required_sidecar_fields(
     datatype: Datatype, suffix: Suffix, bids_root: Optional[Path] = None,
+    *, entities: Optional[Mapping[str, str]] = None,
 ) -> list[FieldInfo]:
-    return _sidecar_fields(datatype, suffix, levels={"required"}, bids_root=bids_root)
+    return _sidecar_fields(datatype, suffix, levels={"required"}, bids_root=bids_root,
+                           entities=entities)
 
 
 def recommended_sidecar_fields(
     datatype: Datatype, suffix: Suffix, bids_root: Optional[Path] = None,
+    *, entities: Optional[Mapping[str, str]] = None,
 ) -> list[FieldInfo]:
-    return _sidecar_fields(datatype, suffix, levels={"recommended"}, bids_root=bids_root)
+    return _sidecar_fields(datatype, suffix, levels={"recommended"}, bids_root=bids_root,
+                           entities=entities)
 
 
 def optional_sidecar_fields(
     datatype: Datatype, suffix: Suffix, bids_root: Optional[Path] = None,
+    *, entities: Optional[Mapping[str, str]] = None,
 ) -> list[FieldInfo]:
-    return _sidecar_fields(datatype, suffix, levels={"optional"}, bids_root=bids_root)
+    return _sidecar_fields(datatype, suffix, levels={"optional"}, bids_root=bids_root,
+                           entities=entities)
 
 
 def deprecated_sidecar_fields(
     datatype: Datatype, suffix: Suffix, bids_root: Optional[Path] = None,
+    *, entities: Optional[Mapping[str, str]] = None,
 ) -> list[FieldInfo]:
-    return _sidecar_fields(datatype, suffix, levels={"deprecated"}, bids_root=bids_root)
+    return _sidecar_fields(datatype, suffix, levels={"deprecated"}, bids_root=bids_root,
+                           entities=entities)
 
 
 def sidecar_fields(
     datatype: Datatype, suffix: Suffix, bids_root: Optional[Path] = None,
+    *, entities: Optional[Mapping[str, str]] = None,
 ) -> list[FieldInfo]:
     """Every field BIDS declares for this kind of file, at every level.
 
     The per-level accessors above answer "which fields are required here";
     this answers "what may this file carry at all", which is what a form
     building a whole section needs.
+
+    ``entities`` (short or long keys, as :func:`name_entities` reads them off a
+    filename) describes ONE file rather than its kind, and settles the rules
+    that select on an entity. Without them a T1w is told ``TaskName`` is
+    recommended, because some T1w may carry a task; this one has none.
     """
     return _sidecar_fields(
         datatype, suffix,
         levels={"required", "recommended", "optional", "deprecated"},
-        bids_root=bids_root,
+        bids_root=bids_root, entities=entities,
     )
+
+
+def effective_level(spec) -> str:
+    """The level to act on for a field: its own, unless it is speculative.
+
+    A field is speculative when the rule giving its level may not describe the
+    file at all (``SkullStripped`` is required of a DERIVATIVE, ``Genetics``
+    only of a dataset with a ``genetic_info.json``). Badging it required, or
+    marking it with a TODO, would be a demand the standard is not making, so it
+    counts as optional. The Editor's form and the metadata step both read the
+    level here, so what one shows under Optional the other treats as optional.
+    """
+    level = str(getattr(spec, "level", "") or "")
+    if getattr(spec, "speculative", False) and level in ("required", "recommended"):
+        return "optional"
+    return level
+
+
+def name_entities(name: str) -> dict[str, str]:
+    """The entities in a BIDS filename, by their short key, in order.
+
+    ``sub-01_ses-pre_task-rest_bold.json`` -> ``{"sub": "01", "ses": "pre",
+    "task": "rest"}``. The suffix and extension are not entities and are
+    left out; a token without a dash is skipped rather than guessed at.
+    """
+    stem = Path(name).name.split(".", 1)[0]
+    out: dict[str, str] = {}
+    for token in stem.split("_")[:-1]:
+        key, dash, value = token.partition("-")
+        if dash and key and value:
+            out[key] = value
+    return out
+
+
+def warm_dataset(bids_root: Path) -> None:
+    """Read what the levels need from a dataset, ahead of the first form.
+
+    The first question about a dataset reads its tree (180 ms for 5,000
+    files), which belongs on a background thread, not in the click that opens
+    a sidecar. Safe from any thread; advisory, so it never raises.
+    """
+    try:
+        bidsval_schema.dataset_description_fields(dataset_root=bids_root)
+    except Exception:  # noqa: BLE001 - warming is advisory
+        pass
+
+
+def forget_dataset() -> None:
+    """Drop what was read from any dataset on disk.
+
+    The levels of a few fields depend on the dataset (``Authors`` is
+    recommended only while there is no ``CITATION.cff``), and they are
+    remembered per dataset for speed. Call this when the tree may have
+    changed, or a file added since stays invisible to every form and fill.
+    """
+    bidsval_schema.invalidate_dataset_cache()
+    _file_fields.cache_clear()
 
 
 def dataset_description_fields(bids_root: Optional[Path] = None) -> list[FieldInfo]:
@@ -539,11 +610,32 @@ def _entities_with_kind(datatype: Datatype, suffix: Suffix, kind: str) -> list[E
     return seen
 
 
+# Entities no selector reads the value of: who and when a recording is. Kept
+# by presence only, so the memo below holds one entry per kind of file in a
+# dataset rather than one per participant.
+_IDENTITY_ENTITIES = frozenset({"sub", "subject", "ses", "session"})
+
+
+@lru_cache(maxsize=1024)
+def _file_fields(
+    datatype: str, suffix: str, root: str, entities: tuple, version: str,
+) -> tuple:
+    """bidsval's answer for one file, remembered by everything that decides it."""
+    return tuple(bidsval_schema.sidecar_fields(
+        datatype, suffix, entities=dict(entities), dataset_root=root or None,
+        schema=version,
+    ))
+
+
+register_cache(_file_fields)
+
+
 def _sidecar_fields(
     datatype: Datatype,
     suffix: Suffix,
     levels: set[str],
     bids_root: Optional[Path] = None,
+    entities: Optional[Mapping[str, str]] = None,
 ) -> list[FieldInfo]:
     """Ask bidsval which fields the standard declares, and at what level.
 
@@ -558,9 +650,19 @@ def _sidecar_fields(
     Editor's sidecar form was empty for one.
     """
     try:
-        specs = bidsval_schema.sidecar_fields(
-            datatype, suffix, dataset_root=bids_root, schema=active_version(),
-        )
+        if entities:
+            specs = _file_fields(
+                datatype, suffix, str(bids_root) if bids_root else "",
+                tuple(sorted(
+                    (str(k), "" if k in _IDENTITY_ENTITIES else str(v))
+                    for k, v in entities.items()
+                )),
+                active_version(),
+            )
+        else:
+            specs = bidsval_schema.sidecar_fields(
+                datatype, suffix, dataset_root=bids_root, schema=active_version(),
+            )
     except Exception:
         # An unknown datatype/suffix is a question, not a crash: callers audit
         # rows whose classification the user is still editing.

@@ -26,7 +26,6 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -34,6 +33,7 @@ from PyQt6.QtWidgets import (
 from ...editor import bidsignore as bi
 from ..theme_manager import CUR
 from .primitives import PaneHeader
+from .splitter import Splitter
 
 
 class BidsIgnorePane(QWidget):
@@ -72,7 +72,7 @@ class BidsIgnorePane(QWidget):
         bl.addWidget(self._save_btn)
         v.addWidget(bar)
 
-        split = QSplitter(Qt.Orientation.Horizontal)
+        split = Splitter(Qt.Orientation.Horizontal)
 
         # Left: the patterns.
         left = QWidget()
@@ -96,6 +96,7 @@ class BidsIgnorePane(QWidget):
         add_btn.setObjectName("tb-btn")
         add_btn.clicked.connect(self._on_add_typed)
         add_row.addWidget(add_btn)
+        self._add_btn = add_btn
         ll.addLayout(add_row)
         self._preview = QLabel("")
         self._preview.setObjectName("dlg-hint")
@@ -282,6 +283,11 @@ class BidsIgnorePane(QWidget):
         row = self._patterns.currentRow()
         if row >= 0:
             self._patterns.takeItem(row)
+
+    def set_read_only(self, on: bool) -> None:
+        """A folder open for viewing: the patterns are shown, never changed."""
+        for w in (self._remove_btn, self._save_btn, self._new_pattern, self._add_btn):
+            w.setVisible(not on)
 
     def save(self) -> None:
         """Write the pattern list, then recount so the effect is visible."""

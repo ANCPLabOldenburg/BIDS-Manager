@@ -89,8 +89,9 @@ class EventLog:
         with self.path.open("r", encoding="utf-8") as fh:
             return sum(1 for line in fh if line.strip())
 
-    def truncate_last(self) -> bool:
-        """Drop the last event from the log. Returns ``True`` if anything was dropped.
+    def truncate_last(self, count: int = 1) -> bool:
+        """Drop the last ``count`` events from the log. Returns ``True`` if
+        anything was dropped.
 
         This is the primitive the GUI's "undo" button rides on. Implemented
         by rewriting the file minus its final line — safe for the modest
@@ -106,7 +107,12 @@ class EventLog:
             lines.pop()
         if not lines:
             return False
-        lines.pop()
+        for _ in range(max(1, count)):
+            while lines and not lines[-1].strip():
+                lines.pop()
+            if not lines:
+                break
+            lines.pop()
         # Rewrite via a temp file so a crash mid-rewrite cannot corrupt
         # the log: a torn write would leave the original in place.
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")

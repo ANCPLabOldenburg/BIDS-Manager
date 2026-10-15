@@ -20,6 +20,7 @@ Example renames (the file extension can be ``.nii.gz`` / ``.nii`` /
     sub-001_magnitude1_e2.nii.gz → sub-001_magnitude2.nii.gz
     sub-001_magnitude1_ph.nii.gz → sub-001_phasediff.nii.gz
     sub-001_fmap_e1.nii.gz       → sub-001_magnitude1.nii.gz
+    sub-001_magnitude_e2.nii.gz  → sub-001_magnitude2.nii.gz
     sub-001_magnitude1_e1_ph.nii.gz → sub-001_phase1.nii.gz
     sub-001_magnitude1_e2_ph.nii.gz → sub-001_phase2.nii.gz
 """
@@ -38,7 +39,7 @@ log = logging.getLogger(__name__)
 # Order matters: longer tokens (``_e1_ph``, ``_e2_ph``) must match before
 # their shorter prefixes (``_e1``, ``_e2``).
 _TAIL_RE = re.compile(
-    r"(?:_(?P<existing>magnitude[12]|phasediff|phase[12]|fieldmap|epi|fmap))?"
+    r"(?:_(?P<existing>magnitude[12]?|phasediff|phase[12]|fieldmap|epi|fmap))?"
     r"(?P<token>_e1_ph|_e2_ph|_e1|_e2|_ph)"
     r"(?P<ext>\.(?:nii(?:\.gz)?|json|bval|bvec))$"
 )
@@ -169,6 +170,12 @@ def rename_for_fmap_token(
     """
     m = _TAIL_RE.search(name)
     if not m:
+        return None
+    if m.group("existing") == "epi":
+        # An EPI reference is not a gradient-echo fieldmap: its ``_ph`` is
+        # the phase of the reference, never a ``phasediff``. A series named
+        # ``part-phase`` already lost the token in the backend; the phase of
+        # a series mixing both stays as dcm2niix wrote it.
         return None
     head = name[: m.start()]
     ext = m.group("ext")

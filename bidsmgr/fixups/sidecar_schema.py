@@ -405,16 +405,51 @@ def apply_stated_metadata(
 
     def apply(sidecar: Path, data: dict, datatype: str, suffix: str) -> int:
         row_id = _row_id_for(sidecar, row_by_basename)
-        return (
-            apply_sequence_template(
-                data, datatype, suffix, _task_of(sidecar), spec,
-                row_id=row_id, row_values=cells_by_row.get(row_id),
-            )
-            + fill_agnostic_fields(data, datatype, suffix, spec)
-            + _apply_extras(data, datatype, spec, row_id, _task_of(sidecar))
-        )
+        return state_into(data, sidecar.name, datatype, suffix, spec,
+                          row_id=row_id, row_values=cells_by_row.get(row_id))
 
     return _rewrite_each_sidecar(bids_root, apply)
+
+
+def state_into(
+    data: dict,
+    name: str,
+    datatype: str,
+    suffix: str,
+    spec: Optional[RecordingMetaSpec],
+    *,
+    row_id: str = "",
+    row_values: Optional[dict] = None,
+) -> int:
+    """Write what the user stated into ONE sidecar's fields, in memory.
+
+    The templates, the per-recording answers, the dataset-wide values and the
+    cells typed into the table, by the chain's precedence. ``name`` is the
+    file's name (its task picks a task template); ``row_id`` the inventory row
+    that produced it and ``row_values`` that row's cells. Returns how many
+    fields it set. The metadata step runs it on every sidecar on disk and the
+    BIDS preview on the sidecar it predicts, so the two agree.
+    """
+    if spec is None:
+        return 0
+    task = _task_of(Path(name))
+    return (
+        apply_sequence_template(data, datatype, suffix, task, spec,
+                                row_id=row_id, row_values=row_values)
+        + fill_agnostic_fields(data, datatype, suffix, spec)
+        + _apply_extras(data, datatype, spec, row_id, task)
+    )
+
+
+def stated_cells(row) -> dict:
+    """The cells of an inventory row that are sidecar fields, in the chain's
+    vocabulary (``line_freq`` -> ``power_line_freq``)."""
+    stated = {}
+    for column, attr in _CELL_COLUMNS.items():
+        value = str(row.get(column, "") or "").strip()
+        if value and value.lower() not in ("nan", "none"):
+            stated[attr] = value
+    return stated
 
 
 def _apply_extras(
@@ -467,11 +502,7 @@ def _rows_from_inventory(inventory) -> tuple[dict[str, str], dict[str, dict]]:
         if not basename or not row_id:
             continue
         by_basename[basename] = row_id
-        stated = {}
-        for column, attr in _CELL_COLUMNS.items():
-            value = str(row.get(column, "") or "").strip()
-            if value and value.lower() not in ("nan", "none"):
-                stated[attr] = value
+        stated = stated_cells(row)
         if stated:
             cells[row_id] = stated
     return by_basename, cells
@@ -509,6 +540,8 @@ for _cached in (_declared_fields, _array_typed):
 __all__ = [
     "apply_sequence_template",
     "apply_stated_metadata",
+    "state_into",
+    "stated_cells",
     "fill_agnostic_fields",
     "repair_array_types",
     "repair_datetimes",

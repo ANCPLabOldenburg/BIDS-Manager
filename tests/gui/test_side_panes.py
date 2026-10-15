@@ -210,8 +210,10 @@ def test_filter_pane_unchecking_propagates_to_model(qtbot) -> None:
     pane.bind_model(model)
 
     ds_node = pane._tree.topLevelItem(0)
-    # Uncheck the dataset node — Qt cascades to every leaf.
-    ds_node.setCheckState(0, Qt.CheckState.Unchecked)
+    # A lone dataset's node has no checkbox (one click there emptied the
+    # table); the subject's does, and Qt cascades it to every leaf.
+    assert not ds_node.flags() & Qt.ItemFlag.ItemIsUserCheckable
+    ds_node.child(0).setCheckState(0, Qt.CheckState.Unchecked)
 
     inc_col = next(i for i, c in enumerate(COLUMNS) if c.key == "include")
     # Every row should now be excluded.

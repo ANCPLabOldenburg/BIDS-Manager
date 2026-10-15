@@ -80,7 +80,7 @@ one that gets silently deleted the next time.
    the string `"n/a"`, `EchoTime` a number or an array of them, and `type` is
    empty for all of those. `_item_type` also had to resolve through `anyOf`,
    since the array branch carries its own `items`. Without it,
-   `bidsmgr.metadata.engine._todo_value_for` read "no item type", assumed
+   `bidsmgr.metadata.engine.todo_value_for` read "no item type", assumed
    strings, and wrote `["TODO"]` into `EchoTime`, turning a missing field into
    a validation error.
 
@@ -264,3 +264,34 @@ Windows for any architecture but x86-64.
 `fix/windows-msvc-stack-spectroscopy`. Delete the directory, its
 `package-data` entry in `pyproject.toml` and the fallback branch of
 `run_dcm2niix` together.
+
+
+### `bidsmgr.vendor.niivue_colormaps`
+
+**Upstream:** NiiVue (`niivue/niivue`, BSD 2-Clause, shipped unchanged as
+`LICENSE` beside the files). Copied from `packages/niivue/src/cmaps/*.json`
+at commit `ee9aefc` (2026-08-18).
+
+**What it is:** data, not code. 72 JSON files, each a colour map as control
+points: `R`, `G`, `B`, `A` (0-255) at intensity indices `I` (0-255). The CT
+maps also carry a suggested window in Hounsfield units (`min`, `max`).
+
+**Why vendored:** the viewer library (`bidsmgr.viz`) offers the same colour
+maps NiiVue does, so a figure or a scene described in NiiVue's terms ("hot",
+"ct_bones", "batlow") means the same thing here. 72 small files are cheaper
+to ship than a dependency, and NiiVue is a JavaScript package with no Python
+distribution to depend on.
+
+**What changed during the copy:** nothing. Two upstream files (`bcgwhw.json`,
+`bcgwhw_dark.json`) list 64 positions in `I` but only 60 colours; the files
+are kept as they are and `bidsmgr.viz.compute.colormaps.lut` uses the
+positions that have a colour. One (`afni_blues_inv.json`) carries a
+placeholder window of `(0, 0)`, which `suggested_window` does not offer.
+
+**How it is used:** `bidsmgr.viz.compute.colormaps` reads the files through
+`importlib.resources` relative to this package, interpolates each to a
+256-entry table once and caches it. The `pyproject.toml` package-data entry
+is what puts them in the wheel; without it every map is missing.
+
+**Maintenance policy:** refresh wholesale from a newer NiiVue commit when a
+map we want is added; record the commit here.

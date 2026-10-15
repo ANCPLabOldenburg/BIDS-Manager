@@ -32,7 +32,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -43,6 +42,7 @@ from ..editor import coherence
 from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
 from .widgets.spinner import BusySpinner
+from .widgets.splitter import Splitter
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ class CoherenceDialog(QDialog):
         bl.setContentsMargins(18, 14, 18, 12)
         bl.setSpacing(10)
 
-        split = QSplitter(Qt.Orientation.Vertical)
+        split = Splitter(Qt.Orientation.Vertical)
 
         found, fl = card("What was found")
         fl.addWidget(hint(

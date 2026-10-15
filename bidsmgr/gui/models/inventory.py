@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 
 import pandas as pd
 from PyQt6.QtCore import (
@@ -39,11 +41,13 @@ from PyQt6.QtCore import (
     QModelIndex,
     Qt,
     QThreadPool,
+    QTimer,
     pyqtSignal,
 )
 
 from ... import schema as schema_mod
 from ...inventory.rebuild import rebuild_from_columns, rebuild_from_entities
+from ...inventory.types import NONIMAGE_ISSUE_TOKEN
 from ...project import (
     Project,
     UserSetCell,
@@ -57,6 +61,7 @@ from ...recording_meta import (
     is_varies,
     resolve_attribute,
     resolve_sidecar_fields,
+    EyetrackSpec,
     PetAcquisitionSpec,
     RecordingMetaSpec,
 )
@@ -392,6 +397,17 @@ class InventoryTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._df: pd.DataFrame = df.reset_index(drop=True).copy()
         self._project: Optional[Project] = project
+        # Bumped by every change the views hear about, so a reader can cache
+        # what it computes over the whole table (the fieldmap links plan)
+        # until the table actually changes.
+        self._revision = 0
+        for signal in (self.dataChanged, self.modelReset, self.rowsInserted,
+                       self.rowsRemoved, self.layoutChanged):
+            signal.connect(self._bump_revision)
+        # The user action the next edits belong to (one Undo takes them all
+        # back), and how many callers have it open.
+        self._edit_group: Optional[str] = None
+        self._edit_group_depth = 0
         # Dataset-wide recording-metadata defaults. Per-row cells in the
         # inheritance fields show this value (muted) when blank; set via
         # :meth:`set_global_spec` when the scan scaffold loads / the dataset
@@ -960,6 +976,66 @@ class InventoryTableModel(QAbstractTableModel):
         return True
 
     # ------------------------------------------------------------------
+    # Eye tracking: the screen and the timing (EyetrackSpec), dataset
+    # defaults and per-row overrides, values typed (metres, seconds)
+    # ------------------------------------------------------------------
+
+    def eyetrack_default(self, field: str):
+        if self._global_spec is None:
+            return None
+        return getattr(self._global_spec.eyetrack_defaults, field, None)
+
+    def eyetrack_override(self, row: int, field: str):
+        if self._global_spec is None or not (0 <= row < len(self._df)):
+            return None
+        over = self._global_spec.eyetrack_overrides.get(self.row_id(row))
+        return getattr(over, field, None) if over is not None else None
+
+    def eyetrack_effective(self, row: int, field: str):
+        value = self.eyetrack_override(row, field)
+        return value if value not in (None, "", []) else self.eyetrack_default(field)
+
+    def set_eyetrack_override(self, row: int, field: str, value) -> bool:
+        """Set (or, with ``None``, clear) one eye-tracking field for ``row``.
+        The dataset default's own value clears it, so the row inherits."""
+        if field not in EyetrackSpec.model_fields or not (0 <= row < len(self._df)):
+            return False
+        if self._global_spec is None:
+            self._global_spec = RecordingMetaSpec()
+        if value in ("", []) or value == self.eyetrack_default(field):
+            value = None
+        if value == self.eyetrack_override(row, field):
+            return False
+        rid = self.row_id(row)
+        overrides = dict(self._global_spec.eyetrack_overrides)
+        current = overrides.get(rid) or EyetrackSpec()
+        updated = current.model_copy(update={field: value})
+        if updated == EyetrackSpec():
+            overrides.pop(rid, None)
+        else:
+            overrides[rid] = updated
+        self._global_spec = self._global_spec.model_copy(
+            update={"eyetrack_overrides": overrides})
+        self.recordingSpecChanged.emit()
+        self.refresh_row(row)
+        return True
+
+    def set_eyetrack_default(self, field: str, value) -> bool:
+        """Set one eye-tracking field for every recording."""
+        if field not in EyetrackSpec.model_fields:
+            return False
+        if self._global_spec is None:
+            self._global_spec = RecordingMetaSpec()
+        value = None if value in ("", []) else value
+        current = self._global_spec.eyetrack_defaults
+        if getattr(current, field) == value:
+            return False
+        self._global_spec = self._global_spec.model_copy(
+            update={"eyetrack_defaults": current.model_copy(update={field: value})})
+        self.recordingSpecChanged.emit()
+        return True
+
+    # ------------------------------------------------------------------
     # PET per-row overrides (same inheritance contract as acquisition)
     # ------------------------------------------------------------------
 
@@ -1120,6 +1196,10 @@ class InventoryTableModel(QAbstractTableModel):
         # user sees *why* a row is highlighted without unhiding the issues
         # column. Newline-split the `` | ``-joined notes for readability.
         if role == Qt.ItemDataRole.ToolTipRole:
+            if self.COLUMNS[col].key == "conf":
+                why = self.classification_summary(row)
+                if why:
+                    return why
             # An inherited metadata cell says where its value came from, so a
             # user knows which level to go and change.
             spec_col = self.COLUMNS[col].df_column
@@ -1278,10 +1358,37 @@ class InventoryTableModel(QAbstractTableModel):
         return {k: str(v) for k, v in data.items()} if isinstance(data, dict) else {}
 
     def _record_edit(self, event) -> None:
-        """Append a user-edit event to the project (if any) and signal it."""
+        """Append a user-edit event to the project (if any) and signal it.
+        Inside an edit group the event carries the group's id."""
+        if self._edit_group is not None:
+            event = event.model_copy(update={"group": self._edit_group})
         if self._project is not None:
             self._project.append(event)
         self.userEdited.emit()
+
+    @contextmanager
+    def edit_group(self) -> Iterator[str]:
+        """Every edit made inside is ONE user action: one Undo reverts them
+        all. Nested groups join the outermost."""
+        if self._edit_group_depth == 0:
+            self._edit_group = uuid.uuid4().hex[:12]
+        self._edit_group_depth += 1
+        try:
+            yield self._edit_group
+        finally:
+            self._edit_group_depth -= 1
+            if self._edit_group_depth == 0:
+                self._edit_group = None
+
+    def edit_group_this_turn(self) -> None:
+        """Group every edit until control returns to the event loop: for a
+        cascade Qt runs synchronously (a parent checkbox ticking its
+        children), where no single call spans the whole action."""
+        if self._edit_group_depth:
+            return
+        manager = self.edit_group()
+        manager.__enter__()
+        QTimer.singleShot(0, lambda: manager.__exit__(None, None, None))
 
     def set_entity(
         self,
@@ -2029,6 +2136,132 @@ class InventoryTableModel(QAbstractTableModel):
             return v.strip() not in ("0", "false", "False", "")
         return bool(v)
 
+    def _set_cell(self, row: int, column: str, value: str) -> None:
+        """Write one cell the user does not type into (``issues``) as a
+        recorded edit, so Undo and replay carry it like any other."""
+        if column not in self._df.columns:
+            self._df[column] = ""
+        old = self._df.at[row, column]
+        old_str = "" if old is None or (isinstance(old, float) and pd.isna(old)) else str(old)
+        if old_str == value:
+            return
+        self._record_edit(UserSetCell(row_id=self.row_id(row), column=column, value=value,
+                                      previous=old_str))
+        self._df.at[row, column] = value
+
+    def _bump_revision(self, *_args) -> None:
+        self._revision += 1
+
+    @property
+    def revision(self) -> int:
+        """How many changes the table has seen (a cache key)."""
+        return self._revision
+
+    def fieldmap_rows(self, row: int) -> list[int]:
+        """The rows of the fieldmap acquisition ``row`` belongs to (its
+        magnitude and phase, both directions of a reversed-phase pair), as
+        the conversion groups their files (``intended_for.group_key``)."""
+        from ...fixups.intended_for import acquisitions
+        from ...inventory._time import parse_time_seconds
+
+        def cell(r: int, col: str) -> str:
+            if col not in self._df.columns:
+                return ""
+            v = self._df.at[r, col]
+            return "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
+
+        if cell(row, "datatype") != "fmap":
+            return [row]
+        who = (cell(row, "participant_id"), cell(row, "session"))
+        session = [(r, cell(r, "bids_name"), parse_time_seconds(cell(r, "acq_time")))
+                   for r in range(len(self._df))
+                   if cell(r, "datatype") == "fmap"
+                   and (cell(r, "participant_id"), cell(r, "session")) == who]
+        return next((sorted(g) for g in acquisitions(session) if row in g), [row])
+
+    def set_fieldmap_targets(self, row: int, row_ids) -> None:
+        """The user's own choice of the runs a fieldmap corrects (a list of
+        row ids), or ``None`` to let the linking rule decide, on every row
+        of its acquisition. One Undo."""
+        import json as _json
+
+        from ...fixups.intended_for import LINKS_COLUMN
+
+        value = "" if row_ids is None else _json.dumps(list(row_ids))
+        rows = self.fieldmap_rows(row)
+        with self.edit_group():
+            for r in rows:
+                self._set_cell(r, LINKS_COLUMN, value)
+        for r in rows:
+            self.refresh_row(r)
+
+    def apply_exclusion_plan(self, plan) -> int:
+        """Apply scan rules to the open table (``user_rules.plan_exclusions``)
+        as ONE user action: excluded rows untick and carry the rule's note,
+        rows a removed rule had excluded tick again. Returns rows changed."""
+        from ...classifier.user_rules import with_exclusion_note, without_exclusion_note
+
+        def issues(row: int) -> str:
+            v = self._df.at[row, "issues"] if "issues" in self._df.columns else ""
+            return "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
+
+        changed = 0
+        with self.edit_group():
+            for row, rule in plan.exclude:
+                self._set_include(row, False)
+                self._set_cell(row, "issues", with_exclusion_note(issues(row), rule))
+                self.refresh_row(row)
+                changed += 1
+            for row in plan.restore:
+                self._set_include(row, True)
+                self._set_cell(row, "issues", without_exclusion_note(issues(row)))
+                self.refresh_row(row)
+                changed += 1
+        return changed
+
+    def apply_classification(self, changes, *, names: bool = True) -> int:
+        """Lay re-scored names (``classifier.acquisition.scan.rescore``) onto
+        the table as ONE user action: the classification columns always,
+        and, with ``names``, the new datatype, suffix and entities (an
+        excluded series unticks). Returns the rows renamed."""
+        renamed = 0
+        with self.edit_group():
+            for ch in changes:
+                row = int(ch.index)
+                if not (0 <= row < len(self._df)):
+                    continue
+                for col, value in ch.columns.items():
+                    self._set_cell(row, col, value)
+                if not names or not ch.renamed:
+                    self.refresh_row(row)
+                    continue
+                renamed += 1
+                if ch.exclude:
+                    self._set_include(row, False)
+                    self.refresh_row(row)
+                    continue
+                datatype, _, suffix = ch.new.partition("/")
+                self.set_datatype_suffix(row, datatype, suffix)
+                now = self.entities(row)
+                for key in sorted(set(now) | set(ch.entities)):
+                    if key in ("subject", "session"):
+                        continue
+                    if now.get(key, "") != ch.entities.get(key, ""):
+                        self.set_entity(row, key, ch.entities.get(key) or None)
+                self.refresh_row(row)
+        return renamed
+
+    def use_alternative(self, row: int, name: str) -> bool:
+        """Name ``row`` as one of its alternatives (``"anat/FLAIR"``), as one
+        undoable edit: the datatype and suffix, keeping the entities the new
+        kind allows."""
+        datatype, _, suffix = name.partition("/")
+        if not datatype or not suffix:
+            return False
+        with self.edit_group():
+            changed = self.set_datatype_suffix(row, datatype, suffix)
+        return changed
+
     def _set_include(self, row: int, included: bool) -> None:
         """Persist a new include flag (event first, then DataFrame)."""
         self._record_edit(
@@ -2061,7 +2294,10 @@ class InventoryTableModel(QAbstractTableModel):
             stripped = text[len("ses-"):] if text.startswith("ses-") else text
             return stripped or "—"
         if spec.key == "conf":
-            return self._format_confidence(text)
+            # The parameters' confidence where they named the series, else
+            # the confidence of whichever rule named it.
+            ours = self._cell_text(row, "classification_confidence")
+            return self._format_confidence(ours or text)
         if not text.strip():
             return "—"
         return text
@@ -2113,6 +2349,48 @@ class InventoryTableModel(QAbstractTableModel):
         if datatype in self._MNE_BIDS_DATATYPES:
             return "mne-bids"
         return "dcm2niix"
+
+    def _cell_text(self, row: int, column: str) -> str:
+        if column not in self._df.columns or not (0 <= row < len(self._df)):
+            return ""
+        raw = self._df.at[row, column]
+        return "" if pd.isna(raw) else str(raw).strip()
+
+    def classification(self, row: int) -> dict:
+        """What the parameter classifier said about ``row``: its confidence,
+        alternatives and evidence (``{}`` for a row it did not score)."""
+        import json
+
+        try:
+            evidence = json.loads(self._cell_text(row, "classification_evidence") or "{}")
+            alternatives = json.loads(self._cell_text(row, "classification_alternatives")
+                                      or "[]")
+        except ValueError:
+            return {}
+        if not evidence:
+            return {}
+        try:
+            confidence = float(self._cell_text(row, "classification_confidence") or 0)
+        except ValueError:
+            confidence = 0.0
+        return {"confidence": confidence, "alternatives": alternatives, **evidence}
+
+    def classification_summary(self, row: int) -> str:
+        """One or two sentences for the confidence cell's tooltip."""
+        info = self.classification(row)
+        if not info:
+            return ""
+        who = {"agreement": "the acquisition parameters and dcm2niix agree",
+               "parameters": "named from the acquisition parameters",
+               "dcm2niix": "left to dcm2niix's guess (the parameters were not sure)",
+               "names": "left to the series name"}.get(info.get("decided_by", ""),
+                                                        "the parameters did not decide")
+        lines = [f"{info.get('chosen') or '?'} ({info['confidence']:.2f}): {who}."]
+        if info.get("note"):
+            lines.append(info["note"][0].upper() + info["note"][1:] + ".")
+        if info.get("check"):
+            lines.append("Worth a look: see Why this name in Properties.")
+        return "\n".join(lines)
 
     @staticmethod
     def _format_confidence(text: str) -> str:
@@ -2209,13 +2487,13 @@ class InventoryTableModel(QAbstractTableModel):
         """
         # Non-image DERIVED objects (no pixel data; e.g. a Siemens TENSOR
         # map) are flagged by the scanner via the ``non-image series``
-        # token in ``issues`` (see ``cli/scan.NONIMAGE_ISSUE_TOKEN``).
+        # token in ``issues`` (``inventory.types.NONIMAGE_ISSUE_TOKEN``).
         # They are excluded from conversion (include=0) but must still read
         # as a deliberate, highlighted "not an image" state rather than a
         # de-emphasised skip — so this check wins over the include check.
         if "issues" in self._df.columns:
             issues_l = str(self._df.at[row, "issues"] or "").lower()
-            if "non-image series" in issues_l:
+            if NONIMAGE_ISSUE_TOKEN in issues_l:
                 return "noimg"
 
         # Two included recordings wanting one BIDS name means one overwrites

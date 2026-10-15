@@ -28,6 +28,7 @@ import re
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Optional
 
 import pandas as pd
@@ -44,6 +45,7 @@ from .demographics import (
 from .phenotype import load_sidecar_dictionary, write_phenotype
 from .types import DatasetMetadata, MetadataReport, SidecarFill, TodoFill
 from ..recording_meta import load_spec, scaffold_sidecar_path
+from ..editor.rename import PATH_FIELDS
 
 # The literal placeholder value written by ``--fill-todos`` for every
 # missing required / recommended field. Deliberately just the string
@@ -56,7 +58,21 @@ _TODO_VALUE = "TODO"
 _NA_VALUE = "n/a"
 
 # Sentinel: this field gets no placeholder at all.
-_NO_TODO = object()
+NO_TODO = object()
+
+# Fields that LINK files by an identifier: the same placeholder on both
+# sides IS a link. "TODO" in the B0FieldIdentifier of two phase images made
+# sdcflows estimate a field from them, and "TODO" in a run's B0FieldSource
+# then pointed the run at it (or, with no such field, at nothing, so
+# fMRIPrep corrected the run with no fieldmap at all and never fell back to
+# IntendedFor). Absent is the honest state: the run has no fieldmap.
+_LINK_FIELDS = frozenset({"B0FieldIdentifier", "B0FieldSource"})
+
+# Fields that NAME another file. "TODO" there is a reference to a file that
+# does not exist, which the validator reports as an error
+# (ASSOCIATED_EMPTY_ROOM on every MEG recording at the recommended scope), so
+# a gap in one stays a gap. The list is the one rename keeps up to date.
+_PATH_FIELDS = frozenset(PATH_FIELDS)
 
 # How much of what the standard declares a fill should mark. Nested: each
 # includes the ones before it.
@@ -73,8 +89,8 @@ FILL_SCOPE_LABELS = {
 }
 
 
-def _todo_value_for(field) -> object:
-    """The placeholder to write for a field, or ``_NO_TODO`` for none.
+def todo_value_for(field) -> object:
+    """The placeholder to write for a field, or ``NO_TODO`` for none.
 
     A placeholder marks a gap. It must not itself BE a violation, or the
     dataset gains an error for a field that was merely absent, which is worse
@@ -105,11 +121,14 @@ def _todo_value_for(field) -> object:
     item_type = getattr(field, "item_type", "")
     declared = getattr(field, "type", "")
 
+    name = canonical_field_name(str(getattr(field, "name", "")))
+    if name in _LINK_FIELDS or name in _PATH_FIELDS:
+        return NO_TODO
     if getattr(field, "accepts_na", False) or "n/a" in enum:
         return _NA_VALUE
     if enum:
         # A real vocabulary. Nothing in it means "unanswered".
-        return _NO_TODO
+        return NO_TODO
     if getattr(field, "accepts_free_text", False) or declared == "string":
         return _TODO_VALUE
     if "array" in accepts and item_type == "string":
@@ -117,7 +136,7 @@ def _todo_value_for(field) -> object:
     # An array whose item type the schema does not state is NOT assumed to
     # hold strings. That assumption is what wrote ``["TODO"]`` into EchoTime,
     # a number-or-array-of-numbers field, turning a gap into a type error.
-    return _NO_TODO
+    return NO_TODO
 
 
 def unmarkable_reason(field) -> str:
@@ -126,8 +145,13 @@ def unmarkable_reason(field) -> str:
     Said out loud because the alternative is a fill that quietly covers two
     thirds of what is missing and reports itself as complete.
     """
-    if _todo_value_for(field) is not _NO_TODO:
+    if todo_value_for(field) is not NO_TODO:
         return ""
+    name = canonical_field_name(str(getattr(field, "name", "")))
+    if name in _LINK_FIELDS:
+        return "links files by its value: a placeholder would link them"
+    if name in _PATH_FIELDS:
+        return "names another file: a placeholder would name one that does not exist"
     enum = tuple(getattr(field, "enum", ()) or ())
     if enum:
         shown = ", ".join(str(v) for v in enum[:4])
@@ -159,10 +183,14 @@ def scope_levels(scope: str) -> frozenset[str]:
 log = logging.getLogger(__name__)
 
 
-_BIDS_DATATYPE_NAMES: tuple[str, ...] = (
-    "anat", "func", "dwi", "fmap", "perf",
-    "meg", "eeg", "ieeg", "beh", "pet", "micr", "nirs",
-)
+def _datatype_names() -> frozenset[str]:
+    """The datatype folders the standard defines, read from it.
+
+    A hand-kept list stood here and predated ``mrs``, ``emg`` and ``motion``,
+    so every spectroscopy sidecar was skipped: no placeholder, no template
+    answer, no level in the form.
+    """
+    return frozenset(schema_mod.list_datatypes())
 
 _TASKNAME_RE = re.compile(r"_task-([A-Za-z0-9]+)")
 
@@ -171,7 +199,7 @@ _TASKNAME_RE = re.compile(r"_task-([A-Za-z0-9]+)")
 # internally to disambiguate context-dependent rules (e.g. fmap/phase1
 # requires ``EchoTime`` but the schema reports it as ``EchoTime__fmap``).
 # The actual JSON field is the prefix.
-def _canonical_field_name(name: str) -> str:
+def canonical_field_name(name: str) -> str:
     return name.split("__", 1)[0]
 
 
@@ -189,13 +217,11 @@ _REQUIRED_ALTERNATIVES: dict[tuple[str, str], tuple[tuple[str, ...], ...]] = {
 }
 
 
-# Recommended fields for ``dataset_description.json`` per BIDS 1.10.
-# These aren't surfaced by ``bidsmgr.schema.recommended_sidecar_fields``
-# (which keys off (datatype, suffix)), so we list them here for the
-# audit and ``--fill-todos`` pass.
-_DATASET_DESCRIPTION_RECOMMENDED: tuple[str, ...] = (
-    "License", "Authors", "Acknowledgements", "HowToAcknowledge",
-    "Funding", "EthicsApprovals", "ReferencesAndLinks", "DatasetDOI",
+# What a CITATION.cff states for the dataset. With one present, the schema's
+# checks want these out of dataset_description.json: Authors as an error,
+# the rest as a warning.
+_CITATION_FIELDS = frozenset(
+    {"Authors", "License", "HowToAcknowledge", "ReferencesAndLinks"}
 )
 
 
@@ -209,7 +235,6 @@ def run_metadata(
     *,
     inventory_tsv: Optional[Path] = None,
     dataset_meta: Optional[DatasetMetadata] = None,
-    fill_todos: bool = False,
     fill_scope: Optional[str] = None,
     write_report: bool = True,
     generator_label: str = "bidsmgr",
@@ -230,17 +255,19 @@ def run_metadata(
     dataset_meta
         Caller-supplied fields for ``dataset_description.json``. The
         ``Name`` defaults to ``bids_root.name`` if not provided.
-    fill_todos
-        Turn the placeholder fill on. What it covers is ``fill_scope``.
-        Existing values are NEVER overwritten, at any scope. The fill is
-        recorded in ``report.todo_fills`` and in the JSON report, and every
-        field that could take no placeholder is recorded in
-        ``report.unmarkable`` with the reason.
     fill_scope
-        How much of what the standard declares to mark:
-        ``"required"``, ``"recommended"`` (the default, and what
-        ``fill_todos=True`` meant before this existed) or ``"optional"``.
-        The scopes nest. ``"none"`` is the same as ``fill_todos=False``.
+        Which placeholders the dataset ends this run with. ``None`` (the
+        default) leaves them alone: none written, none taken back. A scope
+        makes them match it: ``"required"``, ``"recommended"`` or
+        ``"optional"`` (they nest) give every missing field at those levels a
+        placeholder, and a ``"TODO"`` an earlier, wider run wrote into a field
+        outside them is taken back; ``"none"`` takes back every one. Without
+        that, narrowing the scope did nothing to a dataset already marked.
+        Existing values are NEVER overwritten, and an ``"n/a"`` is never
+        taken back, since it cannot be told from one a converter or a person
+        wrote. Recorded in ``report.todo_fills`` and ``report.todo_removed``;
+        a field that can take no placeholder is in ``report.unmarkable``
+        with the reason.
     write_report
         When ``True`` (default), write the full ``MetadataReport`` to
         ``<bids_root>/.bidsmgr/metadata_report.json`` after every run.
@@ -311,16 +338,18 @@ def run_metadata(
     _write_changes(bids_root, report)
     _refresh_scans_tsv(bids_root, report)
     # One resolved scope for the whole run, so the two passes below cannot
-    # disagree about what was asked for.
-    scope = fill_scope or (FILL_RECOMMENDED if fill_todos else FILL_NONE)
-    if scope not in FILL_SCOPES:
+    # disagree about what was asked for. It used to be a switch AND a scope,
+    # and a scope passed with the switch off still marked: that is how the
+    # GUI wrote placeholders with "mark missing fields" unticked.
+    # The tree has changed since the levels were last read (a conversion, a
+    # citation file), and two of them depend on it.
+    schema_mod.forget_dataset()
+    if fill_scope is not None and fill_scope not in FILL_SCOPES:
         raise ValueError(
-            f"invalid fill_scope {scope!r}; expected one of {FILL_SCOPES}"
+            f"invalid fill_scope {fill_scope!r}; expected one of {FILL_SCOPES}"
         )
-    if not fill_todos and fill_scope is None:
-        scope = FILL_NONE
-    levels = scope_levels(scope)
-    report.fill_scope = scope
+    levels = None if fill_scope is None else scope_levels(fill_scope)
+    report.fill_scope = fill_scope or "unchanged"
 
     _fill_and_audit_sidecars(bids_root, report, levels=levels)
     _audit_dataset_description(bids_root, report, levels=levels)
@@ -353,37 +382,25 @@ def _existing_dataset_name(bids_root: Path) -> Optional[str]:
     return name if isinstance(name, str) and name.strip() else None
 
 
-def _write_dataset_description(
-    bids_root: Path,
+def describe_dataset(
+    existing: dict,
     meta: DatasetMetadata,
-    generator_label: str,
-    report: MetadataReport,
+    generator_label: str = "bidsmgr",
     extra_fields: Optional[dict] = None,
-) -> None:
-    """Write/merge ``dataset_description.json``.
+) -> dict:
+    """``dataset_description.json`` as the metadata step leaves it.
 
     Merge semantics:
 
     * ``Name`` / ``BIDSVersion`` / ``DatasetType`` from ``meta`` always win.
     * Optional fields from ``meta`` (License, Authors, …) win when supplied.
-    * ``GeneratedBy`` from disk is **preserved** (the converter already
-      appended an entry); a new bidsmgr metadata entry is appended.
+    * ``GeneratedBy`` from ``existing`` is **preserved** (the converter
+      already appended an entry); a new bidsmgr metadata entry is appended.
     * Any other keys already present (e.g. user-edited fields) are
       preserved verbatim.
-    """
-    out = bids_root / "dataset_description.json"
-    existing: dict = {}
-    if out.exists():
-        try:
-            data = json.loads(out.read_text())
-            if isinstance(data, dict):
-                existing = data
-        except (OSError, json.JSONDecodeError) as exc:
-            report.warnings.append(
-                f"could not parse existing dataset_description.json ({exc!r}); "
-                "rewriting from scratch"
-            )
 
+    Pure, so the BIDS preview shows the description this step writes.
+    """
     merged: dict[str, object] = dict(existing)
     merged["Name"] = meta.name
     merged["BIDSVersion"] = meta.bids_version
@@ -436,7 +453,30 @@ def _write_dataset_description(
     ):
         gen_by.append(new_entry)
     merged["GeneratedBy"] = gen_by
+    return merged
 
+
+def _write_dataset_description(
+    bids_root: Path,
+    meta: DatasetMetadata,
+    generator_label: str,
+    report: MetadataReport,
+    extra_fields: Optional[dict] = None,
+) -> None:
+    """Write/merge ``dataset_description.json`` (see :func:`describe_dataset`)."""
+    out = bids_root / "dataset_description.json"
+    existing: dict = {}
+    if out.exists():
+        try:
+            data = json.loads(out.read_text())
+            if isinstance(data, dict):
+                existing = data
+        except (OSError, json.JSONDecodeError) as exc:
+            report.warnings.append(
+                f"could not parse existing dataset_description.json ({exc!r}); "
+                "rewriting from scratch"
+            )
+    merged = describe_dataset(existing, meta, generator_label, extra_fields)
     out.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     report.files_written.append(out)
 
@@ -452,7 +492,7 @@ _PARTICIPANT_COLUMNS: tuple[str, ...] = (
 )
 
 
-_PARTICIPANT_DESCRIPTIONS: dict[str, dict[str, object]] = {
+PARTICIPANT_DESCRIPTIONS: dict[str, dict[str, object]] = {
     "participant_id": {"Description": "Unique participant identifier"},
     "age": {"Description": "Age of the participant", "Units": "years"},
     "sex": {
@@ -467,6 +507,19 @@ _PARTICIPANT_DESCRIPTIONS: dict[str, dict[str, object]] = {
     "family_name": {"Description": "Subject family name (kept for internal traceability)"},
     "patient_id": {"Description": "Original DICOM PatientID"},
 }
+
+
+def stated_dataset_fields(spec) -> dict:
+    """What the dataset metadata form states about the dataset, as
+    :class:`DatasetMetadata` keywords: only the fields it answers."""
+    stored = getattr(spec, "dataset_description", None)
+    if stored is None:
+        return {}
+    return {
+        key: value
+        for key, value in stored.model_dump().items()
+        if value not in (None, "", [], {})
+    }
 
 
 def _dataset_meta_from_scaffold(
@@ -488,15 +541,9 @@ def _dataset_meta_from_scaffold(
         scaffold = scaffold_sidecar_path(inventory_tsv)
         if not scaffold.exists():
             return supplied
-        stored = load_spec(scaffold).dataset_description
+        stated = stated_dataset_fields(load_spec(scaffold))
     except Exception:
         return supplied
-
-    stated = {
-        field: value
-        for field, value in stored.model_dump().items()
-        if value not in (None, "", [], {})
-    }
     if not stated:
         return supplied
     if supplied is None:
@@ -588,6 +635,58 @@ def _participants_file_from_scaffold(inventory_tsv: Path) -> Optional[Path]:
     return pp if pp.is_absolute() else Path(inventory_tsv).parent / pp
 
 
+def participant_rows(
+    subjects: list[str], demo_lookup: dict[str, dict[str, str]],
+) -> tuple[list[str], list[dict[str, str]]]:
+    """``participants.tsv``'s columns and one row per subject, before any merge.
+
+    The known demographics are normalised; any other column the participants
+    spreadsheet carries is kept verbatim, in first-seen order. Pure, so the
+    BIDS preview shows the table this step writes.
+    """
+    known = set(_PARTICIPANT_COLUMNS)
+    extra_cols: list[str] = []
+    for sid in subjects:
+        for col in demo_lookup.get(sid, {}):
+            if col and col not in known and col not in extra_cols:
+                extra_cols.append(col)
+
+    rows: list[dict[str, str]] = []
+    for sid in subjects:
+        row: dict[str, str] = {"participant_id": sid}
+        extra = demo_lookup.get(sid, {})
+        for col in ("age", "sex", "handedness", "given_name", "family_name", "patient_id"):
+            v = extra.get(col, "")
+            if col == "sex":
+                v = normalize_sex(v)
+            elif col == "handedness":
+                v = normalize_handedness(v)
+            elif col == "age":
+                v = normalize_age(v)
+            row[col] = v if v else "n/a"
+        for col in extra_cols:
+            v = str(extra.get(col, "") or "").strip()
+            row[col] = v if v else "n/a"
+        rows.append(row)
+    return list(_PARTICIPANT_COLUMNS) + extra_cols, rows
+
+
+def participants_json(columns: list[str], codebook: Optional[dict] = None) -> dict:
+    """``participants.json`` for these columns: the known ones described by
+    BIDS Manager, an extra one by the user's codebook, else by its name."""
+    payload: dict = {}
+    for col in columns:
+        if col in PARTICIPANT_DESCRIPTIONS:
+            payload[col] = PARTICIPANT_DESCRIPTIONS[col]
+        elif col == "participant_id":
+            continue
+        else:
+            entry = (codebook or {}).get(str(col))
+            payload[col] = entry if isinstance(entry, dict) and entry \
+                else {"Description": str(col)}
+    return payload
+
+
 def _write_participants(
     bids_root: Path,
     inventory_tsv: Optional[Path],
@@ -614,32 +713,8 @@ def _write_participants(
     # demographics is preserved verbatim: it flows into participants.tsv and is
     # described in participants.json. Order is the first-seen order across
     # subjects for a stable, readable table.
-    known = set(_PARTICIPANT_COLUMNS)
-    extra_cols: list[str] = []
-    for sid in subjects:
-        for col in demo_lookup.get(sid, {}):
-            if col and col not in known and col not in extra_cols:
-                extra_cols.append(col)
-
-    rows: list[dict[str, str]] = []
-    for sid in subjects:
-        row: dict[str, str] = {"participant_id": sid}
-        extra = demo_lookup.get(sid, {})
-        for col in ("age", "sex", "handedness", "given_name", "family_name", "patient_id"):
-            v = extra.get(col, "")
-            if col == "sex":
-                v = normalize_sex(v)
-            elif col == "handedness":
-                v = normalize_handedness(v)
-            elif col == "age":
-                v = normalize_age(v)
-            row[col] = v if v else "n/a"
-        for col in extra_cols:
-            v = str(extra.get(col, "") or "").strip()
-            row[col] = v if v else "n/a"
-        rows.append(row)
-
-    df_new = pd.DataFrame(rows, columns=list(_PARTICIPANT_COLUMNS) + extra_cols)
+    columns, rows = participant_rows(subjects, demo_lookup)
+    df_new = pd.DataFrame(rows, columns=columns)
 
     out_tsv = bids_root / "participants.tsv"
     df_existing: Optional[pd.DataFrame] = None
@@ -679,20 +754,7 @@ def _write_participants(
     report.files_written.append(out_tsv)
 
     out_json = bids_root / "participants.json"
-    json_payload: dict = {}
-    for col in df_out.columns:
-        if col in _PARTICIPANT_DESCRIPTIONS:
-            json_payload[col] = _PARTICIPANT_DESCRIPTIONS[col]
-        elif col == "participant_id":
-            continue
-        else:
-            # Extra spreadsheet column: use the user's codebook entry if any,
-            # else a minimal Description = the column name.
-            entry = participant_codebook.get(str(col))
-            json_payload[col] = (
-                entry if isinstance(entry, dict) and entry
-                else {"Description": str(col)}
-            )
+    json_payload = participants_json(list(df_out.columns), participant_codebook)
     out_json.write_text(json.dumps(json_payload, indent=2) + "\n", encoding="utf-8")
     report.files_written.append(out_json)
 
@@ -723,6 +785,12 @@ def _load_demographics_from_inventory(
         report.warnings.append(f"could not read inventory TSV {inventory_tsv}: {exc}")
         return {}
 
+    return demographics_by_participant(df)
+
+
+def demographics_by_participant(df: pd.DataFrame) -> dict[str, dict[str, str]]:
+    """The inventory's demographics, one entry per ``participant_id``, read
+    from each participant's first row. Pure, for the preview as well."""
     if df.empty or "participant_id" not in df.columns:
         return {}
 
@@ -798,18 +866,23 @@ def _merge_participants(
 # ---------------------------------------------------------------------------
 
 
-def _write_readme(bids_root: Path, name: str, report: MetadataReport) -> None:
-    """Write a minimal README scaffold. Never overwrites a hand-edited file."""
-    out = bids_root / "README"
-    if out.exists():
-        return
-    body = (
+def readme_text(name: str) -> str:
+    """The README scaffold the metadata step writes (the BIDS preview shows
+    the same text)."""
+    return (
         f"# {name}\n\n"
         "This BIDS dataset was generated by bidsmgr.\n\n"
         "Edit this README to describe acquisition details, study design,\n"
         "and any deviations from the standard BIDS layout.\n"
     )
-    out.write_text(body, encoding="utf-8")
+
+
+def _write_readme(bids_root: Path, name: str, report: MetadataReport) -> None:
+    """Write a minimal README scaffold. Never overwrites a hand-edited file."""
+    out = bids_root / "README"
+    if out.exists():
+        return
+    out.write_text(readme_text(name), encoding="utf-8")
     report.files_written.append(out)
 
 
@@ -1026,24 +1099,179 @@ def _refresh_scans_tsv(bids_root: Path, report: MetadataReport) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _is_todo_marker(value: object) -> bool:
+    """True for a marker this engine writes and may therefore take back.
+
+    ``"n/a"`` is deliberately not one: a converter writes it as a real answer
+    (MNE-BIDS for an unset line frequency) and so may a person, and nothing in
+    the file says which wrote it.
+    """
+    return value == _TODO_VALUE or value == [_TODO_VALUE]
+
+
+def _take_back(
+    data: dict, specs: dict, levels: frozenset[str],
+    *, held_elsewhere: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Remove every TODO marker this run would not have written.
+
+    ``specs`` maps the fields the standard declares for the file to their
+    spec. A marker stays only where its field's level is in ``levels`` AND it
+    is the marker the field takes now: an earlier run that marked a wider
+    scope, or wrote ``"TODO"`` into a field that names a file, is undone.
+    ``held_elsewhere`` fields go regardless. An undeclared key is left alone:
+    this engine never writes one, so a TODO there is somebody's own note.
+    """
+    removed: list[str] = []
+    for name in [k for k, v in data.items() if _is_todo_marker(v)]:
+        spec = specs.get(name)
+        if name not in held_elsewhere:
+            if spec is None:
+                continue
+            if (schema_mod.effective_level(spec) in levels
+                    and todo_value_for(spec) == data[name]):
+                continue
+        del data[name]
+        removed.append(name)
+    return removed
+
+
+@dataclass
+class SidecarMarks:
+    """What the metadata step did to one sidecar's fields (see :func:`mark_sidecar`)."""
+
+    #: Fields derived from the filename (``TaskName``), name -> value.
+    derived: dict[str, object] = field(default_factory=dict)
+    #: Placeholders written, name -> value.
+    todo_added: dict[str, object] = field(default_factory=dict)
+    #: Placeholders taken back (outside the scope, or a marker the field no
+    #: longer takes).
+    todo_removed: list[str] = field(default_factory=list)
+    missing_required: list[str] = field(default_factory=list)
+    missing_recommended: list[str] = field(default_factory=list)
+    #: ``(field, why it takes no placeholder)``.
+    unmarkable: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.derived or self.todo_added or self.todo_removed)
+
+
+def mark_sidecar(
+    data: dict,
+    name: str,
+    datatype: str,
+    suffix: str,
+    levels: Optional[frozenset[str]],
+    *,
+    bids_root: Optional[Path] = None,
+) -> SidecarMarks:
+    """What the metadata step does to one sidecar, on its fields in memory.
+
+    ``data`` is changed in place: ``TaskName`` from the filename where the
+    file is a run that needs one, the placeholders ``levels`` asks for, and
+    the placeholders outside them taken back (``None`` leaves placeholders
+    alone). ``name`` is the file's name, whose entities settle which fields
+    apply (a T1w with no task takes no TaskName); ``bids_root`` settles the
+    rules that depend on the dataset.
+
+    One definition for the step that writes files and for the BIDS preview,
+    which runs it on the sidecar it predicts, so the preview cannot show a
+    placeholder the step would not write.
+    """
+    marks = SidecarMarks()
+
+    # Filename-derivable fills (TaskName).
+    if datatype == "func" and suffix in {"bold", "sbref", "cbv", "phase"}:
+        m = _TASKNAME_RE.search(name)
+        if m and "TaskName" not in data:
+            marks.derived["TaskName"] = m.group(1)
+
+    try:
+        declared_specs = schema_mod.sidecar_fields(
+            datatype, suffix, bids_root, entities=schema_mod.name_entities(name),
+        )
+    except (KeyError, ValueError, AttributeError):
+        declared_specs = []
+    by_level: dict[str, list] = {}
+    for spec in declared_specs:
+        by_level.setdefault(schema_mod.effective_level(spec), []).append(spec)
+
+    # Take back what an earlier, wider scope marked, before the audit and the
+    # fill, so a narrower scope is what the file ends up carrying.
+    if levels is not None and any(_is_todo_marker(v) for v in data.values()):
+        marks.todo_removed = _take_back(data, {
+            canonical_field_name(spec.name): spec for spec in declared_specs
+        }, levels)
+
+    known = set(data) | set(marks.derived)
+
+    # Required field audit. A speculative requirement (one whose rule may not
+    # describe this file) is already counted as optional by effective_level.
+    # Merely CONDITIONAL requirements stay: RepetitionTime is excused only
+    # when VolumeTiming is present, which _REQUIRED_ALTERNATIVES handles, so a
+    # bold run missing both is still flagged.
+    required = by_level.get("required", [])
+    required_names = {canonical_field_name(f.name) for f in required}
+    for alternatives in _REQUIRED_ALTERNATIVES.get((datatype, suffix), ()):
+        if any(alt in known for alt in alternatives):
+            required_names -= set(alternatives)
+    marks.missing_required = sorted(n for n in required_names if n not in known)
+
+    # Recommended field audit.
+    recommended = by_level.get("recommended", [])
+    seen_rec: set[str] = set()
+    for field_info in recommended:
+        rec_name = canonical_field_name(field_info.name)
+        if rec_name not in seen_rec:
+            seen_rec.add(rec_name)
+            if rec_name not in known:
+                marks.missing_recommended.append(rec_name)
+
+    # The placeholder fill, as far as the caller asked for.
+    if levels:
+        optional = by_level.get("optional", []) if "optional" in levels else []
+        by_name: dict[str, object] = {}
+        for spec in list(required) + list(recommended) + list(optional):
+            by_name.setdefault(canonical_field_name(spec.name), spec)
+        wanted: list[str] = []
+        if "required" in levels:
+            wanted += marks.missing_required
+        if "recommended" in levels:
+            wanted += marks.missing_recommended
+        if "optional" in levels:
+            wanted += [canonical_field_name(f.name) for f in optional
+                       if canonical_field_name(f.name) not in known]
+        for field_name in wanted:
+            if field_name in known or field_name in marks.todo_added:
+                continue
+            spec = by_name.get(field_name)
+            if spec is None:
+                continue
+            value = todo_value_for(spec)
+            if value is NO_TODO:
+                # Not a silent skip: say which field and why, so a fill that
+                # covers two thirds does not report itself complete.
+                marks.unmarkable.append((field_name, unmarkable_reason(spec)))
+                continue
+            marks.todo_added[field_name] = value
+
+    data.update(marks.derived)
+    data.update(marks.todo_added)
+    return marks
+
+
 def _fill_and_audit_sidecars(
     bids_root: Path,
     report: MetadataReport,
     *,
-    levels: frozenset[str] = frozenset(),
+    levels: Optional[frozenset[str]] = None,
 ) -> None:
-    """Walk every sidecar JSON, fill derivable fields, audit required ones.
+    """Walk every sidecar JSON, run :func:`mark_sidecar` on it, record and write.
 
-    Fills are non-destructive: existing keys are never overwritten.
-    ``TaskName`` (from the ``_task-<label>`` token in the filename) is
-    filled when missing. The audit then checks required + recommended
-    fields per the schema engine and records anything still missing.
-
-    ``levels`` says which requirement levels get a placeholder written into
-    the file for fields that are still missing. Empty means none. The
-    audit messages still report what *was* missing (the report shows
-    what got TODO'd in ``report.todo_fills``), but the file ends the
-    run with no field absent.
+    Fills are non-destructive: existing keys are never overwritten. The
+    audit messages still report what *was* missing (the report shows what
+    got TODO'd in ``report.todo_fills``).
     """
     for json_path in sorted(bids_root.rglob("*.json")):
         if json_path.name in ("dataset_description.json", "participants.json"):
@@ -1063,148 +1291,87 @@ def _fill_and_audit_sidecars(
         if not isinstance(data, dict):
             continue
 
-        # Filename-derivable fills (TaskName).
-        fills: dict[str, object] = {}
-        if datatype == "func" and suffix in {"bold", "sbref", "cbv", "phase"}:
-            m = _TASKNAME_RE.search(json_path.name)
-            if m and "TaskName" not in data:
-                fills["TaskName"] = m.group(1)
-
-        # Required field audit.
-        try:
-            required = schema_mod.required_sidecar_fields(datatype, suffix)
-        except (KeyError, ValueError, AttributeError):
-            required = []
-        # Speculative requirements are excluded. The schema requires
-        # SkullStripped only of a derivative and Units only of a phase image;
-        # neither is knowable from the datatype and suffix, and demanding them
-        # of an ordinary raw scan reports a violation that is not one. Merely
-        # CONDITIONAL requirements stay: RepetitionTime is excused only when
-        # VolumeTiming is present, which _REQUIRED_ALTERNATIVES below handles,
-        # so a bold run missing both is still flagged.
-        required_names = {
-            _canonical_field_name(f.name) for f in required if not f.speculative
-        }
-        # Mutual exclusivity: if any alternative is already present,
-        # drop the whole alternative group from required_names.
-        for alternatives in _REQUIRED_ALTERNATIVES.get((datatype, suffix), ()):
-            if any(alt in data or alt in fills for alt in alternatives):
-                required_names -= set(alternatives)
-
+        marks = mark_sidecar(data, json_path.name, datatype, suffix, levels,
+                             bids_root=bids_root)
         rel = json_path.relative_to(bids_root)
-        missing_req: list[str] = sorted(
-            n for n in required_names if n not in data and n not in fills
-        )
-        for name in missing_req:
+        for name in marks.missing_required:
             report.missing_required.append(f"{rel}: missing {name!r}")
-
-        # Recommended field audit.
+        for name in marks.missing_recommended:
+            report.missing_recommended.append(f"{rel}: missing recommended {name!r}")
+        for name, why in marks.unmarkable:
+            report.unmarkable.append(f"{rel}: {name!r} takes no placeholder ({why})")
+        if not marks.changed:
+            continue
         try:
-            recommended = schema_mod.recommended_sidecar_fields(datatype, suffix)
-        except (KeyError, ValueError, AttributeError):
-            recommended = []
-        recommended_names: list[str] = []
-        seen_rec: set[str] = set()
-        for field_info in recommended:
-            name = _canonical_field_name(field_info.name)
-            if name in seen_rec:
-                continue
-            seen_rec.add(name)
-            recommended_names.append(name)
-        missing_rec: list[str] = [
-            n for n in recommended_names if n not in data and n not in fills
-        ]
-        for name in missing_rec:
-            report.missing_recommended.append(
-                f"{rel}: missing recommended {name!r}"
-            )
+            json_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            report.warnings.append(f"could not write {json_path}: {exc}")
+            continue
+        # Filename-derived fills (TaskName) are recorded apart from TODOs.
+        if marks.derived:
+            report.sidecar_fills.append(SidecarFill(sidecar=json_path, fields=marks.derived))
+        if marks.todo_added:
+            report.todo_fills.append(
+                TodoFill(sidecar=json_path, fields=sorted(marks.todo_added)))
+        if marks.todo_removed:
+            report.todo_removed.append(
+                TodoFill(sidecar=json_path, fields=sorted(marks.todo_removed)))
 
-        # Apply the placeholder fill, as far as the caller asked for.
-        todo_added: list[str] = []
-        if levels:
-            # Optional is only looked up when it is actually wanted: it is the
-            # biggest group by far and reading it costs on every sidecar.
-            optional = []
-            if "optional" in levels:
-                try:
-                    optional = schema_mod.optional_sidecar_fields(
-                        datatype, suffix,
-                    )
-                except (KeyError, ValueError, AttributeError):
-                    optional = []
-            by_name: dict[str, object] = {}
-            for spec in list(required) + list(recommended) + list(optional):
-                by_name.setdefault(_canonical_field_name(spec.name), spec)
 
-            wanted: list[str] = []
-            if "required" in levels:
-                wanted += missing_req
-            if "recommended" in levels:
-                wanted += missing_rec
-            if "optional" in levels:
-                wanted += [
-                    _canonical_field_name(f.name) for f in optional
-                    if _canonical_field_name(f.name) not in data
-                ]
+def mark_dataset_description(
+    data: dict,
+    levels: Optional[frozenset[str]],
+    *,
+    bids_root: Optional[Path] = None,
+    citation: bool = False,
+) -> SidecarMarks:
+    """What the metadata step does to ``dataset_description.json``'s fields.
 
-            for name in wanted:
-                if name in data or name in fills:
-                    continue
-                spec = by_name.get(name)
-                if spec is None:
-                    continue
-                value = _todo_value_for(spec)
-                if value is _NO_TODO:
-                    # Not a silent skip: say which field and why, so a fill
-                    # that covers two thirds does not report itself complete.
-                    report.unmarkable.append(
-                        f"{rel}: {name!r} takes no placeholder "
-                        f"({unmarkable_reason(spec)})"
-                    )
-                    continue
-                fills[name] = value
-                todo_added.append(name)
+    Every level comes from the schema, asked with the dataset in hand, because
+    two of them depend on it: ``Authors`` is recommended only while there is
+    no ``CITATION.cff``. A hand-kept list used to add six optional fields
+    (Funding, EthicsApprovals, ...) to the recommended scope, which is how a
+    "required and recommended" run left placeholders the Editor shows under
+    Optional. ``levels`` as in :func:`mark_sidecar`; ``citation`` says the
+    dataset has a ``CITATION.cff``. ``data`` is changed in place.
+    """
+    marks = SidecarMarks()
+    try:
+        specs = {f.name: f for f in schema_mod.dataset_description_fields(bids_root)}
+    except Exception:  # noqa: BLE001 - the audit must still run
+        specs = {}
+    marks.missing_recommended = [
+        name for name, spec in specs.items()
+        if name not in data and schema_mod.effective_level(spec) == "recommended"
+    ]
+    if levels is None:
+        return marks
 
-        # Write back if anything changed.
-        if fills:
-            data.update(fills)
-            try:
-                json_path.write_text(
-                    json.dumps(data, indent=2) + "\n", encoding="utf-8",
-                )
-            except OSError as exc:
-                report.warnings.append(f"could not write {json_path}: {exc}")
-                continue
-
-            # Record filename-derived fills (TaskName) separately from TODOs.
-            # Keyed on what we actually recorded as a TODO, not on the value:
-            # an array placeholder is ``["TODO"]``, which no scalar comparison
-            # would catch, and it would then be reported as a real fill.
-            non_todo = {k: v for k, v in fills.items() if k not in set(todo_added)}
-            if non_todo:
-                report.sidecar_fills.append(
-                    SidecarFill(sidecar=json_path, fields=non_todo),
-                )
-            if todo_added:
-                report.todo_fills.append(
-                    TodoFill(sidecar=json_path, fields=sorted(todo_added)),
-                )
+    # With a citation file these belong in it, and the schema's own checks
+    # (SingleSourceAuthors, SingleSourceCitationFields) report them here: a
+    # placeholder would add the very finding the citation file removed.
+    held_elsewhere = _CITATION_FIELDS if citation else frozenset()
+    marks.todo_removed = _take_back(data, specs, levels, held_elsewhere=held_elsewhere)
+    for name, spec in sorted(specs.items()):
+        if (name in data or name in held_elsewhere
+                or schema_mod.effective_level(spec) not in levels):
+            continue
+        value = todo_value_for(spec)
+        if value is NO_TODO:
+            marks.unmarkable.append((name, unmarkable_reason(spec)))
+            continue
+        marks.todo_added[name] = value
+    data.update(marks.todo_added)
+    return marks
 
 
 def _audit_dataset_description(
     bids_root: Path,
     report: MetadataReport,
     *,
-    levels: frozenset[str] = frozenset(),
+    levels: Optional[frozenset[str]] = None,
 ) -> None:
-    """Audit ``dataset_description.json`` recommended fields.
-
-    The schema engine doesn't expose dataset-level recommended fields
-    (its API is keyed by ``(datatype, suffix)``), so we use the small
-    BIDS 1.10 list in ``_DATASET_DESCRIPTION_RECOMMENDED``. With
-    ``levels`` says which requirement levels get a placeholder written for
-    fields that are still missing. Empty means none.
-    """
+    """Run :func:`mark_dataset_description` on the dataset's own, record, write."""
     path = bids_root / "dataset_description.json"
     if not path.exists():
         return
@@ -1214,58 +1381,26 @@ def _audit_dataset_description(
         return
     if not isinstance(data, dict):
         return
-
     rel = path.name
-    # What the STANDARD declares for this file, at the levels asked for,
-    # rather than the hand-kept recommended list this used to consult. The
-    # list was right about the recommended ones and silent about everything
-    # else, so an "optional" scope could never have reached them.
-    try:
-        specs = {
-            f.name: f for f in schema_mod.dataset_description_fields(bids_root)
-        }
-    except Exception:  # noqa: BLE001 - the audit must still run
-        specs = {}
-
-    missing: list[str] = [
-        f for f in _DATASET_DESCRIPTION_RECOMMENDED if f not in data
-    ]
-    for name in missing:
+    marks = mark_dataset_description(
+        data, levels, bids_root=bids_root,
+        citation=(bids_root / "CITATION.cff").exists(),
+    )
+    for name in marks.missing_recommended:
         report.missing_recommended.append(f"{rel}: missing recommended {name!r}")
-
-    if not levels:
-        return
-
-    wanted = [
-        name for name, spec in specs.items()
-        if name not in data and getattr(spec, "level", "") in levels
-    ]
-    # The hand-kept recommended names stay in play even if the schema places
-    # them elsewhere, so nothing this file used to fill stops being filled.
-    if "recommended" in levels:
-        wanted += [n for n in missing if n not in wanted]
-
-    filled: list[str] = []
-    for name in sorted(set(wanted)):
-        spec = specs.get(name)
-        if spec is None:
-            continue
-        value = _todo_value_for(spec)
-        if value is _NO_TODO:
-            report.unmarkable.append(
-                f"{rel}: {name!r} takes no placeholder "
-                f"({unmarkable_reason(spec)})"
-            )
-            continue
-        data[name] = value
-        filled.append(name)
-    if not filled:
+    for name, why in marks.unmarkable:
+        report.unmarkable.append(f"{rel}: {name!r} takes no placeholder ({why})")
+    if not marks.changed:
         return
     try:
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        report.todo_fills.append(TodoFill(sidecar=path, fields=sorted(filled)))
     except OSError as exc:
         report.warnings.append(f"could not write {path}: {exc}")
+        return
+    if marks.todo_added:
+        report.todo_fills.append(TodoFill(sidecar=path, fields=sorted(marks.todo_added)))
+    if marks.todo_removed:
+        report.todo_removed.append(TodoFill(sidecar=path, fields=sorted(marks.todo_removed)))
 
 
 def _write_metadata_report(bids_root: Path, report: MetadataReport) -> None:
@@ -1300,7 +1435,7 @@ def _infer_datatype_suffix(
 
     datatype = ""
     for part in rel_parts:
-        if part in _BIDS_DATATYPE_NAMES:
+        if part in _datatype_names():
             datatype = part
             break
 

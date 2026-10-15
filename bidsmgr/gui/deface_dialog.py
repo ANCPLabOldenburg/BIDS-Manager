@@ -46,6 +46,7 @@ from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
 from .widgets.scope_bar import ScopeBar
 from .widgets.spinner import BusySpinner
+from .typefaces import code
 
 
 # Everything that differs between removing a face and removing the skull.
@@ -93,7 +94,7 @@ _COPY = {
             "Skull stripping throws away everything outside the brain, which "
             "removes the face and a great deal else. The result is a "
             "<b>derivative</b>, not raw data, so it is written to "
-            "<code>derivatives/</code> and the original scan is left exactly "
+            + code("derivatives/") + " and the original scan is left exactly "
             "as it is. One entry in the Editor's history, and nothing happens "
             "until you press the button."
         ),

@@ -182,6 +182,7 @@ def test_existing_probe_guess_wins_over_the_modality_tag() -> None:
     _classify_pet_rows(df)
     assert df.at[0, "bids_guess_classifier"] == "dcm2niix"
     assert df.at[0, "bids_guess_confidence"] == 0.85
+    assert df.at[0, "modality"] == "pet", "the tag says PET whoever named it"
 
 
 def test_mr_row_is_untouched() -> None:

@@ -14,9 +14,7 @@ Lift-and-shift from ``inspector_proto/proto.py``; no logic change.
 """
 
 from .bids_tree_pane import BidsTreePane
-from .image_label import ImageLabel
 from .json_tree_view import JsonTreeView
-from .nifti_viewer_pane import NiftiViewerPane
 from .panel_frame import PanelFrame
 from .primitives import (
     Chip,
@@ -26,8 +24,6 @@ from .primitives import (
     PathBar,
     VSep,
 )
-from .mrs_viewer_pane import MrsViewerPane
-from .recording_viewer_pane import RecordingViewerPane, is_recording_path
 from .sidecar_form_pane import SidecarFormPane, find_peer_files
 from .sidecar_row import SidecarRow
 from .tsv_viewer_pane import TsvViewerPane
@@ -48,23 +44,18 @@ __all__ = [
     "Chip",
     "ElidedLabel",
     "ElidedPushButton",
-    "ImageLabel",
     "JsonTreeView",
     "KIND_BG_TOKEN",
     "KIND_CHAR",
     "KIND_FG_TOKEN",
-    "NiftiViewerPane",
     "PaneHeader",
     "PanelFrame",
     "PathBar",
-    "MrsViewerPane",
-    "RecordingViewerPane",
     "SidecarFormPane",
     "SidecarRow",
     "TsvViewerPane",
     "ValidationPane",
     "find_peer_files",
-    "is_recording_path",
     "StatusBadge",
     "ValMessage",
     "VSep",

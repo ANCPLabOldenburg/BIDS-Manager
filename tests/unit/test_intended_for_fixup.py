@@ -18,8 +18,7 @@ import pytest
 
 from bidsmgr.fixups.intended_for import (
     _fieldmap_group_key,
-    _format_bids_uri,
-    _is_bold,
+    _name_run,
     populate_intended_for,
 )
 
@@ -29,44 +28,37 @@ from bidsmgr.fixups.intended_for import (
 # ---------------------------------------------------------------------------
 
 
-class TestFormatBidsUri:
-    def test_no_session(self) -> None:
-        uri = _format_bids_uri("001", None, "func", "sub-001_task-rest_bold.nii.gz")
-        assert uri == "bids::sub-001/func/sub-001_task-rest_bold.nii.gz"
+class TestNameRun:
+    def test_uri_without_session(self) -> None:
+        name = _name_run("001", None, Path("func/sub-001_task-rest_bold.nii.gz"), "uri")
+        assert name == "bids::sub-001/func/sub-001_task-rest_bold.nii.gz"
 
-    def test_with_session(self) -> None:
-        uri = _format_bids_uri("001", "pre", "func", "sub-001_ses-pre_task-rest_bold.nii.gz")
-        assert uri == "bids::sub-001/ses-pre/func/sub-001_ses-pre_task-rest_bold.nii.gz"
+    def test_uri_with_session(self) -> None:
+        name = _name_run("001", "pre", Path("func/sub-001_ses-pre_task-rest_bold.nii.gz"), "uri")
+        assert name == "bids::sub-001/ses-pre/func/sub-001_ses-pre_task-rest_bold.nii.gz"
 
-
-class TestIsBold:
-    @pytest.mark.parametrize(
-        "name,expected",
-        [
-            ("sub-001_task-rest_bold.nii.gz", True),
-            ("sub-001_task-rest_bold.nii", True),
-            ("sub-001_task-rest_run-1_bold.nii.gz", True),
-            ("sub-001_task-rest_sbref.nii.gz", False),
-            ("sub-001_task-rest_bold_aborted.nii.gz", False),
-            ("sub-001_T1w.nii.gz", False),
-            ("sub-001_dwi.nii.gz", False),
-        ],
-    )
-    def test_recognises_bold(self, name: str, expected: bool) -> None:
-        assert _is_bold(name) is expected
+    def test_relative_keeps_the_session(self) -> None:
+        """Without ``ses-`` a subject-relative path links in no sdcflows
+        version and fails validation (measured 2026-10-12)."""
+        name = _name_run("001", "pre", Path("func/sub-001_ses-pre_task-rest_bold.nii.gz"),
+                         "relative")
+        assert name == "ses-pre/func/sub-001_ses-pre_task-rest_bold.nii.gz"
 
 
 class TestFieldmapGroupKey:
     @pytest.mark.parametrize(
         "filename,expected_key",
         [
-            ("sub-001_magnitude1.json", "sub-001"),
-            ("sub-001_magnitude2.json", "sub-001"),
-            ("sub-001_phasediff.json", "sub-001"),
-            ("sub-001_phase1.json", "sub-001"),
-            ("sub-001_phase2.json", "sub-001"),
-            ("sub-001_acq-fm2_run-1_magnitude1.json", "sub-001_acq-fm2_run-1"),
-            ("sub-001_epi.json", "sub-001"),
+            ("sub-001_magnitude1.json", "sub-001#phase"),
+            ("sub-001_magnitude2.json", "sub-001#phase"),
+            ("sub-001_phasediff.json", "sub-001#phase"),
+            ("sub-001_phase1.json", "sub-001#phase"),
+            ("sub-001_phase2.json", "sub-001#phase"),
+            ("sub-001_acq-fm2_run-1_magnitude1.json", "sub-001_acq-fm2_run-1#phase"),
+            ("sub-001_fieldmap.json", "sub-001#fieldmap"),
+            ("sub-001_magnitude.json", "sub-001#fieldmap"),
+            ("sub-001_epi.json", "sub-001#epi"),
+            ("sub-001_dir-PA_part-mag_epi.json", "sub-001#epi"),
         ],
     )
     def test_groups_fmap_components_together(

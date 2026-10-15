@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import Sequence, Iterable, Optional
 
+from ..util.oplog import add_log_arguments, dataset_root_for, log_keywords, logged
 from ..metadata import DatasetMetadata, MetadataReport, run_metadata
 
 log = logging.getLogger(__name__)
@@ -30,6 +31,10 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+@logged("metadata", lambda a: (
+    dataset_root_for(Path(a["target"]) / a["dataset"] if a["dataset"] else Path(a["target"])),
+    {"target": a["target"], "dataset": a["dataset"], "inventory": a["inventory_tsv"],
+     "TODO placeholders": a["fill_scope"] or "unchanged"}))
 def run_metadata_cli(
     target: Path,
     *,
@@ -45,8 +50,7 @@ def run_metadata_cli(
     ethics_approvals: Optional[list[str]] = None,
     references_and_links: Optional[list[str]] = None,
     dataset_doi: Optional[str] = None,
-    fill_todos: bool = False,
-    fill_scope: str = "",
+    fill_scope: Optional[str] = None,
     write_report: bool = True,
     generate_companions: bool = False,
     write_citation_file: bool = False,
@@ -104,8 +108,7 @@ def run_metadata_cli(
                 bids_root,
                 inventory_tsv=inventory_tsv,
                 dataset_meta=meta,
-                fill_todos=fill_todos,
-                fill_scope=fill_scope or None,
+                fill_scope=fill_scope,
                 write_report=write_report,
                 participants_file=participants_file,
                 phenotype_files=phenotype_files,
@@ -206,6 +209,13 @@ def _print_report(bids_root: Path, report: MetadataReport) -> None:
         print(
             f"  TODO placeholders inserted: {total} fields across "
             f"{len(report.todo_fills)} files"
+        )
+    if report.todo_removed:
+        total = sum(len(f.fields) for f in report.todo_removed)
+        print(
+            f"  TODO placeholders taken back (outside the "
+            f"{report.fill_scope!r} scope): {total} fields across "
+            f"{len(report.todo_removed)} files"
         )
     if report.missing_required:
         print(f"  missing REQUIRED ({len(report.missing_required)}):")
@@ -331,26 +341,30 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--fill-todos",
         action="store_true",
         help=(
-            "Mark the gaps. For every sidecar field the standard declares "
-            "and the file does not carry, write a placeholder the field can "
-            "legally hold, so the gap is visible in the file and reported by "
+            "Write TODO into the gaps. For every sidecar field the standard "
+            "declares and the file does not carry, write a placeholder the "
+            "field can legally hold (TODO, [\"TODO\"], or n/a where the field "
+            "accepts it), so the gap is visible in the file and reported by "
             "validation instead of being an absence nobody notices. Existing "
             "values are NEVER overwritten. Same as --fill-scope recommended."
         ),
     )
     parser.add_argument(
         "--fill-scope",
-        choices=("required", "recommended", "optional"),
-        default="",
+        choices=("none", "required", "recommended", "optional"),
+        default=None,
         metavar="LEVEL",
         help=(
-            "How much of what the standard declares to mark. The scopes "
-            "nest: 'required' is the floor, 'recommended' (the default) adds "
-            "what analyses usually need, 'optional' adds everything else. "
+            "Which fields carry a TODO placeholder after this run. The scopes "
+            "nest: 'required' is the floor, 'recommended' adds what analyses "
+            "usually need, 'optional' adds everything else, 'none' marks "
+            "nothing. Placeholders follow the scope both ways: a TODO an "
+            "earlier, wider run wrote into a field outside it is taken back. "
             "Deprecated fields are never marked. A field whose type admits "
             "no honest marker (a number, a boolean, a real vocabulary) is "
             "left absent and reported, rather than given a value nobody "
-            "stated."
+            "stated. Without this flag or --fill-todos, placeholders already "
+            "in the dataset are left as they are."
         ),
     )
     parser.add_argument(
@@ -378,6 +392,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
 
+    add_log_arguments(parser)
     args = parser.parse_args(argv)
     # One version for the whole run, adopted before any schema question is
     # asked. Without this the flag would reach the validator alone and a
@@ -427,13 +442,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         ethics_approvals=args.ethics_approvals,
         references_and_links=args.references_and_links,
         dataset_doi=args.dataset_doi,
-        fill_todos=args.fill_todos or bool(args.fill_scope),
-        fill_scope=args.fill_scope,
+        fill_scope=args.fill_scope or ("recommended" if args.fill_todos else None),
         generate_companions=args.generate_companions,
         write_citation_file=args.write_citation,
         write_report=args.write_report,
         participants_file=args.participants_file,
         phenotype_files=args.phenotype_files,
+        **log_keywords(args),
     )
 
 

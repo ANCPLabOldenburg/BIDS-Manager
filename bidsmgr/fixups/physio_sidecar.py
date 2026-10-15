@@ -88,7 +88,26 @@ def enrich_physio_sidecars(staging: Path) -> int:
     for sidecar in sorted(staging.rglob("*_physio.json")):
         if _enrich_one(staging, sidecar):
             changed += 1
+    # An eye tracker's events (physioevents) belong to the task run too.
+    for sidecar in sorted(staging.rglob("*_physioevents.json")):
+        if _enrich_task_name(staging, sidecar, "physioevents"):
+            changed += 1
     return changed
+
+
+def _enrich_task_name(staging: Path, sidecar: Path, suffix: str) -> bool:
+    """``TaskName`` from the ``task`` entity, when the schema declares it."""
+    data = _read_json(sidecar)
+    datatype = _datatype_of(staging, sidecar) if data is not None else ""
+    if not datatype or data.get("TaskName") or \
+            "TaskName" not in _declared_fields(datatype, suffix):
+        return False
+    task = _entity_value(sidecar.name, "task")
+    if not task:
+        return False
+    data["TaskName"] = task
+    _write_json(sidecar, data)
+    return True
 
 
 def _enrich_one(staging: Path, sidecar: Path) -> bool:

@@ -198,14 +198,20 @@ def test_undo_is_noop_when_last_event_is_structural(qtbot, isolated_settings, tm
     assert panel._model.dataframe().iloc[0]["task"] == "rest"  # unchanged
 
 
-def test_relocate_source_persists_to_version_meta(
+def test_picking_a_folder_to_scan_leaves_the_open_scan_s_record_alone(
     qtbot, isolated_settings, tmp_path, monkeypatch,
 ):
+    """The picked folder is what Scan reads NEXT. It used to be written into
+    the open scan's record, so an older scan named a newer scan's folder
+    (found in six real projects). Relinking moved data is its own action
+    (tests/gui/test_converter_sources.py)."""
     from bidsmgr.gui import converter_panel as cp
 
     root = tmp_path / "ds"
     proj = open_or_create_workspace(root)
-    vdir, _ = _add_version(root, "raw", _inventory_df(), str(tmp_path / "old_raw"))
+    old_raw = tmp_path / "old_raw"
+    old_raw.mkdir()
+    vdir, _ = _add_version(root, "raw", _inventory_df(), str(old_raw))
     panel = ConverterPanel(project=proj)
     qtbot.addWidget(panel)
     panel.set_project(proj, root)
@@ -217,8 +223,13 @@ def test_relocate_source_persists_to_version_meta(
     )
     panel._on_pick_raw_dir()
 
-    assert panel._raw_root == new_raw
-    assert workspace.read_version_meta(vdir)["raw_root"] == str(new_raw)
+    assert panel._raw_root == new_raw, "the folder to scan next"
+    assert workspace.read_version_meta(vdir)["raw_root"] == str(old_raw), "record kept"
+    assert panel._sources.root == old_raw, "the table still reads its own source"
+    bar = panel._raw_pathbar
+    assert bar.chip_text() == "Not scanned yet" and bar.action_button.isVisibleTo(bar)
+    bar.action_button.click()
+    assert panel._raw_root == old_raw and bar.chip_text() == ""
 
 
 def test_fresh_scan_flags_rows_whose_subject_already_exists(

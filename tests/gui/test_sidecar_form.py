@@ -159,10 +159,17 @@ def test_set_file_renders_json_content_without_report(
     pane.set_file(json_path, bids_root, None)
 
     assert pane.current_file() == json_path
-    # Three keys in the test JSON.
-    assert len(pane._rows) == 3
-    # Without a report, every field is OPTIONAL.
-    assert all(row._level == "opt" for row in pane._rows)
+    # The three keys in the test JSON, among every field the schema declares
+    # for a T1w: the same rows the form shows once a report exists.
+    keys = {row._key for row in pane._rows}
+    assert {"RepetitionTime", "EchoTime", "Manufacturer"} <= keys
+    assert len(pane._rows) > 3
+    # Levels come from the schema, not "everything optional": a TODO the
+    # metadata step wrote into a recommended field must read as recommended.
+    level = {row._key: row._level for row in pane._rows}
+    assert level["Manufacturer"] == "rec"
+    # A T1w with no task entity is not offered the task fields.
+    assert "TaskName" not in keys
 
 
 def test_set_file_detects_todo_placeholders_without_report(
@@ -174,8 +181,12 @@ def test_set_file_detects_todo_placeholders_without_report(
         / "sub-01_ses-01_task-rest_bold.json"
     )
     pane.set_file(bold_json, bids_root, None)
-    # Two keys: RepetitionTime (number) and TaskName (TODO placeholder).
-    assert len(pane._rows) == 2
+    rows = {row._key: row for row in pane._rows}
+    # RepetitionTime (a number) and TaskName (the TODO placeholder), at the
+    # levels the standard gives them.
+    assert rows["TaskName"]._value_kind == "todo"
+    assert rows["TaskName"]._level == "req"
+    assert rows["RepetitionTime"]._value_kind == "number"
 
 
 def test_set_file_with_verdict_uses_schema_levels(
@@ -240,9 +251,8 @@ def test_footer_summary_without_report_shows_field_count(
         bids_root / "sub-01" / "ses-01" / "anat" / "sub-01_ses-01_T1w.json"
     )
     pane.set_file(json_path, bids_root, None)
-    # 3 keys in the JSON.
     text = pane._footer_summary.text()
-    assert "3 fields" in text
+    assert f"{len(pane._rows)} fields" in text
     assert "not yet validated" in text
 
 
@@ -279,10 +289,13 @@ def test_sidecar_row_bars_use_qss_object_names(qapp, bids_root: Path) -> None:
     pane.set_file(json_path, bids_root, None)
 
     assert pane._rows
-    # Without a report every field is OPTIONAL, so every bar should
-    # carry the OPT object name.
+    # Each bar carries its level's object name, read from the schema even
+    # before a report exists.
     for row in pane._rows:
-        assert row._bar.objectName() == "sc-bar-opt"
+        assert row._bar.objectName() == f"sc-bar-{row._level}"
+    assert {row._bar.objectName() for row in pane._rows} >= {
+        "sc-bar-rec", "sc-bar-opt",
+    }
 
 
 def test_legend_swatches_use_qss_object_names(qapp) -> None:
@@ -387,8 +400,9 @@ def test_tree_click_loads_form_without_validation(
     qapp.processEvents()
 
     assert panel._sidecar_form.current_file() == Path(json_path_str)
-    # Three rows from the JSON content directly — no validation needed.
-    assert len(panel._sidecar_form._rows) == 3
+    # The file's three keys, among the schema's rows, with no validation run.
+    keys = {row._key for row in panel._sidecar_form._rows}
+    assert {"RepetitionTime", "EchoTime", "Manufacturer"} <= keys
 
 
 def test_tree_click_only_opens_clicked_file(
@@ -398,7 +412,7 @@ def test_tree_click_only_opens_clicked_file(
     auto-opened peers (no tab strip, no peer signals).
 
     Since the NIfTI viewer landed, clicking a ``.nii.gz`` routes to
-    :class:`NiftiViewerPane` instead of binding the sidecar form to
+    the volume viewer instead of binding the sidecar form to
     the volume. The "no peer auto-loaded" invariant still holds — the
     sibling JSON stays untouched.
     """

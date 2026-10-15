@@ -40,8 +40,10 @@ from typing import Optional
 
 import pandas as pd
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -50,14 +52,10 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPlainTextEdit,
+    QToolButton,
     QPushButton,
-    QSplitter,
     QStackedWidget,
     QTableView,
-    QTabWidget,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -80,7 +78,11 @@ from .models import COLUMNS, MANDATORY_COLUMN_KEYS, InventoryTableModel
 from .output_fs_pane import OutputFsPane
 from .properties_panel import PropertiesPanel
 from .raw_fs_pane import RawFsPane
+from .overview_pane import OverviewPane
 from .widgets import BusySpinner, Chip, PaneHeader, PanelFrame, PathBar, VSep
+from .widgets.panel_frame import CARD_GAP_PX, HEADER_EXTRAS, HEADER_LEAD, card_canvas
+from .widgets.primitives import Segmented
+from .widgets.splitter import Splitter
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +92,17 @@ log = logging.getLogger(__name__)
 #: section widths are, but the TEXT is measured with font metrics, so this
 #: stays right at any font scale (see cross-platform rule 4.1).
 _HEADER_PADDING_PX = 26
+
+
+#: Which view the Inspection area last showed: "table" or "overview".
+_INSPECTION_VIEW_KEY = "inspector/view"
+
+
+def _mtime(path) -> float:
+    try:
+        return Path(path).stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _repolish_combo(combo: QComboBox) -> None:
@@ -121,6 +134,11 @@ def _repolish_combo(combo: QComboBox) -> None:
         w.update()
 
 
+
+def _native(key: QKeySequence.StandardKey) -> str:
+    """A standard shortcut as this OS writes it (Cmd+Z on macOS)."""
+    return QKeySequence(key).toString(QKeySequence.SequenceFormat.NativeText)
+
 class ConverterPanel(QWidget):
     """The pre-conversion Inspector layout.
 
@@ -144,7 +162,17 @@ class ConverterPanel(QWidget):
         self._convert_worker: Optional[ConvertWorker] = None
         self._metadata_worker: Optional[MetadataWorker] = None
         self._validate_worker: Optional[ValidateWorker] = None
+        # The folder the Raw input bar shows: what Scan reads next. With a
+        # table open it is that table's source until another folder is picked.
         self._raw_root: Optional[Path] = None
+        # Where the data of the TABLE SHOWN is now (``inventory.sources``),
+        # and what the last look for it found. The preview, the PSD and the
+        # conversion read from here, never from a folder picked to scan next.
+        self._sources = None
+        self._source_check = None
+        self._source_action = ""
+        self._source_jobs = None
+        self._source_generation = 0
         self._output_tsv: Optional[Path] = None
         self._bids_parent: Optional[Path] = None
         # Set when an explicit project is bound (Welcome -> Open/Create). The
@@ -162,6 +190,10 @@ class ConverterPanel(QWidget):
         # Persistent settings — loaded fresh each construction so a
         # Settings dialog save propagates on the next open of this panel.
         self._app_settings: AppSettings = AppSettings.load()
+        from .delegates.inspection_cells import set_confidence_bands
+
+        _general = self._app_settings.classifier().general
+        set_confidence_bands(_general.apply_at, _general.check_at)
         # Column visibility: persisted via QSettings under
         # ``inspector/columns/<key>``. The setter ``set_column_visible``
         # writes through to QSettings so a restart re-applies the choice.
@@ -186,7 +218,13 @@ class ConverterPanel(QWidget):
             "Raw input", raw_init, ok=bool(self._raw_root),
         )
         self._raw_pathbar.change_button.clicked.connect(self._on_pick_raw_dir)
+        self._raw_pathbar.action_button.clicked.connect(self._on_source_action)
         v.addWidget(self._raw_pathbar)
+        # The data can be moved, or its drive unplugged, while the app is in
+        # the background: look again when it comes back to the front.
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._on_application_state)
 
         bids_init = str(self._bids_parent) if self._bids_parent else "(not set)"
         self._bids_pathbar = PathBar(
@@ -197,12 +235,17 @@ class ConverterPanel(QWidget):
 
         # ---------------- main vertical splitter ----------------
         # Top: 4-col horizontal splitter (panes). Bottom: tabbed dock.
-        v_split = QSplitter(Qt.Orientation.Vertical)
-        v_split.setHandleWidth(1)
+        # The panels are cards on the window's canvas: the two top-level
+        # splitters leave a gap between them (``card-split``); the ones
+        # inside a card keep a hairline.
+        v_split = Splitter(Qt.Orientation.Vertical)
+        v_split.setObjectName("card-split")
+        v_split.setHandleWidth(CARD_GAP_PX)
         v_split.setChildrenCollapsible(False)
 
-        h_split = QSplitter(Qt.Orientation.Horizontal)
-        h_split.setHandleWidth(1)
+        h_split = Splitter(Qt.Orientation.Horizontal)
+        h_split.setObjectName("card-split")
+        h_split.setHandleWidth(CARD_GAP_PX)
         h_split.setChildrenCollapsible(False)
 
         # Every side region is wrapped in a ``PanelFrame`` so it can be
@@ -219,10 +262,11 @@ class ConverterPanel(QWidget):
         # collapsible (fold up) + detachable, wrapped again so the whole
         # column folds to the left as one.
         self._raw_pane = RawFsPane()
+        self._raw_pane.file_activated.connect(self._on_raw_file_activated)
         self._output_pane = OutputFsPane()
         self._raw_frame = PanelFrame(self._raw_pane, "Raw data tree", edge="top")
         self._output_frame = PanelFrame(self._output_pane, "Output data tree", edge="top")
-        col1_inner = QSplitter(Qt.Orientation.Vertical)
+        col1_inner = Splitter(Qt.Orientation.Vertical)
         col1_inner.setHandleWidth(1)
         col1_inner.setChildrenCollapsible(False)
         col1_inner.addWidget(self._raw_frame)
@@ -239,7 +283,13 @@ class ConverterPanel(QWidget):
         h_split.addWidget(self._col1_frame)
 
         self._filter_pane = FilterPane()
-        self._filter_frame = PanelFrame(self._filter_pane, "Filter / structure", edge="left")
+        self._filter_pane.row_chosen.connect(self._jump_to_row)
+        self._filter_pane.rows_menu_requested.connect(self._on_filter_menu)
+        self._filter_pane.preview.set_context(self._plan_context)
+        # Its title says which of its three views it shows.
+        self._filter_frame = PanelFrame(self._filter_pane, self._filter_pane.mode_title(),
+                                        edge="left")
+        self._filter_pane.mode_changed.connect(lambda _m, title: self._filter_frame.set_title(title))
         h_split.addWidget(self._filter_frame)
 
         # Inspection (work surface, never collapsible) + Properties (folds
@@ -247,10 +297,11 @@ class ConverterPanel(QWidget):
         # detaches both together as a single unit.
         self._properties = PropertiesPanel()
         self._properties.set_project(self._project)
+        self._properties.renumber_requested.connect(self.open_renumber)
         self._properties_frame = PanelFrame(
             self._properties, "Properties", edge="right", detachable=False,
         )
-        right_inner = QSplitter(Qt.Orientation.Horizontal)
+        right_inner = Splitter(Qt.Orientation.Horizontal)
         right_inner.setHandleWidth(1)
         right_inner.setChildrenCollapsible(False)
         self._inspection_pane = self._build_inspection_pane()
@@ -264,6 +315,9 @@ class ConverterPanel(QWidget):
         self._inspection_unit = PanelFrame(
             right_inner, "Inspection", collapsible=False, detachable=True,
         )
+        # Floating, the Inspection has no title bar and its view switch sits
+        # back in the pane's own row, which then needs room around it.
+        self._inspection_unit.state_changed.connect(self._fit_view_switch_home)
         h_split.addWidget(self._inspection_unit)
 
         # Collapsing the left column or the filter hands width to the
@@ -280,21 +334,25 @@ class ConverterPanel(QWidget):
         h_split.setSizes([240, 220, 1040])
         v_split.addWidget(h_split)
 
-        # The whole bottom dock (Log / BIDS preview / Statistics) folds down
-        # as one and its panes detach; wrap it so it grows the panes above
-        # when collapsed.
-        self._dock_frame = PanelFrame(
-            self._build_bottom_dock(), "Output panels", edge="bottom",
-            detachable=False, hide_inner_header=False,
+        # The Log, under the columns: one card, folded from anywhere on its
+        # header (the title bar sits on top of it like every other card's;
+        # folded, only that bar is left at the bottom of the window), and
+        # detachable. What the conversion will write is the Inspection's
+        # Overview, beside the table.
+        self._log_frame = PanelFrame(
+            self._build_log_dock(), "Log", edge="top", collapsible=True, detachable=True,
         )
-        self._panel_frames.append(self._dock_frame)
-        v_split.addWidget(self._dock_frame)
-        # Collapsing the bottom dock hands its height to the panes above.
-        self._dock_frame.attach_splitter(v_split, grow_target=h_split)
+        self._panel_frames.append(self._log_frame)
+        v_split.addWidget(self._log_frame)
+        # Folding the Log hands its height to the panes above.
+        self._log_frame.attach_splitter(v_split, grow_target=h_split)
         v_split.setStretchFactor(0, 1)
         v_split.setStretchFactor(1, 0)
-        v_split.setSizes([560, 200])
-        v.addWidget(v_split, 1)
+        v_split.setSizes([600, 160])
+        for frame in (self._col1_frame, self._filter_frame, self._inspection_unit,
+                      self._log_frame):
+            frame.make_card()
+        v.addWidget(card_canvas(v_split), 1)
 
         # Stream worker progress messages straight into the Log tab,
         # but throttled: high-volume workers (e.g. dcm2niix parallel)
@@ -356,6 +414,7 @@ class ConverterPanel(QWidget):
         self._reset_inventory_view()
         # Path bars: clear + lock, with a reason on the buttons.
         self._raw_pathbar.set_value("(open or create a dataset first)", ok=False)
+        self._clear_source_state()
         self._raw_pathbar.change_button.setEnabled(False)
         self._raw_pathbar.change_button.setToolTip(self._NO_PROJECT_TOOLTIP)
         self._bids_pathbar.set_value("(locked to the dataset you open)", ok=False)
@@ -431,20 +490,22 @@ class ConverterPanel(QWidget):
         # Detach the model from every dependent view.
         self._table.setModel(None)
         self._properties.bind_model(None)
-        self._properties.set_raw_root(None)
+        self._sources = None
+        self._source_check = None
+        self._properties.set_sources(None)
         self._filter_pane.bind_model(None)
+        self._overview.bind_model(None)
         self._raw_pane.bind_model(None)
         self._raw_pane.set_root(None)
         # Raw input bar back to "nothing picked".
         self._raw_pathbar.set_value("(no folder selected)", ok=False)
-        # Inspection back to the placeholder; clear previews + chips + stats.
+        self._clear_source_state()
+        # Inspection back to the placeholder; clear the chips.
         self._inspection_stack.setCurrentIndex(0)
-        self._bids_preview.clear()
         self._chip_valid.setText("0 valid")
         self._chip_warn.setText("0 warnings")
         self._chip_err.setText("0 error")
         self._chip_skip.setText("0 skipped")
-        self._update_stats_label()
         self._run_btn.setEnabled(False)
         self._revalidate_btn.setEnabled(False)
 
@@ -493,19 +554,10 @@ class ConverterPanel(QWidget):
         self._project = proj
         self._properties.set_project(proj)
         self._active_version_dir = Path(version.dir)
-        if version.raw_root:
-            self._raw_root = Path(version.raw_root)
-            raw_ok = Path(version.raw_root).exists()
-            self._raw_pathbar.set_value(version.raw_root, ok=raw_ok)
-            if not raw_ok:
-                # Moved-data detection: the table still loads (curation can
-                # continue), but convert will need the source. Point the user at
-                # the fix instead of failing silently later.
-                self.log_message.emit(
-                    f"Source folder for scan '{version.version_id}' is no longer "
-                    f"at {version.raw_root}. Use 'change…' on Raw input to relocate "
-                    f"it (or re-scan) before converting."
-                )
+        # This scan's own source: never the folder another scan read. Where
+        # the data really is now, and whether it is still there, is decided
+        # when the table loads (``_resolve_sources``).
+        self._raw_root = Path(version.raw_root) if version.raw_root else None
         # The model is rebuilt with this version's project, so its event overlay
         # (cell / entity / include edits) replays automatically.
         try:
@@ -580,11 +632,12 @@ class ConverterPanel(QWidget):
         if self._project is None:
             self.log_message.emit("Nothing to undo")
             return
-        event = self._project.undo_last_user_edit()
-        if event is not None:
-            self._redo_stack.append(event)
+        events = self._project.undo_last_user_edit()
+        if events:
+            self._redo_stack.append(events)
             self._reload_active_version()
-            self.log_message.emit("Undid last edit")
+            self.log_message.emit("Undid the last change" if len(events) == 1
+                                  else f"Undid the last change ({len(events)} rows)")
         else:
             self.log_message.emit("Nothing to undo")
         self._update_undo_redo()
@@ -593,10 +646,12 @@ class ConverterPanel(QWidget):
         """Re-apply the most recently undone edit."""
         if self._project is None or not self._redo_stack:
             return
-        event = self._redo_stack.pop()
-        self._project.append(event)
+        events = self._redo_stack.pop()
+        for event in events:
+            self._project.append(event)
         self._reload_active_version()
-        self.log_message.emit("Redid edit")
+        self.log_message.emit("Redid the change" if len(events) == 1
+                              else f"Redid the change ({len(events)} rows)")
         self._update_undo_redo()
 
     def _on_user_edited(self) -> None:
@@ -642,30 +697,27 @@ class ConverterPanel(QWidget):
             sel_model.currentRowChanged.connect(self._on_current_row_changed)
             sel_model.selectionChanged.connect(self._on_selection_changed)
         self._properties.bind_model(self._model)
-        self._properties.set_raw_root(self._raw_root)
+        if output_tsv is not None:
+            self._output_tsv = Path(output_tsv)
+        self._properties.set_shims(self._series_shims())
+        self._resolve_sources(df)
         self._filter_pane.bind_model(self._model)
+        self._overview.bind_model(self._model)
         self._raw_pane.bind_model(self._model)
         if self._raw_root is not None:
             self._raw_pane.set_root(self._raw_root)
-        if output_tsv is not None:
-            self._output_tsv = Path(output_tsv)
         # The BIDS output pathbar is **independent** of the scan TSV
         # location — the user sets it explicitly with the change button.
         # Swap the inspection-pane stack from placeholder → table.
         self._inspection_stack.setCurrentWidget(self._table)
         self._update_status_chips()
-        self._rebuild_bids_preview()
-        self._update_stats_label()
         self._update_meta_button_state()
         # Seed the model's dataset-wide defaults so inheritance columns show
         # the global value (muted) in rows that have no per-row override.
         self._model.set_global_spec(self._load_global_spec())
-        # Refresh chips + previews when the model edits a row.
-        def _on_model_changed(*_a):
-            self._update_status_chips()
-            self._rebuild_bids_preview()
-            self._update_stats_label()
-        self._model.dataChanged.connect(_on_model_changed)
+        # Refresh the chips when the model edits a row (the Overview follows
+        # the model itself).
+        self._model.dataChanged.connect(lambda *_a: self._update_status_chips())
         # A fresh user edit invalidates the redo stack (timeline diverged).
         self._model.userEdited.connect(self._on_user_edited)
         # Per-row acquisition overrides (device / institution) live in the
@@ -716,6 +768,7 @@ class ConverterPanel(QWidget):
         self._raw_root = Path(dicom_root)
         self._output_tsv = Path(output_tsv)
         self._raw_pathbar.set_value(str(self._raw_root), ok=True)
+        self._clear_source_state()
 
         # A fresh scan starts from clean metadata: drop any stale
         # recording-metadata scaffold left at this output path by a PREVIOUS
@@ -731,6 +784,7 @@ class ConverterPanel(QWidget):
             log.warning("could not remove stale recording-metadata scaffold %s", stale)
 
         self._spinner.set_busy(True, message=f"Scanning {self._raw_root.name}…")
+        self._begin_run("Scan", self._raw_root.name)
         worker = ScanWorker(
             self._raw_root, self._output_tsv,
             dataset=dataset, line_freq=line_freq, montage=montage,
@@ -741,6 +795,7 @@ class ConverterPanel(QWidget):
             user_hints=user_hints,
             exclusions=exclusions,
             index_widths=index_widths,
+            classifier_config=AppSettings.load().classifier(),
             parent=self,
         )
         worker.progress.connect(self._on_progress)
@@ -812,7 +867,10 @@ class ConverterPanel(QWidget):
         self._undo_btn.setObjectName("tb-btn-ghost")
         self._undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.apply_button(self._undo_btn, "undo")
-        self._undo_btn.setToolTip("Undo the last edit")
+        self._undo_btn.setToolTip(
+            f"Undo the last change ({_native(QKeySequence.StandardKey.Undo)}). A change "
+            "made to many "
+            "rows at once (a folder's checkbox, a bulk edit) goes back in one step.")
         self._undo_btn.setVisible(False)
         self._undo_btn.clicked.connect(self._on_undo)
         lay.addWidget(self._undo_btn)
@@ -821,10 +879,22 @@ class ConverterPanel(QWidget):
         self._redo_btn.setObjectName("tb-btn-ghost")
         self._redo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.apply_button(self._redo_btn, "redo")
-        self._redo_btn.setToolTip("Redo the last undone edit")
+        self._redo_btn.setToolTip(
+            f"Redo the last undone change ({_native(QKeySequence.StandardKey.Redo)})")
         self._redo_btn.setVisible(False)
         self._redo_btn.setEnabled(False)
         self._redo_btn.clicked.connect(self._on_redo)
+        # Ctrl+Z / Cmd+Z anywhere in the Converter. A text field being typed
+        # in keeps its own undo: Qt offers the key to the focused editor
+        # first.
+        # Every key the platform binds (Redo is Ctrl+Y and Ctrl+Shift+Z on
+        # Windows, Shift+Cmd+Z on macOS), not just the first.
+        for sequence, slot in ((QKeySequence.StandardKey.Undo, self._on_undo),
+                               (QKeySequence.StandardKey.Redo, self._on_redo)):
+            shortcut = QShortcut(self)
+            shortcut.setKeys(sequence)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(slot)
         lay.addWidget(self._redo_btn)
 
         lay.addWidget(VSep())
@@ -969,7 +1039,32 @@ class ConverterPanel(QWidget):
         v = QVBoxLayout(pane)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        v.addWidget(PaneHeader("Inspection"))
+        # No header of its own: the frame around it (with Properties) is
+        # titled Inspection, and a second one read as a stutter. Its view
+        # switch is named HEADER_LEAD, so the frame lifts it into that title
+        # bar, after the title; floating, it comes back to this row.
+        home = QWidget(pane)
+        self._view_switch_home = QHBoxLayout(home)
+        self._view_switch_home.setContentsMargins(0, 0, 0, 0)
+        switch_holder = QWidget(home)
+        switch_holder.setObjectName(HEADER_LEAD)
+        sh = QHBoxLayout(switch_holder)
+        sh.setContentsMargins(0, 0, 0, 0)
+        self._view_switch = Segmented((
+            ("table", "Table", "Every recording, one row each: what will be converted and how"),
+            ("overview", "Overview",
+             "What each subject will have, and where one differs from the others"),
+        ), parent=switch_holder)
+        self._view_switch.changed.connect(self.set_inspection_view)
+        sh.addWidget(self._view_switch)
+        self._view_switch_home.addWidget(switch_holder)
+        self._view_switch_home.addStretch(1)
+        v.addWidget(home)
+        self._inspection_views = QStackedWidget()
+        table_page = QWidget()
+        tv = QVBoxLayout(table_page)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(0)
 
         # Use QStackedWidget so we can swap between "empty placeholder"
         # and the actual table without recreating widgets — keeps view
@@ -986,7 +1081,7 @@ class ConverterPanel(QWidget):
         self._table = self._build_table()
         self._inspection_stack.addWidget(self._table)
 
-        v.addWidget(self._inspection_stack, 1)
+        tv.addWidget(self._inspection_stack, 1)
 
         # Footer: per-pane controls that act on the table's selection.
         # "Highlight aborts" toggles row-tint on the model;
@@ -1003,12 +1098,132 @@ class ConverterPanel(QWidget):
         fl.addWidget(self._meta_btn)
         fl.addWidget(self._columns_btn)
         fl.addWidget(self._bulk_btn)
-        v.addWidget(footer)
+        tv.addWidget(footer)
+        self._inspection_views.addWidget(table_page)
+
+        # The Overview: what each subject will have. A count picked there
+        # selects its rows here (Properties follows); Show opens the table.
+        self._overview = OverviewPane()
+        self._overview.rows_chosen.connect(self.select_rows)
+        self._overview.rows_shown.connect(
+            lambda rows: (self.set_inspection_view("table"), self.select_rows(rows)))
+        self._inspection_views.addWidget(self._overview)
+        v.addWidget(self._inspection_views, 1)
+        view = str(QSettings().value(_INSPECTION_VIEW_KEY, "table") or "table")
+        self.set_inspection_view(view if view in ("table", "overview") else "table",
+                                 remember=False)
         return pane
+
+    # ------------------------------------------------------------------
+    # Inspection: Table or Overview
+    # ------------------------------------------------------------------
+
+    def inspection_view(self) -> str:
+        """``"table"`` or ``"overview"``."""
+        return "overview" if self._inspection_views.currentWidget() is self._overview else "table"
+
+    def set_inspection_view(self, view: str, *, remember: bool = True) -> None:
+        """Show the table or the Overview in the Inspection area."""
+        page = self._overview if view == "overview" else self._inspection_views.widget(0)
+        self._inspection_views.setCurrentWidget(page)
+        self._view_switch.set_current("overview" if view == "overview" else "table")
+        if remember:
+            QSettings().setValue(_INSPECTION_VIEW_KEY, self.inspection_view())
+
+    def select_rows(self, rows: list) -> None:
+        """Select inventory ``rows`` in the table, the first one current (so
+        Properties and Filter follow it) and scrolled into view."""
+        if self._model is None or not rows:
+            return
+        from PyQt6.QtCore import QItemSelection, QItemSelectionModel
+
+        count = self._model.rowCount()
+        wanted = sorted({int(r) for r in rows if 0 <= int(r) < count})
+        if not wanted:
+            return
+        last_column = max(self._model.columnCount() - 1, 0)
+        selection = QItemSelection()
+        start = prev = wanted[0]
+        for row in [*wanted[1:], None]:
+            if row is not None and row == prev + 1:
+                prev = row
+                continue
+            selection.select(self._model.index(start, 0), self._model.index(prev, last_column))
+            if row is not None:
+                start = prev = row
+        sel = self._table.selectionModel()
+        flags = QItemSelectionModel.SelectionFlag
+        sel.select(selection, flags.ClearAndSelect | flags.Rows)
+        first = self._model.index(wanted[0], 0)
+        sel.setCurrentIndex(first, flags.NoUpdate)
+        self._table.scrollTo(first, self._table.ScrollHint.PositionAtCenter)
+
+    def _plan_context(self) -> tuple:
+        """What the BIDS preview needs beside the table: the settings that
+        change what is written, the scan's series features, the recording
+        metadata, and each series' first DICOM (it names the series'
+        ``sourcedata/`` folder, so it is looked up only when that is on)."""
+        from .. import __version__
+        from ..converter.output_plan import PlanOptions
+        from ..schema import loader
+
+        s = self._app_settings
+        dataset = (self._bids_root.name if self._bids_root is not None else
+                   (str(self._model.dataframe()["dataset"].iloc[0])
+                    if self._model is not None and "dataset" in self._model.dataframe().columns
+                    and len(self._model.dataframe()) else ""))
+        options = PlanOptions(
+            dataset=dataset,
+            root=str(self._bids_root) if self._bids_root is not None else "",
+            inventory_dir=str(self._output_tsv.parent) if self._output_tsv is not None else "",
+            run_metadata=bool(s.post_run_metadata),
+            fill_scope=s.placeholder_scope(),
+            companions=bool(s.post_fixup_companions),
+            citation=bool(s.post_fixup_citation),
+            intended_for=s.convert_intended_for,
+            b0_field=bool(s.convert_b0_field),
+            deface=bool(s.convert_deface),
+            deface_engine=s.convert_deface_engine,
+            sourcedata=s.convert_sourcedata,
+            sourcedata_modalities=tuple(m.strip() for m in s.convert_sourcedata_modalities.split(",")
+                                        if m.strip()),
+            force_edf=bool(s.convert_force_edf),
+            bids_version=loader.bids_version(),
+            version=str(__version__),
+        )
+        features = {}
+        if self._output_tsv is not None:
+            from ..classifier.acquisition import cache
+
+            key = (str(self._output_tsv), _mtime(cache.features_path(self._output_tsv)))
+            if getattr(self, "_features_cache", (None,))[0] != key:
+                try:
+                    self._features_cache = (key, cache.read(self._output_tsv))
+                except Exception:  # noqa: BLE001 - the preview shows less
+                    self._features_cache = (key, {})
+            features = self._features_cache[1]
+        spec = self._model.global_spec() if self._model is not None else None
+        first_files: dict[str, str] = {}
+        if s.convert_sourcedata in ("copy", "archive") and self._sources is not None \
+                and self._model is not None:
+            df = self._model.dataframe()
+            for uid in (df["series_uid"] if "series_uid" in df.columns else []):
+                uid = str(uid or "").split("|", 1)[0].strip()
+                if uid and uid not in first_files:
+                    files = self._sources.series_files(uid)
+                    if files:
+                        first_files[uid] = str(files[0])
+        return options, features, spec, first_files
+
+    def _fit_view_switch_home(self) -> None:
+        floating = self._inspection_unit.is_detached()
+        self._view_switch_home.setContentsMargins(*((10, 8, 10, 6) if floating else (0, 0, 0, 0)))
 
     def _build_table(self) -> QTableView:
         t = QTableView()
         t.setObjectName("inv-table")
+        t.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        t.customContextMenuRequested.connect(self._on_table_menu)
         t.setShowGrid(False)
         t.setAlternatingRowColors(False)
         t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1221,6 +1436,8 @@ class ConverterPanel(QWidget):
             # fields real questions rather than ones nobody can answer.
             also_ask={("pet", "blood"): blood_conditions(df)},
             bids_root=self._bids_root,
+            eyetrack=df is not None and "modality" in df.columns
+            and bool((df["modality"].astype(str) == "eyetrack").any()),
         )
         if not dlg.exec():
             return
@@ -1412,82 +1629,95 @@ class ConverterPanel(QWidget):
     # Internals — bottom dock
     # ------------------------------------------------------------------
 
-    def _build_bottom_dock(self) -> QSplitter:
-        """Bottom dock split into two tabbed halves.
+    def _build_log_dock(self) -> QWidget:
+        """The Log: the live output of scans and conversions.
 
-        Left half:  Log              — the "what happened" pane (live
-                                        output from workers).
-        Right half: BIDS preview + Statistics — the "what will be
-                                         produced" pane (predicted tree
-                                         + row counts).
+        Append-only from the workers' progress signals, styled in theme.qss
+        (``QPlainTextEdit#dock-log``): runs with headings, warnings and errors
+        in colour, emptied for each run when the setting says so; every run
+        also writes a file.
 
-        Each half is its own ``QTabWidget``; a horizontal ``QSplitter``
-        between them lets the user re-balance widths.
+        One header, the panel's: its buttons (clear, the run's file, every
+        log) sit in it, named HEADER_EXTRAS so the frame lifts them there
+        and hands them back when the Log floats (GUI_LOOK_AND_FEEL 4.26).
         """
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.setHandleWidth(1)
-        split.setChildrenCollapsible(False)
+        from .widgets.run_log import RunLog
 
-        # ---------- left: Log ----------
-        left_tabs = QTabWidget()
-        left_tabs.setDocumentMode(True)
-        left_tabs.setMovable(False)
+        self._log_view = RunLog()
+        log_box = QWidget()
+        log_box.setObjectName("dock-log-box")
+        col = QVBoxLayout(log_box)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        home = QWidget()
+        home_row = QHBoxLayout(home)
+        home_row.setContentsMargins(0, 0, 0, 0)
+        home_row.setSpacing(0)
+        home_row.addStretch(1)
+        corner = self._build_log_corner()
+        corner.setObjectName(HEADER_EXTRAS)
+        home_row.addWidget(corner)
+        col.addWidget(home)
+        col.addWidget(self._log_view, 1)
+        return log_box
 
-        # Log — append-only stream from worker progress signals.
-        # Styling lives in theme.qss under ``QPlainTextEdit#dock-log``.
-        self._log_view = QPlainTextEdit()
-        self._log_view.setReadOnly(True)
-        self._log_view.setObjectName("dock-log")
-        self._log_view.setMaximumBlockCount(2000)  # rolling buffer
-        left_tabs.addTab(self._log_view, "Log")
-        icons.apply_tab(left_tabs, 0, "log")
+    def _build_log_corner(self) -> QWidget:
+        """Clear, the last run's file and every log, as the panel's corner
+        icons."""
+        corner = QWidget()
+        corner.setObjectName("dock-corner")
+        h = QHBoxLayout(corner)
+        h.setContentsMargins(0, 0, 4, 0)
+        h.setSpacing(2)
+        self._log_buttons: dict[str, QToolButton] = {}
+        for name, tip, slot in (
+            ("log_clear", "Clear the Log", lambda: self._log_view.clear_log()),
+            ("log_file", "Open the last run's log file", self._open_last_log),
+            ("log_history", "Every log of this dataset...", self._show_log_history),
+        ):
+            btn = QToolButton()
+            btn.setObjectName("dock-corner-btn")
+            btn.setAutoRaise(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tip)
+            btn.setIcon(icons.icon(name))
+            btn.clicked.connect(slot)
+            h.addWidget(btn)
+            self._log_buttons[name] = btn
+        return corner
 
-        # Detach-only wrappers so the Log and the preview/stats group can
-        # each pop out into their own window (no collapse here -- the whole
-        # dock collapses together via the surrounding ``_dock_frame``).
-        self._log_frame = PanelFrame(
-            left_tabs, "Log", collapsible=False, detachable=True,
-            hide_inner_header=False,
-        )
-        split.addWidget(self._log_frame)
+    def _log_root(self) -> Optional[Path]:
+        """Whose logs: the open project's, else the user's."""
+        from ..util.oplog import dataset_root_for
 
-        # ---------- right: BIDS preview + Statistics ----------
-        right_tabs = QTabWidget()
-        right_tabs.setDocumentMode(True)
-        right_tabs.setMovable(False)
+        return self._bids_root or dataset_root_for(self._output_tsv)
 
-        self._bids_preview = QTreeWidget()
-        self._bids_preview.setHeaderHidden(True)
-        self._bids_preview.setRootIsDecorated(False)
-        self._bids_preview.setIndentation(14)
-        self._bids_preview.setObjectName("dock-bids-preview")
-        right_tabs.addTab(self._bids_preview, "BIDS preview")
-        icons.apply_tab(right_tabs, 0, "preview")
+    def _open_last_log(self) -> None:
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
 
-        stats = QLabel("(statistics fill in after a scan)")
-        stats.setObjectName("pane-hint")
-        stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._stats_label = stats
-        right_tabs.addTab(stats, "Statistics")
-        icons.apply_tab(right_tabs, 1, "statistics")
+        from ..util import oplog
 
-        # Keep references for ``repaint_for_palette`` re-tinting.
-        self._left_tabs = left_tabs
-        self._right_tabs = right_tabs
+        path = oplog.latest(self._log_root())
+        if path is None:
+            self.log_message.emit("No log file yet: every operation writes one when it runs.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
-        self._preview_frame = PanelFrame(
-            right_tabs, "BIDS preview", collapsible=False, detachable=True,
-            hide_inner_header=False,
-        )
-        split.addWidget(self._preview_frame)
-        # Register the dock's two detach frames for theme re-tinting.
-        self._panel_frames.extend([self._log_frame, self._preview_frame])
+    def _show_log_history(self) -> None:
+        from .log_history_dialog import LogHistoryDialog
 
-        # Equal split by default; user can drag the handle to rebalance.
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 1)
-        split.setSizes([700, 700])
-        return split
+        dlg = LogHistoryDialog(self._log_root(), self)
+        self._log_history = dlg
+        dlg.show()
+
+    def _begin_run(self, title: str, detail: str = "", *, first: bool = True) -> None:
+        """A heading in the Log for an operation. The first step of a
+        user's action empties the panel when the setting says so; the steps
+        that follow it (metadata, validation after a conversion) do not."""
+        self._flush_log_buffer()
+        self._log_view.begin_run(title, detail,
+                                 clear=first and AppSettings.load().log_clear_on_run)
 
     def _on_log_message(self, text: str) -> None:
         if not text:
@@ -1504,88 +1734,9 @@ class ConverterPanel(QWidget):
     def _flush_log_buffer(self) -> None:
         if not self._log_buffer:
             return
-        # Single appendPlainText for the whole batch — one repaint.
-        self._log_view.appendPlainText("\n".join(self._log_buffer))
+        # One append for the whole batch: one repaint.
+        self._log_view.append_lines(self._log_buffer)
         self._log_buffer.clear()
-
-    def _rebuild_bids_preview(self) -> None:
-        """Repopulate the BIDS-preview tree from the current model.
-
-        Groups included rows by ``dataset / sub / ses / datatype`` and
-        lists the basenames. Skipped rows are omitted so the preview
-        reflects what conversion will actually emit.
-        """
-        self._bids_preview.clear()
-        if self._model is None:
-            return
-        df = self._model.dataframe()
-        if df.empty:
-            return
-
-        # tree[dataset][subject][session][datatype] = [basename, ...]
-        tree: dict = {}
-        for idx in df.index:
-            include_val = df.at[idx, "include"] if "include" in df.columns else 1
-            included = True
-            if isinstance(include_val, str):
-                included = include_val.strip() not in ("0", "false", "False", "")
-            else:
-                try:
-                    included = bool(include_val)
-                except Exception:
-                    included = True
-            if not included:
-                continue
-            basename = str(df.at[idx, "bids_name"] or "")
-            if not basename:
-                continue
-            datatype = str(df.at[idx, "datatype"] or "")
-            subject = str(df.at[idx, "participant_id"] or "")
-            session = str(df.at[idx, "session"] or "")
-            dataset = str(df.at[idx, "dataset"] or "") if "dataset" in df.columns else ""
-
-            ds_key = dataset or "(no dataset)"
-            sub_key = subject or "(no subject)"
-            ses_key = session or ""
-            tree.setdefault(ds_key, {}).setdefault(sub_key, {}).setdefault(
-                ses_key, {}
-            ).setdefault(datatype or "(no datatype)", []).append(basename)
-
-        for ds_key in sorted(tree.keys()):
-            ds_item = QTreeWidgetItem([f"{ds_key}/"])
-            self._bids_preview.addTopLevelItem(ds_item)
-            for sub_key in sorted(tree[ds_key].keys()):
-                sub_item = QTreeWidgetItem([f"{sub_key}/"])
-                ds_item.addChild(sub_item)
-                for ses_key in sorted(tree[ds_key][sub_key].keys()):
-                    ses_parent = sub_item
-                    if ses_key:
-                        ses_item = QTreeWidgetItem([f"{ses_key}/"])
-                        sub_item.addChild(ses_item)
-                        ses_parent = ses_item
-                    for dt_key in sorted(tree[ds_key][sub_key][ses_key].keys()):
-                        dt_item = QTreeWidgetItem([f"{dt_key}/"])
-                        ses_parent.addChild(dt_item)
-                        for bn in sorted(tree[ds_key][sub_key][ses_key][dt_key]):
-                            dt_item.addChild(QTreeWidgetItem([bn]))
-        self._bids_preview.expandToDepth(2)
-
-    def _update_stats_label(self) -> None:
-        if self._model is None:
-            self._stats_label.setText("(statistics fill in after a scan)")
-            return
-        df = self._model.dataframe()
-        n_rows = len(df)
-        # Unique subjects + sessions across all rows.
-        subs = sorted({str(s) for s in df.get("participant_id", []) if s})
-        ses = sorted({
-            f"{s}/{x}" for s, x in zip(
-                df.get("participant_id", []), df.get("session", []),
-            ) if s and x
-        })
-        self._stats_label.setText(
-            f"{n_rows} rows · {len(subs)} subjects · {len(ses)} session(s)"
-        )
 
     # ------------------------------------------------------------------
     # Slots
@@ -1669,32 +1820,216 @@ class ConverterPanel(QWidget):
         AppSettings.remember_tsv_filename(text)
 
     def _on_pick_raw_dir(self) -> None:
+        """Pick the folder Scan reads next.
+
+        It is NOT the open table's source: before 2026-10-09 it was written
+        into the open scan's record, so an older scan named a newer scan's
+        folder. Only when the open table's data is missing AND this folder
+        holds it is it offered as that scan's new location.
+        """
         d = QFileDialog.getExistingDirectory(
             self, "Pick raw-data folder",
             str(self._raw_root or Path.home()),
         )
         if not d:
             return
-        self._raw_root = Path(d)
-        self._raw_pathbar.set_value(str(self._raw_root), ok=True)
+        picked = Path(d)
+        if self._source_missing():
+            from ..inventory import sources
+
+            found, seen = sources.locate(self._model.dataframe(), self._sources.files_by_uid,
+                                         picked, scanned=self._sources.scanned)
+            if seen.found and QMessageBox.question(
+                self, "Use this folder for the table shown?",
+                f"This folder holds the source data of the scan table shown "
+                f"({seen.found} of {seen.checked} recordings checked are in it).\n\n"
+                "Yes: read that scan's data from here from now on.\n"
+                "No: keep it as the folder to scan next.",
+            ) == QMessageBox.StandardButton.Yes:
+                self._relink(found, seen)
+                return
+        self._raw_root = picked
         AppSettings.remember_raw_root(self._raw_root)
-        # Relocate: if a scan version is active, persist the new source location
-        # to its descriptor so the move sticks across reopen (moved-data
-        # recovery for EEG/MEG, whose source paths are relative to this root).
+        # Live preview of the picked folder before any scan runs.
+        self._raw_pane.set_root(self._raw_root)
+        self._show_source_state()
+
+    # -- where the table's data is ---------------------------------------------------
+
+    def _resolve_sources(self, df: pd.DataFrame) -> None:
+        """Find the shown table's data (its files over its record), correct a
+        wrong record, and tell the bar and Properties."""
+        from ..inventory import sources
+
+        label = None
         if self._active_version_dir is not None:
             from ..project import workspace
-            meta = workspace.read_version_meta(self._active_version_dir)
+
+            label = workspace.read_version_meta(self._active_version_dir).get("source_label")
+        files_by_uid = sources.load_files_by_uid(self._output_tsv) if self._output_tsv else {}
+        found, seen = sources.resolve(df, files_by_uid, recorded=self._raw_root, label=label)
+        if seen.corrected_from is not None:
+            self._record_source(found.root)
+            self.log_message.emit(
+                f"This scan recorded its source as {seen.corrected_from}, but its files are "
+                f"in {found.root}; the record is corrected.")
+        self._sources, self._source_check = found, seen
+        self._raw_root = found.root
+        self._properties.set_sources(found)
+        self._show_source_state()
+        if seen.state in ("missing", "partial"):
+            self.log_message.emit(sources.describe(seen, found.root)
+                                  + " Use Locate... on the Raw input bar.")
+
+    def _record_source(self, root: Optional[Path]) -> None:
+        """Write where the active scan's data is into its version record."""
+        if self._active_version_dir is None or root is None:
+            return
+        from ..project import workspace
+
+        meta = workspace.read_version_meta(self._active_version_dir)
+        try:
             workspace.write_version_meta(
                 self._active_version_dir,
                 source_label=meta.get("source_label") or self._active_version_dir.name,
-                raw_root=str(self._raw_root),
+                raw_root=str(root),
                 status=meta.get("status") or "curating",
             )
-            self.log_message.emit(f"Relocated source for the active scan to {d}")
-        # Keep the Properties PSD button resolving against the new root.
-        self._properties.set_raw_root(self._raw_root)
-        # Live preview of the picked folder before any scan runs.
-        self._raw_pane.set_root(self._raw_root)
+        except OSError as exc:
+            self.log_message.emit(f"Could not record the source folder: {exc}")
+
+    def _source_missing(self) -> bool:
+        return (self._model is not None and self._sources is not None
+                and self._source_check is not None
+                and self._source_check.state in ("missing", "partial"))
+
+    def _clear_source_state(self) -> None:
+        self._source_action = ""
+        self._raw_pathbar.set_chip()
+        self._raw_pathbar.set_action()
+
+    def _show_source_state(self) -> None:
+        """The Raw input bar: the shown table's source and whether its data is
+        there, or the folder picked to scan next."""
+        from ..inventory import sources
+
+        bar = self._raw_pathbar
+        table_root = self._sources.root if self._sources is not None else None
+        if self._model is not None and table_root is not None and self._raw_root is not None \
+                and self._raw_root != table_root:
+            bar.set_value(str(self._raw_root), ok=True)
+            bar.set_chip("", "Not scanned yet",
+                         "Scan reads this folder into a new scan table. The table shown "
+                         f"came from {table_root}.")
+            bar.set_action("Show the table's source",
+                           f"Back to {table_root}, the folder the table shown was scanned from")
+            self._source_action = "back"
+            return
+        if self._source_missing():
+            missing = self._source_check.state == "missing"
+            bar.set_value(str(table_root), ok=False)
+            bar.set_chip("err" if missing else "warn", "Moved" if missing else "Partly missing",
+                         sources.describe(self._source_check, table_root))
+            bar.set_action("Locate...",
+                           "Pick the folder where this scan's source data is now. The preview "
+                           "and the conversion read it from there.")
+            self._source_action = "locate"
+            return
+        self._clear_source_state()
+        if self._raw_root is not None:
+            bar.set_value(str(self._raw_root), ok=self._raw_root.is_dir())
+
+    def _on_source_action(self) -> None:
+        if self._source_action == "back" and self._sources is not None:
+            self._raw_root = self._sources.root
+            self._raw_pane.set_root(self._raw_root)
+            self._show_source_state()
+        elif self._source_action == "locate":
+            self._on_locate_source()
+
+    def _on_locate_source(self) -> None:
+        """Say where the shown table's data is now."""
+        if self._model is None or self._sources is None:
+            return
+        from ..inventory import sources
+
+        root = self._sources.root
+        start = next((str(p) for p in ((root.parent if root else None), Path.home())
+                      if p is not None and p.is_dir()), "")
+        d = QFileDialog.getExistingDirectory(self, "Where is the source data now?", start)
+        if not d:
+            return
+        found, seen = sources.locate(self._model.dataframe(), self._sources.files_by_uid,
+                                     Path(d), scanned=self._sources.scanned)
+        name = (self._sources.scanned or root or Path(d)).name
+        if seen.checked and not seen.found:
+            QMessageBox.warning(
+                self, "Not this scan's data",
+                f"None of the {seen.checked} recordings checked is in {d}.\n\n"
+                f"Pick the folder that was scanned (it was called \"{name}\").")
+            return
+        if seen.state == "partial" and QMessageBox.question(
+                self, "Part of the data is missing",
+                f"Only {seen.found} of the {seen.checked} recordings checked are in {d}. "
+                "Read this scan's data from there anyway?") != QMessageBox.StandardButton.Yes:
+            return
+        self._relink(found, seen)
+
+    def _relink(self, found, seen) -> None:
+        """The shown table's data is now at ``found.root``: remember it."""
+        self._record_source(found.root)
+        self._sources, self._source_check = found, seen
+        self._raw_root = found.root
+        self._properties.set_sources(found)
+        self._raw_pane.set_root(found.root)
+        self._show_source_state()
+        self.log_message.emit(f"The source data of this scan is now read from {found.root}")
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        """Closed: no more source checks, and none still running into the
+        deletion that follows. An activation reaching a closed panel started
+        one, and its signals racing the panel's deletion crashed the
+        process (the GUI suite, about one run in six)."""
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.applicationStateChanged.disconnect(self._on_application_state)
+            except (TypeError, RuntimeError):
+                pass
+        if self._source_jobs is not None:
+            self._source_jobs.stop_all()
+        super().closeEvent(event)
+
+    def _on_application_state(self, state) -> None:
+        """Back in front: look for the table's data again (on a thread, in
+        case it was on a drive that is now gone)."""
+        if state != Qt.ApplicationState.ApplicationActive or self._sources is None \
+                or self._model is None:
+            return
+        from ..inventory import sources
+        from .viz.bridge import JobRunner
+
+        if self._source_jobs is None:
+            self._source_jobs = JobRunner(self)
+            self._source_jobs.done.connect(self._on_source_checked)
+        df = self._model.dataframe()
+        cols = [c for c in ("series_uid", "source_folder", "source_file") if c in df.columns]
+        self._source_generation += 1
+        self._source_jobs.start("source-check", self._source_generation, sources.check,
+                                self._sources, df[cols].copy())
+
+    def _on_source_checked(self, _tag: str, generation: int, result) -> None:
+        if generation != self._source_generation or self._sources is None:
+            return
+        before = self._source_check.state if self._source_check is not None else ""
+        self._source_check = result
+        if result.state != before:
+            self._show_source_state()
+            self._properties.set_sources(self._sources)
+            if self._raw_root == self._sources.root:
+                # The same path, there now or gone now: build the tree again.
+                self._raw_pane.set_root(None)
+                self._raw_pane.set_root(self._raw_root)
 
     def _on_pick_bids_parent(self) -> None:
         """Pick the BIDS output parent dir at any time (before or after scan)."""
@@ -1721,13 +2056,86 @@ class ConverterPanel(QWidget):
             return
         if self._model is None or self._output_tsv is None:
             return
+        if self._source_missing() and self._source_check.state == "missing":
+            from ..inventory import sources
+
+            QMessageBox.warning(
+                self, "The source data has moved",
+                sources.describe(self._source_check, self._sources.root)
+                + "\n\nUse Locate... on the Raw input bar to say where it is now.")
+            return
         # Use the pre-set BIDS output if the user picked one; otherwise
         # prompt now.
         if self._bids_parent is None:
             self._on_pick_bids_parent()
             if self._bids_parent is None:
                 return
+        from ..converter.sourcedata import SourcedataOptions
+
+        settings = AppSettings.load()
+        options = SourcedataOptions.parse(settings.convert_sourcedata,
+                                          settings.convert_sourcedata_modalities)
+        if options.enabled and self._sources is not None:
+            self._measure_sourcedata(options)
+            return
         self.start_convert(self._bids_parent)
+
+    def _measure_sourcedata(self, options) -> None:
+        """How much keeping the source data adds, measured on a thread, then
+        said before anything is converted (and refused when it will not fit)."""
+        from ..cli.convert import sourcedata_estimate
+        from .viz.bridge import JobRunner
+
+        if getattr(self, "_sourcedata_jobs", None) is None:
+            self._sourcedata_jobs = JobRunner(self)
+            self._sourcedata_jobs.done.connect(self._on_sourcedata_measured)
+            self._sourcedata_jobs.failed.connect(
+                lambda _t, _g, msg: (self._spinner.set_busy(False),
+                                     self.log_message.emit(f"Could not measure the source "
+                                                           f"data: {msg}")))
+        self._sourcedata_generation = getattr(self, "_sourcedata_generation", 0) + 1
+        self._sourcedata_options = options
+        self._spinner.set_busy(True, message="Measuring the source data...")
+        self._sourcedata_jobs.start("sourcedata", self._sourcedata_generation,
+                                    sourcedata_estimate, self._model.dataframe().copy(),
+                                    self._sources, options)
+
+    def _on_sourcedata_measured(self, _tag: str, generation: int, result) -> None:
+        from ..converter import sourcedata as sd
+
+        if generation != getattr(self, "_sourcedata_generation", 0) or self._bids_parent is None:
+            return
+        self._spinner.set_busy(False)
+        files, size, kinds = result
+        target = self._bids_root or self._bids_parent
+        problem = sd.space_problem(target, size)
+        if problem:
+            QMessageBox.warning(self, "Not enough room for the source data",
+                                problem + "\n\nNothing was converted. Free some space, or "
+                                "turn the copy off or choose an archive in Settings > Convert.")
+            return
+        if files:
+            what = ", ".join(sd.LABELS[k] for k in kinds)
+            how = ("as they are" if self._sourcedata_options.form == "copy"
+                   else "as one archive per series")
+            if not self.confirm_sourcedata(
+                    f"The conversion also keeps {files:,} source file(s), "
+                    f"{sd.human_size(size)} of {what}, in sourcedata/ {how}.\n\n"
+                    f"{sd.IDENTIFIERS_NOTE}"):
+                return
+        self.start_convert(self._bids_parent)
+
+    def confirm_sourcedata(self, text: str) -> bool:
+        """Ask before a conversion that keeps source data (tests replace it)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Keep the source data")
+        box.setText(text)
+        convert = box.addButton("Convert", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(convert)
+        box.exec()
+        return box.clickedButton() is convert
 
     def start_convert(self, bids_parent: Path, *, n_jobs: Optional[int] = None) -> ConvertWorker:
         """Run conversion against the live model + scan TSV. Returns the worker."""
@@ -1740,18 +2148,23 @@ class ConverterPanel(QWidget):
         if n_jobs is None:
             n_jobs = self._app_settings.convert_n_jobs
         self._spinner.set_busy(True, message="Converting…")
+        self._begin_run("Conversion", Path(bids_parent).name)
         worker = ConvertWorker(
             self._model.dataframe(),
             self._output_tsv,
             bids_parent,
             n_jobs=n_jobs,
             on_existing=self._app_settings.convert_on_existing,
-            raw_root=self._raw_root,
+            raw_root=self._sources.root if self._sources is not None else self._raw_root,
             skip_residuals=self._app_settings.convert_skip_residuals,
             preserve_curation=self._app_settings.convert_preserve_curation,
             force_edf=self._app_settings.convert_force_edf,
             deface=self._app_settings.convert_deface,
             deface_engine=self._app_settings.convert_deface_engine,
+            intended_for=self._app_settings.convert_intended_for,
+            b0_field=self._app_settings.convert_b0_field,
+            sourcedata=self._app_settings.convert_sourcedata,
+            sourcedata_modalities=self._app_settings.convert_sourcedata_modalities,
             parent=self,
         )
         worker.progress.connect(self._on_progress)
@@ -1844,7 +2257,7 @@ class ConverterPanel(QWidget):
         the dialog with a warning instead of stopping the chain.
         """
         s = self._app_settings
-        if not (s.post_run_metadata or s.post_run_validate):
+        if not (s.post_run_metadata or s.post_run_validate or s.post_run_quality):
             return False
 
         self._post_chain_bids_parent = bids_parent
@@ -1855,6 +2268,8 @@ class ConverterPanel(QWidget):
             self._post_chain_pending.append("metadata")
         if s.post_run_validate:
             self._post_chain_pending.append("validate")
+        if s.post_run_quality:
+            self._post_chain_pending.append("quality")
         self._post_chain_dispatch()
         return True
 
@@ -1870,8 +2285,73 @@ class ConverterPanel(QWidget):
         elif step == "validate":
             self._spinner.set_busy(True, message="Validating BIDS tree…")
             self._start_validate_worker(self._post_chain_bids_parent)
+        elif step == "quality":
+            self._spinner.set_busy(True, message="Checking image quality…")
+            self._start_quality_worker(self._post_chain_bids_parent)
+
+    def _start_quality_worker(self, bids_parent: Path) -> None:
+        self._begin_run("Quality check", first=False)
+        """The quality check of the images this conversion wrote and nothing
+        has checked yet, dataset by dataset."""
+        from ..qc import report as RP
+        from ..qc import run as RUN
+
+        names = self._converted_datasets()
+        roots = ([Path(bids_parent) / n for n in names] if names
+                 else [Path(bids_parent)])
+        roots = [r for r in roots if (r / "dataset_description.json").is_file()]
+        jobs = []
+        for root in roots:
+            done = {str(r.get("path")) for r in RP.load_all(root)}
+            paths = [p for p in RUN.find_images(root)
+                     if p.relative_to(root).as_posix() not in done]
+            if paths:
+                jobs.append((root, paths))
+        self._quality_queue = jobs
+        self._next_quality_job()
+
+    def _next_quality_job(self) -> None:
+        import os
+
+        from ..workers.quality import QualityWorker
+
+        if not getattr(self, "_quality_queue", None):
+            self._post_chain_dispatch()
+            return
+        root, paths = self._quality_queue.pop(0)
+        self.log_message.emit(f"Checking the quality of {len(paths)} images in {root.name}")
+        from ..viz.settings import qc_config
+        from .viz.bridge import SettingsHub
+
+        # The methods and thresholds of Settings > Quality control.
+        worker = QualityWorker(root, paths, jobs=max(1, min(4, (os.cpu_count() or 2) // 2)),
+                               config=qc_config(SettingsHub.instance().settings),
+                               parent=self)
+        worker.progress.connect(
+            lambda d, t, n: self.log_message.emit(f"Quality checked {d}/{t}: {n}"))
+        worker.finished_with_result.connect(lambda rows, r=root: self._on_quality_done(r, rows))
+        worker.failed.connect(self._on_quality_failed)
+        self._quality_worker = worker
+        worker.start()
+
+    def _on_quality_done(self, root: Path, rows) -> None:
+        serious = sum(1 for r in rows for f in r.get("findings", [])
+                      if f.get("level") in ("warning", "error"))
+        self.log_message.emit(
+            f"Quality check of {root.name}: {len(rows)} images, {serious} findings to look "
+            "at (Editor, Tools, Quality check).")
+        if self._project is not None:
+            self._project.append(StageCompleted(
+                stage="quality", success=True,
+                summary={"target": str(root), "images": len(rows), "findings": serious}))
+        self._next_quality_job()
+
+    def _on_quality_failed(self, tb: str) -> None:
+        self.log_message.emit(tb)
+        self._next_quality_job()
 
     def _start_metadata_worker(self, bids_parent: Path) -> None:
+        self._begin_run("Metadata", first=False)
         s = self._app_settings
         worker = MetadataWorker(
             bids_parent,
@@ -1880,8 +2360,7 @@ class ConverterPanel(QWidget):
             # Metadata-engine name defaults to each BIDS root's folder
             # name (i.e. the dataset slug) when ``name`` is None.
             name=None,
-            fill_todos=s.post_metadata_fill_todos,
-            fill_scope=s.metadata_fill_scope,
+            fill_scope=s.placeholder_scope(),
             generate_companions=s.post_fixup_companions,
             write_citation_file=s.post_fixup_citation,
             parent=self,
@@ -1893,6 +2372,7 @@ class ConverterPanel(QWidget):
         worker.start()
 
     def _start_validate_worker(self, bids_parent: Path) -> None:
+        self._begin_run("Validation", first=False)
         s = self._app_settings
         worker = ValidateWorker(
             bids_parent,
@@ -1969,6 +2449,10 @@ class ConverterPanel(QWidget):
         """
         if hasattr(self, "_properties"):
             self._properties.repaint_for_palette(pal)
+        if hasattr(self, "_log_view"):
+            self._log_view.repaint_for_palette(pal)
+            for name, btn in getattr(self, "_log_buttons", {}).items():
+                btn.setIcon(icons.icon(name))
         if hasattr(self, "_raw_pane"):
             self._raw_pane.repaint_for_palette(pal)
         if hasattr(self, "_output_pane"):
@@ -2000,11 +2484,9 @@ class ConverterPanel(QWidget):
             "stop" if convert_running else "run",
             color=pal.get("primary_btn_text"),
         )
-        if hasattr(self, "_left_tabs"):
-            icons.apply_tab(self._left_tabs, 0, "log")
-        if hasattr(self, "_right_tabs"):
-            icons.apply_tab(self._right_tabs, 0, "preview")
-            icons.apply_tab(self._right_tabs, 1, "statistics")
+        if hasattr(self, "_overview"):
+            self._overview.repaint_for_palette(pal)
+            _repolish_combo(self._overview.level_box)
         # The scan-table dropdown (and any QComboBox) does not re-read the
         # re-applied stylesheet on a global ``setStyleSheet`` swap on its own:
         # its popup view is a separate top-level widget Qt does not re-polish.
@@ -2054,14 +2536,107 @@ class ConverterPanel(QWidget):
         restart. (Scan / convert also reload settings at launch time, so
         this is belt-and-braces for any cached toolbar state.)
         """
+        before = self._app_settings.scan_exclusions
+        before_classifier = self._app_settings.classifier_config
         self._app_settings = AppSettings.load()
+        self._sync_confidence_bands()
+        # The BIDS preview follows the settings that change what is written.
+        self._filter_pane.preview.refresh()
+        if self._model is not None and self._app_settings.scan_exclusions != before:
+            self._offer_exclusions()
+        if self._model is not None and self._app_settings.classifier_config != before_classifier:
+            self.offer_reclassify()
+
+    def _sync_confidence_bands(self) -> None:
+        from .delegates.inspection_cells import set_confidence_bands
+
+        general = self._app_settings.classifier().general
+        set_confidence_bands(general.apply_at, general.check_at)
+        if getattr(self, "_table", None) is not None:
+            self._table.viewport().update()
+
+    def _series_shims(self) -> dict:
+        """Series uid -> shim settings, from the scan's cached features."""
+        from ..classifier.acquisition import cache
+
+        if self._output_tsv is None:
+            return {}
+        return {uid: f.shim for uid, f in cache.read(self._output_tsv).items() if f.shim}
+
+    def reclassify_changes(self):
+        """What the current classifier settings would change in the open
+        table (from the scan's cached features; no DICOM is read)."""
+        from ..classifier.acquisition import cache
+        from ..classifier.acquisition import scan as by_parameters
+
+        if self._model is None or self._output_tsv is None:
+            return []
+        features = cache.read(self._output_tsv)
+        if not features:
+            return []
+        return by_parameters.rescore(self._model.dataframe(), features,
+                                     self._app_settings.classifier())
+
+    def offer_reclassify(self, *, ask: bool = True) -> int:
+        """After the classification settings change: name the open table
+        again, asked first, as one Undo. Returns the rows renamed."""
+        config = self._app_settings.classifier()
+        changes = self.reclassify_changes()
+        if not changes:
+            return 0
+        renamed = [c for c in changes if c.renamed]
+        names = config.general.mode == "applied"
+        if ask and renamed and names:
+            answer = QMessageBox.question(
+                self, "Name the table again",
+                f"With the new classification settings, {len(renamed)} series would be "
+                "named differently. Name them now? (One Undo takes it back.)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            names = answer == QMessageBox.StandardButton.Yes
+        done = self._model.apply_classification(changes, names=names)
+        if done:
+            self.log_message.emit(f"Named again from the acquisition parameters: {done} "
+                                  "series")
+        return done
+
+    def _offer_exclusions(self) -> None:
+        """Saved scan rules act on the table already open, not only on the
+        next scan: say what they would change and apply it as one Undo."""
+        from ..classifier.user_rules import plan_exclusions
+
+        plan = plan_exclusions(self._model.dataframe(), self._app_settings.to_exclusions())
+        if not plan:
+            return
+        parts = []
+        if plan.exclude:
+            parts.append(f"{len(plan.exclude)} series would be excluded")
+        if plan.restore:
+            parts.append(f"{len(plan.restore)} excluded by a rule you removed would be "
+                         "included again")
+        answer = QMessageBox.question(
+            self, "Apply the scan rules to the open table?",
+            "Your scan rules changed. In the scan table open now, " + " and ".join(parts)
+            + ".\n\nApply them now? One Undo takes it back. Otherwise they apply "
+              "from the next scan.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        changed = self._model.apply_exclusion_plan(plan)
+        self.log_message.emit(f"Scan rules applied to the open table: {changed} row(s) changed")
 
     def _on_current_row_changed(self, current, _previous) -> None:
         """Forward the table's row selection to the Properties panel."""
         if not current.isValid():
-            self._properties.set_selected_row(None)
+            self._properties.request_row(None)
+            self._filter_pane.reveal_row(None)
+            self._overview.reveal_row(None)
             return
-        self._properties.set_selected_row(current.row())
+        self._properties.request_row(current.row())
+        self._filter_pane.reveal_row(current.row())
+        self._overview.reveal_row(current.row())
 
     def _on_selection_changed(self, *_args) -> None:
         """Enable the bulk-edit button only when ≥ 2 rows are selected."""
@@ -2072,6 +2647,204 @@ class ConverterPanel(QWidget):
                 f"Apply one value to one column across the {len(rows)} "
                 "selected rows."
             )
+
+    def _on_table_menu(self, pos) -> None:
+        """Right-click on the inspection table: what applies to the rows
+        chosen (the clicked row when it is not among them)."""
+        if self._model is None:
+            return
+        index = self._table.indexAt(pos)
+        rows = self._selected_rows()
+        if index.isValid() and index.row() not in rows:
+            self._table.selectRow(index.row())
+            rows = [index.row()]
+            # Properties follows now, before the menu opens: rebuilt under an
+            # open menu, it could close it.
+            self._properties.flush()
+        if not rows:
+            return
+        menu = self._row_menu(self._table, rows)
+        menu.popup(self._table.viewport().mapToGlobal(pos))
+        self._table_menu = menu
+
+    def _on_filter_menu(self, rows: list, where, rename) -> None:
+        """Right-click in Filter / structure or recordings: the table's menu
+        for the rows under what was clicked, led by renaming the subject or
+        session when that is what was clicked."""
+        if self._model is None or not rows:
+            return
+        # The press made a recording current, and so the table's row; let
+        # Properties follow before the menu opens, as the table's menu does.
+        self._properties.flush()
+        menu = self._row_menu(self._filter_pane, rows)
+        if rename is not None:
+            from . import icons
+
+            kind, label = rename
+            act = QAction(icons.icon("bulk_edit"), f"Rename {kind} {label}...", menu)
+            act.setToolTip(f"A new label for {label}, on every row under it, as one Undo")
+            act.triggered.connect(lambda: self.rename_from_tree(kind, rows, label))
+            first = menu.actions()[0] if menu.actions() else None
+            menu.insertAction(first, act)
+            menu.insertSeparator(first)
+        menu.popup(where)
+        self._filter_menu = menu
+
+    def _row_menu(self, parent, rows: list):
+        """The menu for inventory ``rows``, wherever they were right-clicked.
+
+        One row: what Properties offers for it (preview, spectrum, other
+        names, fieldmap runs, eye-tracker pairing), then its DICOM header.
+        Any rows: new subject numbers for the people they belong to.
+        """
+        from ..inventory.renumber import identity
+        from . import icons
+        from .viz.menus import popup_menu
+
+        menu = popup_menu(parent)
+        menu.setToolTipsVisible(True)
+        if len(rows) == 1:
+            dicom = self._dicom_header_action(menu, rows[0])
+            self._properties.add_row_actions(menu, rows[0],
+                                             extra=[dicom] if dicom is not None else [])
+        if not menu.isEmpty():
+            menu.addSeparator()
+        df = self._model.dataframe()
+        people = len({identity(df, r) for r in rows})
+        renumber = menu.addAction(
+            icons.icon("bulk_edit"),
+            "Give new subject numbers..." if people > 1 else "Give a new subject number...")
+        renumber.setToolTip("Number the people of the chosen rows with the next free "
+                            "subject numbers")
+        renumber.triggered.connect(lambda: self.open_renumber(rows))
+        return menu
+
+    def _dicom_header_action(self, menu, row: int):
+        """"Show the DICOM header" for a DICOM row (not yet in ``menu``), or
+        ``None``."""
+        first = self._first_dicom_of(row)
+        if first is None:
+            return None
+        from PyQt6.QtGui import QAction
+
+        from . import icons
+
+        act = QAction(icons.icon("tree_dicom"), "Show the DICOM header", menu)
+        act.setToolTip("The header of the first file of this series, in a window")
+        act.triggered.connect(lambda: self.show_dicom_header(first))
+        return act
+
+    def _first_dicom_of(self, row: int) -> Optional[Path]:
+        """The first DICOM of a row's series, where it is now, if any."""
+        if self._model is None or self._sources is None:
+            return None
+        uid = str(self._model.dataframe().iloc[row].get("series_uid", "") or "").strip()
+        if not uid:
+            return None
+        return next((f for f in self._sources.series_files(uid) if f.exists()), None)
+
+    def _on_raw_file_activated(self, path) -> None:
+        from ..inventory.mri_dicom import is_dicom_file
+
+        if is_dicom_file(str(path)):
+            self.show_dicom_header(Path(path))
+
+    def show_dicom_header(self, path: Path):
+        """``path``'s header in the DICOM window (one, reused)."""
+        from .widgets.dicom_pane import DicomWindow
+
+        win = getattr(self, "_dicom_window", None)
+        if win is None:
+            win = DicomWindow(self)
+            win.pane.status_message.connect(self.log_message)
+            self._dicom_window = win
+        win.show_file(Path(path))
+        return win
+
+    def _taken_subject_labels(self, rows: list[int]) -> set[str]:
+        from ..inventory.renumber import taken_labels
+
+        others = []
+        if self._bids_root is not None:
+            from ..project import workspace
+
+            for version in workspace.list_versions(self._bids_root):
+                if self._active_version_dir is not None and \
+                        Path(version.dir) == Path(self._active_version_dir):
+                    continue
+                try:
+                    others.append(pd.read_csv(version.inventory, sep="\t", dtype=str,
+                                              usecols=["participant_id"]))
+                except (OSError, ValueError):
+                    continue
+        return taken_labels(self._model.dataframe(), rows, bids_root=self._bids_root,
+                            others=others)
+
+    def open_renumber(self, rows: list[int]) -> Optional[int]:
+        """Plan new subject numbers for the people of ``rows``, show them,
+        apply them as one Undo. Returns the rows changed (``None``: cancelled)."""
+        if self._model is None or not rows:
+            return None
+        from ..inventory.renumber import plan_renumber
+        from .renumber_dialog import RenumberDialog, apply_renumbering
+
+        taken = self._taken_subject_labels(rows)
+        width = AppSettings.load().scan_index_widths.get("sub")
+        people = plan_renumber(self._model.dataframe(), rows, taken,
+                               width=int(width) if width else None)
+        dlg = RenumberDialog(people, taken, self)
+        self._renumber_dialog = dlg
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return None
+        changed = apply_renumbering(self._model, dlg.mapping())
+        self.log_message.emit(f"New subject numbers: {changed} row(s) changed")
+        self._flag_existing_subject_rows(self._model.dataframe())
+        return changed
+
+    def rename_from_tree(self, kind: str, rows: list[int], current: str,
+                         new: Optional[str] = None) -> int:
+        """Rename a subject or a session from Filter / structure: every row
+        under it, as one Undo. ``new`` skips the question (scripts, tests)."""
+        import re
+
+        from PyQt6.QtWidgets import QInputDialog, QLineEdit
+
+        if self._model is None or not rows:
+            return 0
+        prefix = "sub-" if kind == "subject" else "ses-"
+        shown = current[len(prefix):] if current.startswith(prefix) else current
+        if new is None:
+            new, ok = QInputDialog.getText(
+                self, f"Rename {kind}", f"New label for {prefix}{shown} "
+                f"({len(rows)} series):", QLineEdit.EchoMode.Normal, shown)
+            if not ok:
+                return 0
+        new = new.strip()
+        new = new[len(prefix):] if new.startswith(prefix) else new
+        if not re.fullmatch(r"[0-9A-Za-z]+", new or ""):
+            QMessageBox.warning(self, f"Rename {kind}",
+                                f"'{new}' cannot be a {kind} label: letters and digits only.")
+            return 0
+        if new == shown:
+            return 0
+        if kind == "subject" and new in self._taken_subject_labels(rows):
+            answer = QMessageBox.question(
+                self, "That subject exists",
+                f"sub-{new} is already used. Converting will put this person's data into "
+                "it (their sessions merge). Use it anyway?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return 0
+        entity = "subject" if kind == "subject" else "session"
+        changed = 0
+        with self._model.edit_group():
+            for row in rows:
+                if self._model.set_entity(row, entity, new):
+                    changed += 1
+        self.log_message.emit(f"Renamed {prefix}{shown} to {prefix}{new} ({changed} row(s))")
+        if kind == "subject":
+            self._flag_existing_subject_rows(self._model.dataframe())
+        return changed
 
     def _selected_rows(self) -> list[int]:
         """Return source-DataFrame row indices for the user's selection."""
@@ -2089,15 +2862,16 @@ class ConverterPanel(QWidget):
             return
         from .bulk_edit_dialog import BulkEditDialog
         dlg = BulkEditDialog(self._model, rows, parent=self)
-        dlg.exec()
+        with self._model.edit_group():
+            dlg.exec()
         # A removal applies row by row, so some rows can be left alone. Say
         # so: "24 rows changed" must never quietly mean "and 6 were not".
         skipped = dlg.skipped_count()
         if skipped:
-            self._log_view.appendPlainText(
+            self._log_view.append_lines([
                 f"Bulk edit: {dlg.changed_count()} row(s) changed, {skipped} "
                 f"kept the entity because their datatype requires it."
-            )
+            ])
         # Status chips + previews refresh via the model's dataChanged
         # signal — the dispatcher's per-row writes already trigger them.
 
@@ -2301,8 +3075,6 @@ class ConverterPanel(QWidget):
         # react to), but call them directly so the refresh is immediate and
         # self-contained even if a listener was ever detached.
         self._update_status_chips()
-        self._rebuild_bids_preview()
-        self._update_stats_label()
         self.log_message.emit("Re-validated inventory against the BIDS schema")
 
     def _update_status_chips(self) -> None:

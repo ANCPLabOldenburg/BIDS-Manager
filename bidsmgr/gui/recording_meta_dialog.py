@@ -130,6 +130,7 @@ class RecordingMetaDialog(QDialog):
         present_pairs: Optional[list] = None,
         also_ask: Optional[dict] = None,
         bids_root: Optional[Path] = None,
+        eyetrack: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Dataset metadata")
@@ -241,6 +242,9 @@ class RecordingMetaDialog(QDialog):
         bl.addWidget(self._build_event_group())
         if any(dt == "pet" for dt, _sfx in self._present_pairs):
             bl.addWidget(self._build_pet_dose_group())
+        self._eye_fields: dict[str, QLineEdit] = {}
+        if eyetrack:
+            bl.addWidget(self._build_eyetrack_group())
         bl.addWidget(self._build_participants_group())
         bl.addWidget(self._build_phenotype_group())
         bl.addStretch(1)
@@ -616,6 +620,75 @@ class RecordingMetaDialog(QDialog):
             pass
         self._template.set_values(self._stored_template_values())
 
+    #: (field, label, scale from the stored unit, two numbers, tooltip)
+    _EYE_FIELDS = (
+        ("screen_size", "Screen size (cm)", 100, True,
+         "The visible screen, width x height in centimetres. Required by the standard "
+         "for gaze measured on a screen (ScreenSize, written in metres)."),
+        ("screen_distance", "Screen distance (cm)", 100, False,
+         "From the eye to the screen, in centimetres (ScreenDistance)."),
+        ("eye_tracker_distance", "Eye to tracker (cm)", 100, False,
+         "From the eye to the tracker's camera, in centimetres (EyeTrackerDistance)."),
+        ("sync_message", "Run starts at message", 1, False,
+         "The text of the message the experiment logged when each run started (the "
+         "scanner's first trigger, say). StartTime becomes the first sample's time "
+         "before it. Left empty, each recording is taken to start its run."),
+    )
+
+    def _build_eyetrack_group(self) -> QGroupBox:
+        """The screen and the timing, for every eye-tracking recording (a
+        recording can say otherwise in the table's Properties)."""
+        box = QGroupBox("Eye tracking")
+        form = QFormLayout(box)
+        _tighten_form(form)
+        stored = self._spec.eyetrack_defaults
+        for field, label, scale, pair, tip in self._EYE_FIELDS:
+            value = getattr(stored, field)
+            if value in (None, "", []):
+                text = ""
+            elif pair:
+                text = " x ".join(f"{float(v) * scale:g}" for v in value)
+            elif isinstance(value, (int, float)):
+                text = f"{float(value) * scale:g}"
+            else:
+                text = str(value)
+            edit = QLineEdit(text)
+            edit.setToolTip(tip)
+            edit.setPlaceholderText("width x height" if pair else "")
+            self._eye_fields[field] = edit
+            caption = QLabel(label + ":")
+            caption.setToolTip(tip)
+            form.addRow(caption, edit)
+        return box
+
+    def _build_eyetrack_spec(self):
+        """The eye-tracking defaults from the form (unparseable numbers keep
+        what was stored)."""
+        stored = self._spec.eyetrack_defaults
+        if not self._eye_fields:
+            return stored.model_copy(deep=True)
+        values = {}
+        for field, _label, scale, pair, _tip in self._EYE_FIELDS:
+            text = self._eye_fields[field].text().strip()
+            if not text:
+                values[field] = None
+                continue
+            if field == "sync_message":
+                values[field] = text
+                continue
+            try:
+                numbers = [float(n) / scale for n in
+                           text.replace(",", " ").replace("x", " ").replace("X", " ").split()]
+            except ValueError:
+                values[field] = getattr(stored, field)
+                continue
+            if pair:
+                values[field] = [round(n, 6) for n in numbers] if len(numbers) == 2 \
+                    else getattr(stored, field)
+            else:
+                values[field] = round(numbers[0], 6) if numbers else None
+        return stored.model_copy(update=values)
+
     def _build_participants_group(self) -> QGroupBox:
         box = QGroupBox("Participants spreadsheet")
         box.setToolTip(
@@ -865,6 +938,7 @@ class RecordingMetaDialog(QDialog):
         return self._spec.model_copy(update={
             "defaults": acq,
             "pet_defaults": self._build_pet_spec(),
+            "eyetrack_defaults": self._build_eyetrack_spec(),
             "event_maps": event_maps,
             "phenotype_files": phenotype_files,
             "participants_file": self._participants_file.text().strip(),

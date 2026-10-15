@@ -44,12 +44,23 @@ def test_every_checkbox_state_is_styled(selector):
 
 
 def test_radio_buttons_are_styled_too_and_are_round():
+    """Round: its corner radius is half its 14 px side."""
     text = _qss()
     assert "QRadioButton::indicator" in text
-    assert "QRadioButton::indicator { border-radius: 7px; }" in text, (
+    assert "QRadioButton::indicator { border-radius: 8px; }" in text, (
         "a radio button drawn as a square is a checkbox as far as the user "
         "is concerned"
     )
+
+
+def test_a_checked_box_shows_a_tick():
+    """A filled square alone read as a colour swatch beside a legend dot:
+    checked carries the tick image drawn in the theme's colours."""
+    text = _qss()
+    start = text.index("QCheckBox::indicator:checked")
+    assert "image: $icon_check;" in text[start:start + 200]
+    assert "image: $icon_partial;" in text
+    assert "image: $icon_radio;" in text
 
 
 def test_the_indicator_colours_come_from_the_palette():
@@ -57,7 +68,7 @@ def test_the_indicator_colours_come_from_the_palette():
     text = _qss()
     start = text.index("QCheckBox::indicator")
     block = text[start:text.index("/* ---------- Dropdowns", start)]
-    assert "$accent" in block and "$border" in block and "$bg" in block
+    assert "$accent" in block and "$input_border" in block and "$surface2" in block
     # A literal colour in here is the bug this whole rule exists to fix.
     assert "#" not in block.replace("/*", "").split("*/")[-1], (
         "a literal colour in the indicator rules will be wrong in one theme"

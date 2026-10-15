@@ -63,6 +63,7 @@ from .models import (
     AuxChannelSpec,
     EventMap,
     ExtrasSpec,
+    EyetrackSpec,
     FilterSpec,
     LightingConditions,
     PetAcquisitionSpec,
@@ -72,8 +73,10 @@ from .models import (
 from .resolve import (
     EffectiveSpec,
     merge_acquisition,
+    merge_eyetrack,
     merge_pet,
     resolve_effective,
+    resolve_eyetrack,
     resolve_pet,
 )
 from .schema_types import bids_channel_types, mne_channel_types
@@ -122,6 +125,7 @@ __all__ = [
     "AuxChannelSpec",
     "EventMap",
     "ExtrasSpec",
+    "EyetrackSpec",
     "FilterSpec",
     "LightingConditions",
     "PetAcquisitionSpec",
@@ -129,8 +133,10 @@ __all__ = [
     "TaskProtocol",
     "EffectiveSpec",
     "merge_acquisition",
+    "merge_eyetrack",
     "merge_pet",
     "resolve_effective",
+    "resolve_eyetrack",
     "resolve_pet",
     "bids_channel_types",
     "mne_channel_types",

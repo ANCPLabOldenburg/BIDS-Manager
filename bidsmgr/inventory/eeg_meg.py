@@ -32,6 +32,7 @@ from typing import List, Optional
 import pandas as pd
 
 from .. import schema as schema_mod
+from .eyelink import is_eyelink_edf
 
 log = logging.getLogger(__name__)
 
@@ -574,6 +575,8 @@ def candidate_paths(root: Path) -> List[Path]:
             lname = fname.lower()
             for ext in _RECOGNISED_EXTS:
                 if lname.endswith(ext):
+                    if lname.endswith(".edf") and is_eyelink_edf(cur_path / fname):
+                        break           # an EyeLink eye-tracking file, not EEG
                     candidates.append(cur_path / fname)
                     break
 

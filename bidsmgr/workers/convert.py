@@ -89,6 +89,10 @@ class ConvertWorker(QThread):
         force_edf: bool = False,
         deface: bool = False,
         deface_engine: str = "allineate",
+        intended_for: str = "uri",
+        b0_field: bool = True,
+        sourcedata: str = "none",
+        sourcedata_modalities: str = "",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -106,6 +110,10 @@ class ConvertWorker(QThread):
         self._force_edf = force_edf
         self._deface = deface
         self._deface_engine = deface_engine
+        self._intended_for = intended_for
+        self._b0_field = b0_field
+        self._sourcedata = sourcedata
+        self._sourcedata_modalities = sourcedata_modalities
         # Cooperative stop flag, polled by ``run_convert`` between subjects
         # and between per-subject tasks.
         self._stop = threading.Event()
@@ -151,6 +159,10 @@ class ConvertWorker(QThread):
                 deface=self._deface,
                 deface_engine=self._deface_engine,
                 cancel_check=self._stop.is_set,
+                intended_for=self._intended_for,
+                b0_field=self._b0_field,
+                sourcedata=self._sourcedata,
+                sourcedata_modalities=self._sourcedata_modalities,
             )
             if rc == 130 or self._stop.is_set():
                 # 130 = run_convert's "stopped before all subjects" code.

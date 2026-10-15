@@ -325,6 +325,8 @@ class TsvViewerPane(QWidget):
     # Emitted while a background load is in flight / finishes. Args:
     # ``(busy, message)``. The Editor mirrors it to its toolbar spinner.
     loading_changed = pyqtSignal(bool, str)
+    #: A line for the status bar (from the embedded signal viewer).
+    status_message = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -413,24 +415,6 @@ class TsvViewerPane(QWidget):
         )
         self._visualize_btn.toggled.connect(self._on_visualize_toggled)
         et.addWidget(self._visualize_btn)
-
-        # BIDS splits one run's physio by the ``recording`` entity, so the
-        # cardiac trace, the belt and the trigger are three files describing
-        # one acquisition. The question people bring to physio (did the
-        # trigger fire where the ECG says it should) cannot be answered one
-        # file at a time.
-        self._together_btn = QPushButton("  All of this run")
-        self._together_btn.setObjectName("tb-btn")
-        self._together_btn.setCheckable(True)
-        self._together_btn.setVisible(False)
-        self._together_btn.setToolTip(
-            "Show every physio recording of this run at once, on one "
-            "clock. They are resampled onto the fastest one's grid and "
-            "each keeps its own start time, because physio starts before "
-            "the scanner does and by a different amount per device."
-        )
-        self._together_btn.toggled.connect(self._on_together_toggled)
-        et.addWidget(self._together_btn)
 
         et.addWidget(self._dirty_chip)
         # No stretch: a wrapping row has no fixed right-hand edge to push
@@ -523,9 +507,9 @@ class TsvViewerPane(QWidget):
         self._stack.addWidget(self._empty_hint)
         self._stack.addWidget(self._table)
         self._stack.addWidget(self._loading_page)
-        self._viewer_page: Optional[QWidget] = None
-        self._signal_worker = None
-        self._siblings: list = []
+        # The signal viewer (``viz``), built the first time Visualize is
+        # pressed: a session that only reads tables never imports pyqtgraph.
+        self._viewer_page = None
         self._timing: Optional[dict] = None
         self._stack.setCurrentIndex(0)
 
@@ -706,26 +690,17 @@ class TsvViewerPane(QWidget):
 
         Decided by the SIDECAR, not by the filename: BIDS puts the sampling
         frequency there, and a table of onsets (``_events.tsv``) has none.
-        That also means a ``_stim.tsv.gz`` or any future continuous suffix
-        is offered a viewer without this knowing the suffix exists.
+        So a ``_stim.tsv.gz`` or any future continuous suffix is offered a
+        viewer without this knowing the suffix exists.
         """
-        from .physio_viewer import read_timing, related_recordings
+        from ...viz.data.physio import read_timing
 
+        del header, rows   # the viewer reads the file itself, headerless
         timing = read_timing(path)
-        # The header row counts as a sample. A physio TSV has no column
-        # names in the file (they are in the sidecar), so pandas reads the
-        # first SAMPLE as the header and it belongs back in the data.
-        if timing is not None and len(timing["columns"]) == len(header):
-            rows = [list(header)] + [list(r) for r in rows]
         self._timing = timing
-        self._plot_rows = rows if timing is not None else []
         self._visualize_btn.setVisible(timing is not None)
-        siblings = related_recordings(path) if timing is not None else []
-        self._siblings = siblings
-        self._together_btn.setVisible(len(siblings) > 1)
         if timing is None:
             self._visualize_btn.setChecked(False)
-            self._together_btn.setChecked(False)
         elif self._visualize_btn.isChecked():
             self._show_visualizer()
 
@@ -733,108 +708,33 @@ class TsvViewerPane(QWidget):
         if showing:
             self._show_visualizer()
         else:
+            if self._viewer_page is not None:
+                self._viewer_page.set_file(None, None)
             self._stack.setCurrentIndex(1)
 
     def _show_visualizer(self) -> None:
-        """Read the whole recording on a worker, then hand it to the view.
-
-        The table's preview is NOT shown first. It is bounded at five
-        thousand rows, so on a 1.4-million-sample trigger channel it is the
-        first four seconds, and showing it while the real read completes
-        means the viewer visibly changes its mind about what the recording
-        is. A spinner that says "reading" is the honest version.
-        """
-        if self._timing is None:
+        """Open the recording in the signal viewer (the same one MEG and EEG
+        use): the WHOLE file, read on its worker, not the table's preview
+        of five thousand rows, which on a 1.4-million-sample trigger is the
+        first four seconds drawn as though it were the recording."""
+        if self._timing is None or self._current_file is None:
             self._visualize_btn.setChecked(False)
             return
         if self._viewer_page is None:
-            try:
-                from .time_series_view import TimeSeriesView
+            from ..viz import Viewer
 
-                self._viewer_page = TimeSeriesView(self)
-                # Physio is a channel or four and fits in a window whole, so
-                # this is the one consumer that offers Fit all. MEG and EEG
-                # do not, where the whole recording is hundreds of millions
-                # of samples.
-                self._viewer_page.enable_fit_all(True)
-                self._viewer_page.close_requested.connect(
-                    lambda: self._visualize_btn.setChecked(False)
-                )
-            except Exception as exc:  # noqa: BLE001 - reported, not hidden
-                log.warning("could not build the time-series viewer: %s", exc)
-                self._visualize_btn.setChecked(False)
-                self._visualize_btn.setEnabled(False)
-                self._visualize_btn.setToolTip(f"Unavailable: {exc}")
-                return
-            self._stack.addWidget(self._viewer_page)
-
+            viewer = Viewer(kind="signal", header=False)
+            viewer.close_requested.connect(lambda: self._visualize_btn.setChecked(False))
+            viewer.status_message.connect(self.status_message)
+            viewer.loading_changed.connect(self.loading_changed)
+            self._viewer_page = viewer
+            self._stack.addWidget(viewer)
         self._stack.setCurrentWidget(self._viewer_page)
-        self._start_signal_read()
+        self._viewer_page.set_file(self._current_file, self._current_root)
 
-    def _start_signal_read(self) -> None:
-        """Read + build the RawArray off the GUI thread.
-
-        A ``QThread``, not the pool: this ends in scipy, and a pooled thread
-        retired between calls takes scipy's per-thread state with it
-        (CLAUDE.md guard 8b).
-        """
-        from ...workers.meeg_recording_loader import RecordingComputeWorker
-        from .physio_viewer import build_combined_raw, build_raw, read_columns
-
-        path = self._current_file
-        timing = dict(self._timing or {})
-        if path is None:
-            return
-
-        previous = self._signal_worker
-        if previous is not None:
-            previous.cancel()
-
-        together = self._together_btn.isChecked() and len(self._siblings) > 1
-        siblings = list(self._siblings)
-
-        def work():
-            if together:
-                raw, gaps = build_combined_raw(siblings)
-                return path, raw, gaps, raw.n_times, 1
-            columns, total, step = read_columns(path)
-            if not columns:
-                raise ValueError("no numeric columns could be read")
-            raw, gaps = build_raw(columns, timing, step)
-            return path, raw, gaps, total, step
-
-        worker = RecordingComputeWorker(work, parent=self)
-        worker.finished_with_result.connect(self._on_signal_read)
-        worker.failed.connect(self._on_signal_failed)
-        worker.finished.connect(worker.deleteLater)
-        self._signal_worker = worker
-        self.loading_changed.emit(True, "Reading the recording...")
-        worker.start()
-
-    def _on_together_toggled(self, _checked: bool) -> None:
-        """Re-read in the other mode, if a viewer is open."""
-        if self._visualize_btn.isChecked():
-            self._start_signal_read()
-
-    def _on_signal_read(self, result) -> None:
-        path, raw, gaps, total, step = result
-        self._signal_worker = None
-        self.loading_changed.emit(False, "")
-        if path != self._current_file or self._viewer_page is None:
-            return
-        self._viewer_page.set_current_filepath(path, self._current_root)
-        self._viewer_page.load_raw(raw, gaps=gaps)
-        if step > 1:
-            self._viewer_page.status_message.emit(
-                f"{total:,} samples held as {raw.n_times:,}: the recording "
-                f"was read one sample in {step} to stay within memory"
-            )
-
-    def _on_signal_failed(self, message: str) -> None:
-        self._signal_worker = None
-        self.loading_changed.emit(False, "")
-        log.warning("could not open the recording for viewing: %s", message)
-        self._visualize_btn.setChecked(False)
+    def visualizer(self):
+        """The signal viewer, once Visualize has been pressed (or None)."""
+        return self._viewer_page
 
     def _on_load_failed(self, path: Path, error: str) -> None:
         if path != self._current_file:
@@ -1031,9 +931,26 @@ class TsvViewerPane(QWidget):
         if snap is not None:
             self._restore(snap)
 
+    #: A folder open for viewing: the table is shown, never edited.
+    _read_only = False
+
+    def set_read_only(self, on: bool) -> None:
+        """No editing (a folder open for viewing)."""
+        self._read_only = bool(on)
+        # Visualize stays: it only reads. Everything that edits goes.
+        for w in (self._add_row_btn, self._del_row_btn, self._add_col_btn, self._del_col_btn,
+                  self._revert_btn, self._save_btn):
+            w.setVisible(not on)
+        self._table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers if on else (
+                QAbstractItemView.EditTrigger.DoubleClicked
+                | QAbstractItemView.EditTrigger.EditKeyPressed
+                | QAbstractItemView.EditTrigger.SelectedClicked))
+        self._refresh_dirty_ui()
+
     def _refresh_dirty_ui(self) -> None:
         has_file = self._current_file is not None
-        editable = has_file and not self._truncated_on_load
+        editable = has_file and not self._truncated_on_load and not self._read_only
         if self._dirty:
             self._dirty_chip.setText("unsaved changes")
             self._dirty_chip.setVisible(True)
@@ -1048,7 +965,8 @@ class TsvViewerPane(QWidget):
 
     def _sync_delete_button_state(self, *args) -> None:
         del args
-        editable = self._current_file is not None and not self._truncated_on_load
+        editable = (self._current_file is not None and not self._truncated_on_load
+                    and not self._read_only)
         idx = self._table.currentIndex()
         has_sel = idx.isValid()
         self._del_row_btn.setEnabled(

@@ -115,6 +115,9 @@ class UserSetEntity(_EventBase):
     entity: str
     value: Optional[str]
     previous: Optional[str] = None
+    #: Edits made by ONE user action (a parent checkbox, a bulk edit, a
+    #: renumbering) share an id, so one Undo takes them all back.
+    group: Optional[str] = None
 
 
 class UserSetCell(_EventBase):
@@ -130,6 +133,9 @@ class UserSetCell(_EventBase):
     column: str
     value: str
     previous: str = ""
+    #: Edits made by ONE user action (a parent checkbox, a bulk edit, a
+    #: renumbering) share an id, so one Undo takes them all back.
+    group: Optional[str] = None
 
 
 class UserToggleInclude(_EventBase):
@@ -143,6 +149,9 @@ class UserToggleInclude(_EventBase):
     type: Literal["user_toggle_include"] = "user_toggle_include"
     row_id: str
     include: bool
+    #: Edits made by ONE user action (a parent checkbox, a bulk edit, a
+    #: renumbering) share an id, so one Undo takes them all back.
+    group: Optional[str] = None
 
 
 class TodoAcknowledged(_EventBase):

@@ -114,6 +114,15 @@ def test_a_field_the_data_usually_carries_is_marked_as_such():
 # ---------------------------------------------------------------------------
 
 
+def _open_sidecar(panel) -> None:
+    """The sidecar section is built when opened (closed by default)."""
+    from bidsmgr.gui.widgets.template_form import CollapsibleSection
+
+    for box in panel.findChildren(CollapsibleSection):
+        if box._title_text == "Sidecar fields":
+            box.set_expanded(True)
+
+
 def test_compute_psd_sits_with_the_line_frequency(qtbot):
     from PyQt6.QtWidgets import QPushButton
 
@@ -127,6 +136,7 @@ def test_compute_psd_sits_with_the_line_frequency(qtbot):
     qtbot.addWidget(panel)
     panel.bind_model(InventoryTableModel(df))
     panel.set_selected_row(0)
+    _open_sidecar(panel)
 
     psd = [b for b in panel.findChildren(QPushButton) if "PSD" in (b.text() or "")]
     assert psd, "the PSD action should be somewhere in the panel"
@@ -450,6 +460,7 @@ def test_the_panel_has_the_settled_block_too(qtbot):
     qtbot.addWidget(panel)
     panel.bind_model(InventoryTableModel(df))
     panel.set_selected_row(0)
+    _open_sidecar(panel)
 
     settled = [
         b for b in panel.findChildren(CollapsibleSection)

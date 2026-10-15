@@ -1,9 +1,14 @@
 /* =====================================================================
- * Inspector Prototype — themed stylesheet (dark + light)
+ * BIDS Manager stylesheet, one template for every theme.
  *
  * Token-based template. The Python `ThemeManager` calls
- * `string.Template(this).safe_substitute(**palette)` with the active
- * palette before applying the QSS to QApplication.
+ * `string.Template(this).safe_substitute(...)` with the active palette
+ * (`theme_manager.PALETTES`, seven themes) plus the images drawn in its
+ * colours (`theme_assets`: $icon_check, $icon_partial, $icon_radio,
+ * $icon_chevron_down, $icon_chevron_up, $icon_chevron_right, ...).
+ *
+ * Fonts: no rule names a family except "JetBrains Mono" for code, logs and
+ * raw text; everything else inherits the bundled Inter (`typefaces`).
  *
  * Tokens used:
  *   bg surface surface2 surface3 border subtle text dim muted
@@ -75,40 +80,52 @@ QToolTip {
 
 /* ---------- Checkboxes and radio buttons (global) ----------
  * Unstyled, these fall back to the platform control, which does not follow
- * the palette: on macOS a plain unchecked QCheckBox paints a light grey
- * block that reads as disabled, or as already ticked, against the dark
- * background. The two checkable TREES were already styled by object name,
- * so the ones that were missed stood out beside them.
- *
- * Filled accent for checked, matching the trees, rather than a tick glyph:
- * QSS cannot draw one without shipping an image, and the flat filled square
- * is the convention the rest of this stylesheet already uses. */
+ * the palette. Checked is the accent with a TICK (an image drawn in the
+ * theme's colours by theme_assets): a filled square alone read as a colour
+ * swatch beside a legend dot. Item views (trees, lists, tables) share it. */
 QCheckBox::indicator,
-QRadioButton::indicator {
-    width: 13px; height: 13px;
-    border: 1px solid $border;
-    background: $bg;
-    border-radius: 3px;
+QRadioButton::indicator,
+QAbstractItemView::indicator {
+    width: 14px; height: 14px;
+    border: 1px solid $input_border;
+    background: $surface2;
+    border-radius: 4px;
 }
-QRadioButton::indicator { border-radius: 7px; }
+QRadioButton::indicator { border-radius: 8px; }
 
 QCheckBox::indicator:hover,
-QRadioButton::indicator:hover { border: 1px solid $accent; }
+QRadioButton::indicator:hover,
+QAbstractItemView::indicator:hover { border: 1px solid $accent; }
 
 QCheckBox::indicator:checked,
+QAbstractItemView::indicator:checked {
+    background: $accent;
+    border: 1px solid $accent;
+    image: $icon_check;
+}
 QRadioButton::indicator:checked {
     background: $accent;
     border: 1px solid $accent;
+    image: $icon_radio;
 }
-QCheckBox::indicator:indeterminate {
+QCheckBox::indicator:indeterminate,
+QAbstractItemView::indicator:indeterminate {
     background: $accent_bg;
     border: 1px solid $accent;
+    image: $icon_partial;
 }
 QCheckBox::indicator:disabled,
-QRadioButton::indicator:disabled {
-    background: $surface2;
-    border: 1px solid $surface2;
+QRadioButton::indicator:disabled,
+QAbstractItemView::indicator:disabled {
+    background: $surface;
+    border: 1px solid $border;
 }
+QCheckBox::indicator:checked:disabled,
+QAbstractItemView::indicator:checked:disabled {
+    background: $surface3;
+    image: $icon_check_disabled;
+}
+QCheckBox, QRadioButton { spacing: 7px; }
 QCheckBox:disabled,
 QRadioButton:disabled { color: $muted; }
 
@@ -170,16 +187,14 @@ QComboBox::drop-down {
     subcontrol-origin: padding;
     subcontrol-position: right center;
     border: none;
-    width: 16px;
+    width: 20px;
 }
 QComboBox::down-arrow {
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid $dim;
-    width: 0; height: 0;
-    margin-right: 6px;
+    image: $icon_chevron_down;
+    width: 12px; height: 12px;
+    margin-right: 4px;
 }
+QComboBox::down-arrow:hover, QComboBox::down-arrow:on { image: $icon_chevron_down_hover; }
 QComboBox QAbstractItemView {
     background: $surface2;
     color: $text;
@@ -200,11 +215,98 @@ QComboBox QAbstractItemView::item:selected { background: $accent_bg; color: $acc
  * gui/combo_popup.py) - transparent so only the rounded view above shows. */
 #combo-popup { background: transparent; border: none; }
 
+/* ---------- Buttons with no name of their own ----------
+ * Dialog buttons (Save, Cancel, Restore Defaults) and the plain buttons of
+ * forms. Fusion drew them as bevelled grey boxes that matched nothing else.
+ * A named button keeps its own rule (an id selector wins). The default
+ * button of a dialog is the accent. */
+QPushButton {
+    background: $surface3;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 6px;
+    padding: 4px 12px;
+    min-height: 18px;
+}
+QPushButton:hover { border-color: $input_border; }
+QPushButton:pressed { background: $surface2; }
+QPushButton:focus { border-color: $accent; }
+QPushButton:checked { background: $accent_bg; color: $accent; border-color: $accent_border; }
+QPushButton:disabled { color: $muted; background: $surface; border-color: $border; }
+QPushButton:default {
+    background: $accent;
+    color: $primary_btn_text;
+    border: 1px solid $accent;
+    font-weight: 600;
+}
+QPushButton::menu-indicator {
+    image: $icon_chevron_down;
+    subcontrol-origin: padding;
+    subcontrol-position: right center;
+    right: 6px;
+    width: 10px; height: 10px;
+}
+
+QSpinBox, QDoubleSpinBox {
+    background: $surface2;
+    color: $text;
+    border: 1px solid $input_border;
+    border-radius: 6px;
+    padding: 3px 6px;
+    min-height: 20px;
+    selection-background-color: $accent_bg;
+    selection-color: $text;
+}
+QSpinBox:hover, QDoubleSpinBox:hover { border-color: $accent_border; }
+QSpinBox:focus, QDoubleSpinBox:focus { border-color: $accent; }
+QSpinBox:disabled, QDoubleSpinBox:disabled { color: $muted; background: $surface; border-color: $border; }
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    width: 16px;
+    border: none;
+    background: transparent;
+}
+QSpinBox::up-button, QDoubleSpinBox::up-button { subcontrol-position: top right; margin: 2px 2px 0 0; }
+QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-position: bottom right; margin: 0 2px 2px 0; }
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover { background: $surface3; border-radius: 3px; }
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: $icon_chevron_up; width: 10px; height: 10px; }
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: $icon_chevron_down; width: 10px; height: 10px; }
+
+QGroupBox {
+    background: $surface;
+    border: 1px solid $border;
+    border-radius: 8px;
+    margin-top: 18px;
+    padding: 12px 10px 8px 10px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 2px;
+    padding: 0 2px 4px 2px;
+    color: $text;
+    font-weight: 600;
+}
+
+/* A menu nobody named (a context menu from Qt itself, a line edit's):
+ * the same colours as the rounded ones, square-cornered by necessity. */
+QMenu {
+    background: $surface;
+    color: $text;
+    border: 1px solid $border;
+    padding: 4px;
+}
+QMenu::item { padding: 6px 14px; border-radius: 4px; }
+QMenu::item:selected { background: $accent_bg; color: $accent; }
+QMenu::item:disabled { color: $muted; }
+QMenu::separator { height: 1px; background: $border; margin: 4px 8px; }
+
 /* ---------- Top header (above toolbar) ---------- */
 QFrame#top-header {
-    background: $surface;
+    background: $bg;
     border: none;
-    border-bottom: 1px solid $border;
 }
 QLabel#brand-name {
     color: $text;
@@ -220,48 +322,81 @@ QLabel#brand-tag {
     border-radius: 8px;
     padding: 1px 7px;
 }
+/* The three views: a segmented control, the chosen one raised in its track. */
+QFrame#nav-track {
+    background: $surface;
+    border: 1px solid $border;
+    border-radius: 9px;
+}
 QPushButton#view-pill {
     background: transparent;
     color: $dim;
-    border: none;
-    padding: 5px 16px;
-    border-radius: 5px;
+    border: 1px solid transparent;
+    padding: 4px 16px;
+    border-radius: 7px;
     font-size: 12px;
     font-weight: 500;
-    min-width: 76px;
+    min-width: 72px;
 }
-QPushButton#view-pill:hover { color: $text; background: $surface3; }
+QPushButton#view-pill:hover { color: $text; }
 QPushButton#view-pill:checked {
-    background: $accent_bg;
-    color: $accent;
-    border: 1px solid $accent_border;
+    background: $surface3;
+    color: $text;
+    border: 1px solid $border;
+    font-weight: 600;
+}
+/* The same, made small for a panel's 30 px title bar (Table | Overview):
+ * widgets/primitives.Segmented. A groove in the card, the chosen segment
+ * raised and neutral. */
+QFrame#seg-track {
+    background: $bg;
+    border: 1px solid $border;
+    border-radius: 7px;
+}
+QPushButton#seg-pill {
+    background: transparent;
+    color: $dim;
+    border: 1px solid transparent;
+    padding: 1px 12px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 500;
+    min-height: 0px;
+}
+QPushButton#seg-pill:hover { color: $text; }
+QPushButton#seg-pill[iconOnly="true"] { padding: 1px 6px; }
+QPushButton#seg-pill:checked {
+    background: $surface3;
+    color: $text;
+    border: 1px solid $border;
     font-weight: 600;
 }
 QPushButton#theme-toggle {
-    background: $surface3;
-    border: 1px solid $border;
+    background: transparent;
+    border: 1px solid transparent;
     color: $text;
-    border-radius: 4px;
+    border-radius: 6px;
     padding: 4px 8px;
     font-size: 14px;
 }
-QPushButton#theme-toggle:hover { background: $border; }
+QPushButton#theme-toggle:hover { background: $surface3; border-color: $border; }
+QPushButton#theme-toggle:pressed { background: $surface2; }
 
 /* ---------- Project switcher (header, PyCharm-style) ---------- */
 /* Blue (accent) "current project" anchor; same size + shape as the view
  * pills (matches the checked-pill look), works in both themes. Content is
  * centred with symmetric padding; the right side leaves room for the caret. */
 QPushButton#project-switcher {
-    background: $accent_bg;
-    color: $accent;
-    border: 1px solid $accent_border;
-    border-radius: 5px;
-    padding: 5px 22px;
+    background: $surface;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 9px;
+    padding: 6px 24px 6px 12px;
     font-size: 12px;
     font-weight: 600;
     text-align: center;
 }
-QPushButton#project-switcher:hover { background: $accent_border; color: $text; }
+QPushButton#project-switcher:hover { border-color: $input_border; background: $surface3; }
 QPushButton#project-switcher::menu-indicator {
     subcontrol-position: right center;
     subcontrol-origin: padding;
@@ -311,12 +446,26 @@ QMenu#rounded-menu::item {
 }
 QMenu#rounded-menu::item:selected { background: $accent_bg; color: $accent; }
 QMenu#rounded-menu::item:disabled { color: $muted; }
+/* A heading inside a menu (the theme menu's groups). */
+QLabel#menu-section {
+    color: $dim;
+    background: transparent;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    padding: 8px 12px 3px 12px;
+}
+
+/* An explanation opened from an info icon (gui/viz/panels/explain_popup):
+ * running text inside a rounded menu, in the menu's own colours. */
+QFrame#viz-explain { background: transparent; }
+QLabel#viz-explain-text { color: $text; font-size: 12px; background: transparent; }
+QScrollArea#viz-explain-scroll { background: transparent; border: none; }
 
 /* ---------- Toolbar ---------- */
 QFrame#toolbar {
-    background: $surface2;
+    background: $bg;
     border: none;
-    border-bottom: 1px solid $border;
 }
 
 QPushButton#tb-btn {
@@ -324,19 +473,38 @@ QPushButton#tb-btn {
     border: 1px solid $border;
     color: $text;
     padding: 4px 11px;
-    border-radius: 4px;
+    border-radius: 6px;
     font-size: 11px;
     font-weight: 500;
 }
-QPushButton#tb-btn:hover  { background: $border; }
-QPushButton#tb-btn:pressed { background: $surface; }
+QPushButton#tb-btn:hover  { border-color: $input_border; }
+QPushButton#tb-btn:pressed { background: $surface2; }
+QPushButton#tb-btn:disabled { color: $muted; background: $surface; border-color: $border; }
+/* In a toolbar the buttons are quiet: no box until hovered, so the one
+ * primary action and the state chips are what the eye finds. */
+QFrame#toolbar QPushButton#tb-btn,
+QFrame#sidecar-toolbar QPushButton#tb-btn {
+    background: transparent;
+    border: 1px solid transparent;
+}
+QFrame#toolbar QPushButton#tb-btn:hover,
+QFrame#sidecar-toolbar QPushButton#tb-btn:hover {
+    background: $surface3;
+    border-color: $border;
+}
+QFrame#toolbar QPushButton#tb-btn:pressed,
+QFrame#sidecar-toolbar QPushButton#tb-btn:pressed { background: $surface2; }
+QFrame#toolbar QPushButton#tb-btn:disabled,
+QFrame#sidecar-toolbar QPushButton#tb-btn:disabled {
+    background: transparent; border-color: transparent; color: $muted;
+}
 
 QPushButton#tb-btn-ghost {
     background: transparent;
     border: 1px solid transparent;
     color: $dim;
     padding: 4px 9px;
-    border-radius: 4px;
+    border-radius: 6px;
     font-size: 11px;
 }
 QPushButton#tb-btn-ghost:hover { color: $text; background: $surface3; }
@@ -345,12 +513,13 @@ QPushButton#tb-btn-primary {
     background: $accent;
     border: 1px solid $accent;
     color: $primary_btn_text;
-    padding: 4px 12px;
-    border-radius: 4px;
+    padding: 4px 14px;
+    border-radius: 6px;
     font-size: 11px;
     font-weight: 600;
 }
-QPushButton#tb-btn-primary:hover { background: $accent; }
+QPushButton#tb-btn-primary:hover { border-color: $text; }
+QPushButton#tb-btn-primary:disabled { background: $surface3; border-color: $border; color: $muted; }
 
 /* Toggle-style toolbar button (e.g. "Highlight repeats"). Switches
  * to the purple palette when checked so the user knows the overlay
@@ -360,14 +529,14 @@ QPushButton#tb-btn-toggle {
     border: 1px solid $border;
     color: $dim;
     padding: 4px 10px;
-    border-radius: 4px;
+    border-radius: 6px;
     font-size: 11px;
 }
 QPushButton#tb-btn-toggle:hover { color: $text; background: $surface3; }
 QPushButton#tb-btn-toggle:checked {
-    background: $purple_bg;
-    border-color: $purple_border;
-    color: $purple;
+    background: $accent_bg;
+    border-color: $accent_border;
+    color: $accent;
 }
 
 /* Tiny "TSV:" / "dataset:" label sitting before an input in the toolbar. */
@@ -378,10 +547,10 @@ QLabel#tb-mini-label {
 
 /* Toolbar input fields (TSV filename, etc.). Compact, palette-driven. */
 QLineEdit#tb-input {
-    background: $surface3;
+    background: $surface2;
     color: $text;
-    border: 1px solid $border;
-    border-radius: 4px;
+    border: 1px solid $input_border;
+    border-radius: 6px;
     padding: 2px 6px;
     font-size: 11px;
     selection-background-color: $accent;
@@ -442,21 +611,19 @@ QLabel[chipKind="teal"] {
 
 /* ---------- Path bars ---------- */
 QFrame#pathbar {
-    background: $surface2;
+    background: $bg;
     border: none;
-    border-bottom: 1px solid $subtle;
 }
 QLabel#path-label {
     color: $dim;
     font-size: 11px;
 }
 QLineEdit#path-field {
-    background: $bg;
+    background: $surface;
     border: 1px solid $border;
-    border-radius: 4px;
+    border-radius: 8px;
     color: $text;
     padding: 4px 10px;
-    font-family: "SF Mono", "Menlo", "Monaco", monospace;
     font-size: 11px;
 }
 QLineEdit#path-field:focus { border-color: $accent; }
@@ -464,12 +631,12 @@ QLineEdit#path-field:focus { border-color: $accent; }
 /* ---------- Pane headers ---------- */
 QLabel#pane-h5 {
     background: $surface;
-    color: $muted;
+    color: $dim;
     padding: 7px 12px;
     border-bottom: 1px solid $subtle;
     font-size: 10px;
     font-weight: 600;
-    letter-spacing: 1px;
+    letter-spacing: 0.8px;
 }
 
 /* Placeholder / hint labels used in empty panes and stub tabs. They
@@ -492,6 +659,51 @@ QLabel#dlg-hint {
     font-size: 11px;
 }
 
+/* Settings > Viewer shortcuts: the line that reports keys used twice. */
+QLabel#viz-conflicts {
+    color: $dim;
+    font-size: 11px;
+}
+QLabel#viz-conflicts[state="error"] {
+    color: $error;
+}
+
+/* The caption above each image of a side-by-side comparison. */
+QLabel#section-caption {
+    color: $text;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 2px;
+}
+
+/* ---------- Cards ----------
+ * A panel at the top of a layout is a CARD on the window's canvas
+ * (PanelFrame.make_card): rounded, outlined, a gap to its neighbours (the
+ * handles of the ``card-split`` splitters). What is inside draws nothing
+ * of its own background, so the card is one surface; panels nested inside
+ * a card stay flat and are divided by hairlines. */
+QWidget#card-canvas { background: transparent; }
+QFrame[card="true"] {
+    background: $surface;
+    border: 1px solid $border;
+    border-radius: 10px;
+}
+QFrame[card="true"] QFrame#panel-frame-header { background: transparent; }
+QWidget#panel-frame-strip { background: transparent; border: none; }
+/* A top or bottom panel's title bar folds it: a hover says so. */
+QFrame#panel-frame-header[foldable="true"]:hover { background: $surface3; }
+QFrame[card="true"] QWidget#pane,
+QFrame[card="true"] QWidget#pane-dark { background: transparent; border: none; }
+QFrame[card="true"] QLabel#pane-h5 { background: transparent; }
+/* A list, a tree or a log inside a card is the card: no second box. */
+QFrame[card="true"] QTreeWidget#log-history,
+QFrame[card="true"] QTreeWidget#renumber-table {
+    background: transparent;
+    border: none;
+}
+/* Splitter handles paint themselves (widgets/splitter.Splitter): a three-dot
+ * grip, and the accent wash under the mouse. */
+
 /* Collapsible / detachable panel-frame header bar. Mirrors the pane-h5
  * look (surface background + bottom rule) but carries a collapse caret on
  * the left and a detach button on the right. The title label inside drops
@@ -499,39 +711,99 @@ QLabel#dlg-hint {
 QFrame#panel-frame-header {
     background: $surface;
     border-bottom: 1px solid $subtle;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
 }
 QFrame#panel-frame-header QLabel#pane-h5 {
     background: transparent;
     border-bottom: none;
     padding: 0px 2px;
 }
-/* Vertical collapse strip for left / right panels: a thin bar carrying a
- * vertically-centred caret (+ detach button) on the panel's outer edge. */
-QFrame#panel-frame-strip {
-    background: $surface;
-    border-right: 1px solid $subtle;
-    border-left: 1px solid $subtle;
-}
 QToolButton#panel-frame-caret,
+QToolButton#dock-corner-btn,
 QToolButton#panel-frame-detach {
     background: transparent;
     border: none;
     padding: 2px;
 }
 QToolButton#panel-frame-caret:hover,
+QToolButton#dock-corner-btn:hover,
 QToolButton#panel-frame-detach:hover {
     background: $border;
     border-radius: 3px;
+}
+
+/* A toggle among a panel's corner icons (Filter's Hide rows left out):
+ * when on it carries the accent's wash, as a toggle that is ON does. */
+QToolButton#dock-corner-btn:checked {
+    background: $accent_bg;
+    border-radius: 3px;
+}
+
+/* ---------- Inspection > Overview (gui/overview_pane.py) ----------
+ * Inside the Inspection card: flat, divided by hairlines, no boxes. The
+ * grid's cells and headers are painted from the palette. */
+QScrollArea#overview-scroll,
+QWidget#overview-body { background: transparent; border: none; }
+QFrame#overview-rule { background: $subtle; border: none; }
+QLabel#overview-finding { color: $text; font-size: 12px; }
+/* A section title that folds its section (Worth a look): the section-title
+ * voice, with the chevron the panels fold with. */
+QToolButton#overview-fold {
+    color: $muted;
+    background: transparent;
+    border: none;
+    padding: 0px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+QToolButton#overview-fold:hover { color: $text; }
+QPushButton#inline-link {
+    color: $accent;
+    background: transparent;
+    border: none;
+    padding: 0px 2px;
+    font-size: 11px;
+    font-weight: 600;
+    min-height: 0px;
+}
+QPushButton#inline-link:hover { text-decoration: underline; }
+QTableView#overview-grid {
+    background: transparent;
+    border: none;
+    outline: none;
+}
+QHeaderView#overview-header,
+QHeaderView#overview-header::section {
+    background: transparent;
+    border: none;
+}
+
+/* ---------- Filter > BIDS preview (gui/output_preview.py) ---------- */
+QTreeWidget#plan-tree { background: transparent; border: none; }
+QWidget#plan-file { background: transparent; }
+QLabel#plan-file-name { color: $text; font-size: 12px; font-weight: 600; }
+QTextBrowser#plan-preview {
+    background: $bg;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-family: "JetBrains Mono";
+    font-size: 11px;
+    selection-background-color: $accent_bg;
 }
 
 /* Bottom-dock log view. Uses a slightly tinted background so the
  * worker output reads clearly against both palettes. Selection inherits
  * the accent token (already covered by ``QPalette.Highlight``). */
 QPlainTextEdit#dock-log {
-    background: $surface;
+    background: transparent;
     color: $text;
     border: none;
-    font-family: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
+    font-family: "JetBrains Mono";
     font-size: 11px;
     selection-background-color: $accent;
     selection-color: $primary_btn_text;
@@ -575,7 +847,6 @@ QPushButton#issue-card-title {
     padding: 0;
     font-size: 12px;
     font-weight: 600;
-    font-family: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
 }
 QPushButton#issue-card-title:hover { text-decoration: underline; }
 QLabel#issue-card-jump-hint {
@@ -593,8 +864,9 @@ QWidget#pane-dark {
 }
 
 /* ---------- Splitter handles ---------- */
-QSplitter::handle:horizontal { background: $border; width: 1px; }
-QSplitter::handle:vertical   { background: $border; height: 1px; }
+/* Only a splitter that is not a widgets/splitter.Splitter reaches these. */
+QSplitter::handle:horizontal { background: $subtle; width: 1px; }
+QSplitter::handle:vertical   { background: $subtle; height: 1px; }
 QSplitter::handle:hover      { background: $accent; }
 
 /* ---------- Tree widgets ---------- */
@@ -605,44 +877,30 @@ QTreeWidget {
     show-decoration-selected: 1;
     outline: 0;
     font-size: 11px;
-    font-family: "SF Mono", "Menlo", "Monaco", monospace;
 }
 QTreeWidget::item {
-    padding: 1px 4px;
-    min-height: 18px;
+    padding: 2px 4px;
+    min-height: 20px;
     border: none;
 }
-QTreeWidget::item:hover    { background: $surface2; }
+QTreeWidget::item:hover    { background: $surface3; }
 QTreeWidget::item:selected {
     background: $accent_bg;
     color: $accent;
 }
+QTreeView::branch:closed:has-children { image: $icon_chevron_right; }
+QTreeView::branch:open:has-children { image: $icon_chevron_down; }
 
 QTreeWidget#filter-tree {
-    font-family: ".AppleSystemUIFont", "Helvetica Neue", "Segoe UI", sans-serif;
     font-size: 11px;
-}
-QTreeWidget#filter-tree::indicator {
-    width: 13px; height: 13px;
-    border: 1px solid $border;
-    background: $bg;
-    border-radius: 3px;
-}
-QTreeWidget#filter-tree::indicator:checked {
-    background: $accent;
-    border: 1px solid $accent;
-}
-QTreeWidget#filter-tree::indicator:indeterminate {
-    background: $accent_bg;
-    border: 1px solid $accent;
 }
 
 QTreeWidget#raw-tree::item { padding-left: 0px; }
 
 /* ---------- Inspection table ---------- */
 QTableView#inv-table {
-    background: $bg;
-    alternate-background-color: $bg;
+    background: transparent;
+    alternate-background-color: transparent;
     color: $text;
     border: none;
     gridline-color: $subtle;
@@ -661,8 +919,8 @@ QTableView#inv-table::item:selected { background: $accent_bg; }
 /* Editor TSV viewer (read-only) — same chrome as the converter's
    inspection table so the theme follows automatically. */
 QTableView#tsv-view {
-    background: $bg;
-    alternate-background-color: $surface;
+    background: transparent;
+    alternate-background-color: $surface2;
     color: $text;
     border: none;
     gridline-color: $subtle;
@@ -676,22 +934,68 @@ QTableView#tsv-view::item {
 }
 QTableView#tsv-view::item:selected { background: $accent_bg; }
 
+/* DICOM header pane: a tree of modules and elements, the frames and a
+   comparison as tables. No item colour here: identifying values and tags
+   are coloured by the model (ForegroundRole), which an ::item color would
+   override. */
+QTreeView#dicom-header-tree,
+QTableView#dicom-frames,
+QTableView#dicom-compare {
+    background: transparent;
+    alternate-background-color: transparent;
+    border: none;
+    outline: 0;
+    color: $text;
+    selection-background-color: $accent_bg;
+    selection-color: $text;
+    font-size: 11px;
+}
+QTreeView#dicom-header-tree::item {
+    padding: 3px 4px;
+    min-height: 20px;
+    border: none;
+}
+QTreeView#dicom-header-tree::item:hover { background: $surface3; }
+QTreeView#dicom-header-tree::item:selected { background: $accent_bg; }
+QTableView#dicom-frames::item,
+QTableView#dicom-compare::item {
+    padding: 4px 8px;
+    border-bottom: 1px solid $subtle;
+}
+QTableView#dicom-frames::item:selected,
+QTableView#dicom-compare::item:selected { background: $accent_bg; }
+QFrame#dicom-rule { background: $subtle; border: none; }
+/* Settings > Convert > Source data: what keeping it means. */
+QLabel#sourcedata-note { color: $warning; font-size: 11px; background: transparent; }
+QLabel#sourcedata-note:disabled { color: $dim; }
+QLabel#dicom-fact {
+    color: $dim;
+    font-size: 11px;
+    background: transparent;
+}
+QLabel#dicom-fact-strong {
+    color: $text;
+    font-size: 11px;
+    font-weight: 600;
+    background: transparent;
+}
+
+QHeaderView { background: transparent; }
 QHeaderView::section {
-    background: $surface;
-    color: $muted;
-    padding: 6px 8px;
+    background: transparent;
+    color: $dim;
+    padding: 7px 8px;
     border: none;
     border-bottom: 1px solid $border;
-    border-right: 1px solid $subtle;
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 600;
-    letter-spacing: 1px;
+    letter-spacing: 0.6px;
     text-transform: uppercase;
 }
 QHeaderView::section:hover { color: $text; }
 
 QTableCornerButton::section {
-    background: $surface;
+    background: transparent;
     border: none;
     border-bottom: 1px solid $border;
 }
@@ -730,7 +1034,6 @@ QComboBox#ent-input {
     border-radius: 3px;
     color: $text;
     padding: 3px 8px;
-    font-family: "SF Mono", "Menlo", "Monaco", monospace;
     font-size: 11px;
     min-height: 20px;
 }
@@ -739,14 +1042,11 @@ QComboBox#ent-input:focus {
     border-color: $accent;
 }
 
-QComboBox#ent-input::drop-down { border: none; width: 14px; }
+QComboBox#ent-input::drop-down { border: none; width: 18px; }
 QComboBox#ent-input::down-arrow {
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 4px solid $dim;
-    width: 0; height: 0;
-    margin-right: 6px;
+    image: $icon_chevron_down;
+    width: 11px; height: 11px;
+    margin-right: 4px;
 }
 QComboBox#ent-input QAbstractItemView {
     background: $surface2;
@@ -763,7 +1063,6 @@ QFrame#path-preview {
     padding: 8px 11px;
 }
 QLabel#path-preview-text {
-    font-family: "SF Mono", "Menlo", "Monaco", monospace;
     font-size: 11px;
     color: $text;
 }
@@ -784,13 +1083,13 @@ QLabel#why-h5 {
 
 /* ---------- Bottom dock (tabbed) ---------- */
 QTabWidget::pane {
-    background: $bg;
+    background: transparent;
     border: none;
-    border-top: 1px solid $border;
+    border-top: 1px solid $subtle;
 }
 QTabBar {
-    background: $surface2;
-    border-bottom: 1px solid $border;
+    background: transparent;
+    border: none;
 }
 QTabBar::tab {
     background: transparent;
@@ -810,9 +1109,9 @@ QTabBar::tab:hover:!selected { color: $text; }
 
 /* ---------- Status bar ---------- */
 QStatusBar {
-    background: $surface2;
+    background: $bg;
     color: $dim;
-    border-top: 1px solid $border;
+    border: none;
     padding: 0 14px;
     font-size: 11px;
     min-height: 26px;
@@ -861,7 +1160,6 @@ QPushButton#file-tab {
     border-bottom: 2px solid transparent;
     padding: 7px 13px;
     font-size: 11px;
-    font-family: "SF Mono", "Menlo", "Monaco", monospace;
 }
 QPushButton#file-tab:hover { color: $text; }
 QPushButton#file-tab:checked {
@@ -883,11 +1181,11 @@ QLabel#legend-text {
 /* ---------- Editor: sidecar form rows ---------- */
 QFrame#sc-row { background: transparent; }
 QFrame#sc-row:hover { background: $surface; }
-QLabel#sc-key  { color: $text;   font-family: "SF Mono","Menlo","Monaco",monospace; font-size: 11px; }
-QLabel#sc-key-dep  { color: $muted; font-family: "SF Mono","Menlo","Monaco",monospace; font-size: 11px; }
-QLabel#sc-val-str { color: $accent; font-family: "SF Mono","Menlo","Monaco",monospace; font-size: 11px; }
-QLabel#sc-val-num { color: $purple; font-family: "SF Mono","Menlo","Monaco",monospace; font-size: 11px; }
-QLabel#sc-val-todo { color: $error; font-family: "SF Mono","Menlo","Monaco",monospace; font-size: 11px; font-style: italic; }
+QLabel#sc-key  { color: $text; font-size: 11px; }
+QLabel#sc-key-dep  { color: $muted; font-size: 11px; }
+QLabel#sc-val-str { color: $accent; font-size: 11px; }
+QLabel#sc-val-num { color: $purple; font-size: 11px; }
+QLabel#sc-val-todo { color: $error; font-size: 11px; font-style: italic; }
 
 /* SidecarRow 4px level bar — colors come from the palette tokens so a
    theme swap is just an app-wide QSS re-apply, exactly like
@@ -905,7 +1203,7 @@ QFrame#legend-swatch-dep { background: $muted;    border-radius: 2px; }
 
 /* SidecarFormPane edit toolbar (Save / Revert + dirty chip). */
 QFrame#sidecar-toolbar {
-    background: $surface2;
+    background: transparent;
     border-bottom: 1px solid $subtle;
 }
 QLabel#sidecar-dirty-chip {
@@ -991,9 +1289,42 @@ QFrame#about-footer {
     background: $surface2;
     border-top: 1px solid $subtle;
 }
+
+/* What's new: shown once per release (gui/whats_new.py). The animation is
+ * painted on the dialog's own background; the text sits beside it. */
+QDialog#whatsnew-dialog { background: $bg; }
+QLabel#whatsnew-kicker {
+    color: $dim;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+QLabel#whatsnew-title {
+    color: $text;
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+QLabel#whatsnew-lede {
+    color: $text;
+    font-size: 14px;
+}
+QLabel#whatsnew-item-title {
+    color: $text;
+    font-size: 13px;
+    font-weight: 600;
+}
+QLabel#whatsnew-item {
+    color: $dim;
+    font-size: 12px;
+}
+QFrame#whatsnew-footer {
+    background: $surface2;
+    border-top: 1px solid $subtle;
+}
 QLabel#sidecar-footer-path {
     color: $dim;
-    font-family: "SF Mono","Menlo","Monaco",monospace;
     font-size: 10px;
 }
 QLabel#sidecar-footer-summary {
@@ -1057,7 +1388,6 @@ QPushButton#viewer-section-toggle:hover { color: $text; background: $surface3; }
 QPushButton#viewer-section-toggle:checked { color: $text; }
 /* The fixed-width channel-label strip beside the plot + the horizontal
  * toolbar scroll (lets the viewer shrink without the toolbar forcing width). */
-QScrollArea#viewer-label-strip { background: $bg; border: none; }
 QScrollArea#viewer-toolbar-scroll { background: transparent; border: none; }
 
 /* "Load signal" button on the metadata card - styled like the header project
@@ -1118,7 +1448,6 @@ QLabel#val-audit-summary {
 QLabel#val-audit-missing {
     color: $error;
     font-size: 10px;
-    font-family: "SF Mono","Menlo","Monaco",monospace;
 }
 
 /* Validation-pane section count chips are now painted Chip widgets
@@ -1149,7 +1478,7 @@ QFrame#val-msg-err {
     padding: 7px 10px;
 }
 QLabel#val-rule {
-    font-family: "SF Mono","Menlo","Monaco",monospace;
+    font-family: "JetBrains Mono";
     font-size: 9px;
     color: $muted;
     text-transform: uppercase;
@@ -1159,7 +1488,7 @@ QLabel#val-rule {
    user can check the standard. Quieter than the rule code above it, and not
    uppercased, because it is a path to be read literally. */
 QLabel#val-provenance {
-    font-family: "SF Mono","Menlo","Monaco",monospace;
+    font-family: "JetBrains Mono";
     font-size: 9px;
     color: $muted;
     background: transparent;
@@ -1168,7 +1497,6 @@ QLabel#val-provenance {
 /* Optional small chip on the header row, naming the JSON field a
    finding refers to (e.g. "License" for a TODO-placeholder issue). */
 QLabel#val-field {
-    font-family: "SF Mono","Menlo","Monaco",monospace;
     font-size: 9px;
     color: $accent;
     background: $accent_bg;
@@ -1190,13 +1518,14 @@ QPushButton#val-fix:hover, QPushButton#val-highlight-all:hover { background: $ac
 /* ---------- Scrollbars ---------- */
 QScrollBar:vertical {
     background: transparent;
-    width: 10px;
+    width: 11px;
     margin: 2px 2px 2px 0;
 }
 QScrollBar::handle:vertical {
     background: $border;
-    border-radius: 3px;
-    min-height: 28px;
+    border-radius: 4px;
+    min-height: 32px;
+    margin: 0 1px;
 }
 QScrollBar::handle:vertical:hover { background: $muted; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
@@ -1204,13 +1533,14 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 
 QScrollBar:horizontal {
     background: transparent;
-    height: 10px;
+    height: 11px;
     margin: 0 2px 2px 2px;
 }
 QScrollBar::handle:horizontal {
     background: $border;
-    border-radius: 3px;
-    min-width: 28px;
+    border-radius: 4px;
+    min-width: 32px;
+    margin: 1px 0;
 }
 QScrollBar::handle:horizontal:hover { background: $muted; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
@@ -1324,6 +1654,35 @@ QListWidget#welcome-recent::item:selected {
     color: $accent;
 }
 
+/* ---------- Settings: pages listed down the left ---------- */
+QListWidget#settings-nav {
+    background: $surface;
+    color: $text;
+    border: none;
+    border-right: 1px solid $border;
+    padding: 10px 8px;
+    font-size: 12px;
+    outline: 0;
+}
+QListWidget#settings-nav::item {
+    padding: 7px 10px;
+    margin: 1px 0;
+    border-radius: 6px;
+}
+QListWidget#settings-nav::item:hover { background: $surface3; }
+QListWidget#settings-nav::item:selected {
+    background: $accent_bg;
+    color: $accent;
+}
+QStackedWidget#settings-pages, QWidget#settings-page { background: $bg; }
+QScrollArea#settings-scroll { background: transparent; border: none; }
+QScrollArea#settings-scroll > QWidget > QWidget { background: transparent; }
+QLabel#settings-page-title {
+    color: $text;
+    font-size: 16px;
+    font-weight: 600;
+}
+
 /* ---------- NIfTI viewer image canvas ----------
  * The visualization area only (2-D slice panels + the 3-D render pages).
  * Pure black so scans read like a lightbox and match the GL clear colour;
@@ -1335,15 +1694,87 @@ QWidget#nifti-canvas {
     border: none;
 }
 
-/* 3-D controls column — opaque so the black image canvas behind it never
- * shows through (the scrollbar gutter used to read as a black stripe). The
- * viewport is named from Python because a stylesheet can't select it. */
-QWidget#nifti-ctrl-slot,
-QScrollArea#nifti-ctrl-scroll,
-QWidget#nifti-ctrl-viewport,
-QWidget#nifti-3d-controls {
+/* The viewer's controls column: opaque so the black image canvas behind it
+ * never shows through (a scroll bar gutter used to read as a black stripe).
+ * The viewport is named from Python because a stylesheet can't select it. */
+QScrollArea#viz-side-scroll,
+QWidget#viz-side-viewport,
+QWidget#viz-inspector,
+QWidget#viz-section,
+QWidget#viz-section-body {
     background: $surface2;
     border: none;
+}
+/* One section from the next: a hairline, not a box. */
+QWidget#viz-section {
+    border-bottom: 1px solid $border;
+}
+/* The number beside every slider: compact, right-aligned, no arrows. */
+QDoubleSpinBox#viz-number {
+    padding: 2px 6px;
+    min-height: 20px;
+}
+QListWidget#viz-layer-list {
+    border-radius: 6px;
+}
+/* Tracks (QC and physiology under a time axis): a rounded card each, the
+ * title and readout in a header ABOVE the plot so neither covers the signal. */
+QScrollArea#viz-tracks-scroll,
+QWidget#viz-tracks-viewport,
+QWidget#viz-tracks-body,
+QWidget#viz-tracks {
+    background: $surface;
+    border: none;
+}
+QFrame#viz-track {
+    background: $surface2;
+    border: 1px solid $border;
+    border-radius: 8px;
+}
+QLabel#viz-track-title {
+    color: $text;
+    font-size: 11px;
+    font-weight: 600;
+    background: transparent;
+}
+QLabel#viz-track-readout {
+    color: $dim;
+    font-size: 11px;
+    background: transparent;
+}
+QPushButton#viz-track-btn {
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    padding: 0px;
+}
+QPushButton#viz-track-btn:hover { background: $surface3; }
+QPushButton#viz-track-btn:disabled { background: transparent; }
+/* A panel's header inside a viewer (time course, QC plots): its controls on
+ * the left, its window controls as icons in the upper-right corner. */
+QWidget#viz-panel-header {
+    background: transparent;
+    border: none;
+}
+QPushButton#viz-corner-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0px;
+}
+QPushButton#viz-corner-btn:hover { background: $surface3; border: 1px solid $border; }
+QPushButton#viz-corner-btn:checked {
+    background: $accent_bg;
+    border: 1px solid $accent_border;
+}
+QPushButton#viz-corner-btn:disabled { background: transparent; }
+QPushButton#viz-corner-btn::menu-indicator { image: none; width: 0px; }
+/* The header above a set of tracks (a PanelHeader: what to show, how, what
+ * to do; the panel's own controls in its corner). */
+QWidget#viz-tracks-bar {
+    background: $surface;
+    border: none;
+    border-bottom: 1px solid $border;
 }
 
 /* ---------- Editor automation: fix-ups, bulk edit, citation, ignore ----------
@@ -1358,6 +1789,23 @@ QWidget#nifti-3d-controls {
    theme swap it keeps the brush it was first polished with. Same treatment
    as #issue-dialog-scroll / #issue-dialog-body above. */
 QScrollArea#cff-scroll, QWidget#cff-body { background: $surface; border: none; }
+
+/* Editor documents (gui/widgets/text_pane, picture_pane, gradient_pane):
+ * the text as stored in a monospace face, the rendered view in the app's,
+ * both on the pane's surface and sized by the font setting. */
+QPlainTextEdit#text-document {
+    background: $surface; color: $text; border: none;
+    padding: 10px 14px;
+    font-family: "JetBrains Mono";
+    font-size: 12px;
+    selection-background-color: $accent_bg;
+}
+QTextBrowser#text-rendered {
+    background: $bg; color: $text; border: none;
+    selection-background-color: $accent_bg;
+}
+QScrollArea#picture-scroll, QLabel#picture-label { background: $surface; border: none; }
+QTableWidget#gradient-table { border: none; }
 QPlainTextEdit#ent-input {
     background: $bg; color: $text;
     border: 1px solid $input_border; border-radius: 4px; padding: 3px 6px;
@@ -1391,7 +1839,6 @@ QTreeWidget#check-tree {
     color: $text;
     border: 1px solid $input_border;
     border-radius: 6px;
-    font-family: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
     font-size: 11px;
 }
 QTreeWidget#check-tree::item { padding: 2px 0; }
@@ -1449,32 +1896,40 @@ QLabel#val-caption {
    rounded outline with a divider between the halves rather than two separate
    buttons that happen to sit next to each other. */
 QWidget[navGroup="true"] { background: transparent; }
+/* The tree's collapse / open-a-level pair: quiet icons, no outline, a
+ * hover tint, like every other icon in a panel header. */
 QPushButton#tree-nav-left, QPushButton#tree-nav-right {
-    background: $surface2;
-    border: 1px solid $input_border;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
     padding: 0px;
     min-width: 0;
 }
-QPushButton#tree-nav-left {
-    border-top-left-radius: 5px;
-    border-bottom-left-radius: 5px;
-    border-right: none;
-}
-QPushButton#tree-nav-right {
-    border-top-right-radius: 5px;
-    border-bottom-right-radius: 5px;
-}
 QPushButton#tree-nav-left:hover, QPushButton#tree-nav-right:hover {
     background: $surface3;
-    border-color: $accent_border;
 }
 QPushButton#tree-nav-left:pressed, QPushButton#tree-nav-right:pressed {
     background: $accent_bg;
 }
-QPushButton#tree-nav-right:disabled {
-    background: $surface;
-    border-color: $border;
+QPushButton#tree-nav-right:disabled { background: transparent; }
+
+/* A button whose face is one glyph (the minus that removes an entry, the
+ * cross that unlinks): no padding, so the glyph fits its fixed width. */
+QPushButton#glyph-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0px;
+    min-width: 0;
+    color: $dim;
+    font-size: 14px;
 }
+QPushButton#glyph-btn:hover { background: $surface3; color: $text; }
+QPushButton#glyph-btn:pressed { background: $accent_bg; }
+QPushButton#glyph-btn:disabled { color: $muted; }
 
 /* The validation pane's own severity filter row. */
 QFrame#val-filter-row { background: transparent; border: none; }
+
+/* The Log tab's corner icons sit on the tab bar, not in a header. */
+QWidget#dock-corner { background: transparent; }

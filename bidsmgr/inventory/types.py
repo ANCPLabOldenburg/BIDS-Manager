@@ -48,4 +48,15 @@ class InventoryRow(BaseModel):
     image_type: Optional[str] = None  # third DICOM ImageType element (M / P / ND / …)
 
 
-__all__ = ["InventoryRow", "Modality"]
+#: The note a series with no pixel data carries (``cli.scan`` writes it,
+#: the GUI keys its "not an image" state on the token). Here, not in the
+#: scan command, so reading it costs the GUI no import of the scanner.
+NONIMAGE_ISSUE_TOKEN = "non-image series"
+NONIMAGE_ISSUE = (
+    "non-image series: the DICOM headers carry no pixel data "
+    "(Rows/Columns absent), so dcm2niix cannot convert it to NIfTI. "
+    "This is typically a scanner-derived object such as a Siemens "
+    "diffusion TENSOR map. Excluded from conversion."
+)
+
+__all__ = ["InventoryRow", "Modality", "NONIMAGE_ISSUE", "NONIMAGE_ISSUE_TOKEN"]

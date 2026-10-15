@@ -120,6 +120,21 @@ def round_menu(menu) -> None:
     menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
 
+def add_submenu(menu, title: str):
+    """``menu.addMenu(title)``, rounded like its parent.
+
+    ``QMenu.addMenu(str)`` creates the submenu itself, so it never passes
+    through :func:`round_menu` and opens with square OS corners inside a
+    rounded menu. Build every submenu through here.
+    """
+    from PyQt6.QtWidgets import QMenu
+
+    sub = QMenu(title, menu)
+    round_menu(sub)
+    menu.addMenu(sub)
+    return sub
+
+
 def menu_section(menu, title: str):
     """Start a titled group inside ``menu``, returning the header action.
 
@@ -142,4 +157,4 @@ def menu_section(menu, title: str):
     return action
 
 
-__all__ = ["install", "menu_section", "round_menu"]
+__all__ = ["add_submenu", "install", "menu_section", "round_menu"]

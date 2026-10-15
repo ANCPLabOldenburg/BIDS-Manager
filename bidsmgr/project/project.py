@@ -150,25 +150,34 @@ class Project:
         """
         return self.log.truncate_last()
 
-    def undo_last_user_edit(self):
-        """Pop the last event if it is a user edit; return it (else ``None``).
+    def undo_last_user_edit(self) -> list:
+        """Pop the last user ACTION: one edit, or every edit of its group.
 
         The GUI Undo button rides this rather than :meth:`undo_last` so it never
         pops a structural event (ScanImported / StageCompleted / ProjectCreated)
-        and orphans the scan; it reverts the most recent cell / entity / include
-        edit and is a no-op when the last event is not a user edit. The popped
-        event is returned so the GUI can stash it on a redo stack.
+        and orphans the scan. One action can be many events (a parent checkbox
+        writes one include per row, a bulk edit one cell per row); they share
+        a ``group`` id and go back together. Returns the popped events, oldest
+        first (``[]`` when the last event is not a user edit), so the GUI can
+        keep them for Redo.
         """
         from .types import UserSetCell, UserSetEntity, UserToggleInclude
 
+        edit_types = (UserSetCell, UserSetEntity, UserToggleInclude)
         events = list(self.log)
-        if not events:
-            return None
-        last = events[-1]
-        if isinstance(last, (UserSetCell, UserSetEntity, UserToggleInclude)):
-            if self.log.truncate_last():
-                return last
-        return None
+        if not events or not isinstance(events[-1], edit_types):
+            return []
+        group = events[-1].group
+        taken = [events[-1]]
+        if group:
+            for event in reversed(events[:-1]):
+                if isinstance(event, edit_types) and event.group == group:
+                    taken.append(event)
+                else:
+                    break
+        if not self.log.truncate_last(len(taken)):
+            return []
+        return list(reversed(taken))
 
     # ------------------------------------------------------------------
     # Bundle housekeeping

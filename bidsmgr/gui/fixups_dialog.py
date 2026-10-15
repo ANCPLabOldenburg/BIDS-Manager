@@ -177,10 +177,11 @@ class FixupsDialog(QDialog):
         # --- TODO placeholders -----------------------------------------
         todo_card, todo_body, todo_actions = _repair_card(
             "Unanswered metadata",
-            "Writes the literal TODO into every missing required and "
-            "recommended sidecar field, so what is unanswered is visible in "
-            "the file and reported by validation instead of being an absence "
-            "nobody notices. Existing values are never overwritten.",
+            "Writes the literal TODO into the missing fields at the levels "
+            "chosen below, so what is unanswered is visible in the file and "
+            "reported by validation instead of being an absence nobody "
+            "notices. TODOs outside those levels, left by a wider earlier "
+            "run, are taken back. Existing values are never overwritten.",
         )
         todo_body.addWidget(_wrapped(
             "This runs the metadata engine, which also refreshes "
@@ -193,20 +194,21 @@ class FixupsDialog(QDialog):
         # user chooses, and changing it here changes it for both.
         scope_row = QHBoxLayout()
         scope_row.setSpacing(8)
-        scope_row.addWidget(QLabel("Mark which fields:"))
+        scope_row.addWidget(QLabel("In which fields:"))
         self._todo_scope = QComboBox()
         self._todo_scope.setObjectName("ent-input")
         for value, label in (
-            ("required", "Required only"),
-            ("recommended", "Required and recommended"),
-            ("optional", "Everything declared, including optional"),
+            ("required", "Required fields only"),
+            ("recommended", "Required and recommended fields"),
+            ("optional", "Every declared field, including optional"),
         ):
             self._todo_scope.addItem(label, userData=value)
         self._todo_scope.setToolTip(
-            "The scopes nest. A field whose type admits no honest marker (a "
-            "number, a boolean, a controlled vocabulary) is left absent and "
-            "reported rather than given a value nobody stated, so a wider "
-            "scope never introduces a validation error."
+            "The choices nest, and the levels are the ones the sidecar form "
+            "shows for each file. A field where a placeholder would itself be "
+            "an error (a number, a boolean, a controlled vocabulary, a field "
+            "that names or links files) is left absent and reported, so a "
+            "wider choice never introduces a validation error."
         )
         self._todo_scope.currentIndexChanged.connect(self._on_scope_changed)
         scope_row.addWidget(self._todo_scope, 1)
@@ -215,7 +217,7 @@ class FixupsDialog(QDialog):
         self._todo_unmarkable = _wrapped("", hint=True)
         todo_body.addWidget(self._todo_unmarkable)
 
-        self._todo_btn = QPushButton("Mark missing metadata")
+        self._todo_btn = QPushButton("Write TODOs")
         self._todo_btn.setObjectName("tb-btn")
         self._todo_btn.clicked.connect(self._on_stamp_todos)
         todo_actions.addWidget(self._todo_btn)
@@ -444,13 +446,19 @@ class FixupsDialog(QDialog):
 
         from ..metadata.engine import run_metadata
 
+        scope = self._todo_scope.currentData() or "recommended"
+        levels = {
+            "required": "required field",
+            "recommended": "required and recommended field",
+            "optional": "declared field, optional ones included,",
+        }[scope]
         answer = QMessageBox.question(
-            self, "Stamp TODO placeholders",
-            "Every missing required and recommended field gets the literal "
-            "TODO written into it, and participants.tsv and the scans tables "
-            "are refreshed.\n\nValidation will then report each TODO, which "
-            "is the point: an unanswered field becomes visible rather than "
-            "absent.",
+            self, "Write TODO placeholders",
+            f"Every missing {levels} gets the literal TODO written into it, "
+            "and a TODO in any other field is taken back. participants.tsv "
+            "and the scans tables are refreshed.\n\nValidation will then "
+            "report each TODO, which is the point: an unanswered field "
+            "becomes visible rather than absent.",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
             QMessageBox.StandardButton.Ok,
         )
@@ -458,33 +466,33 @@ class FixupsDialog(QDialog):
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            report = run_metadata(
-                self._root, fill_todos=True,
-                fill_scope=self._todo_scope.currentData() or "recommended",
-                write_report=False,
-            )
+            report = run_metadata(self._root, fill_scope=scope, write_report=False)
         except Exception as exc:  # noqa: BLE001 - report rather than crash
             QApplication.restoreOverrideCursor()
-            QMessageBox.warning(self, "Could not stamp placeholders", str(exc))
+            QMessageBox.warning(self, "Could not write placeholders", str(exc))
             return
         QApplication.restoreOverrideCursor()
-        filled = sum(
-            len(f.fields) for f in getattr(report, "todo_fills", []) or []
-        )
-        files = len(getattr(report, "todo_fills", []) or [])
-        unmarkable = len(getattr(report, "unmarkable", []) or [])
-        tail = (
-            f"\n\n{unmarkable} field(s) could take no placeholder and were "
-            "left absent: a number, a boolean or a controlled vocabulary has "
-            "no honest marker, and inventing one would write a value nobody "
-            "stated. They stay in the validation report."
-            if unmarkable else ""
-        )
+        filled = sum(len(f.fields) for f in report.todo_fills)
+        files = len(report.todo_fills)
+        removed = sum(len(f.fields) for f in report.todo_removed)
+        unmarkable = len(report.unmarkable)
+        parts = [
+            f"{filled} field(s) across {files} file(s) now carry a TODO. "
+            "Validation will report each one until it is answered."
+        ]
+        if removed:
+            parts.append(
+                f"{removed} TODO(s) outside the chosen fields were taken back."
+            )
+        if unmarkable:
+            parts.append(
+                f"{unmarkable} field(s) could take no placeholder and were left "
+                "absent: a number, a boolean or a controlled vocabulary has no "
+                "honest marker, and a field that names or links files would "
+                "point at nothing. They stay in the validation report."
+            )
         QMessageBox.information(
-            self, "Missing metadata marked",
-            f"{filled} field(s) across {files} file(s) now carry a "
-            f"placeholder. Validation will report each one until it is "
-            f"answered.{tail}",
+            self, "TODO placeholders written", "\n\n".join(parts),
         )
         self.refresh()
 

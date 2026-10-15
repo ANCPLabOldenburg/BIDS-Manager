@@ -96,14 +96,29 @@ def test_every_string_setting_round_trips_a_non_boolish_value():
     """Generic guard: any string field put in the bool loop fails here."""
     # A field whose load path validates against a vocabulary needs a value
     # from that vocabulary, or the round trip legitimately rejects the probe
-    # and the test measures the guard instead of the save.
-    constrained = {"nifti_view_mode": "combo"}
+    # and the test measures the guard instead of the save. And the value must
+    # NOT be the default: a field saved as "1" is read back as its default, so
+    # probing with the default passed while metadata_fill_scope never stuck.
+    constrained = {
+        "nifti_view_mode": "combo", "accent": "teal", "theme": "light",
+        "icon_style": "accent",
+        "editor_field_scope": "present",
+        "validate_show": "error", "scan_tsv_filename": "study.tsv",
+        "convert_on_existing": "update", "convert_intended_for": "relative",
+        "convert_sourcedata": "copy", "convert_sourcedata_modalities": "mri,eeg",
+        "metadata_fill_scope": "optional", "header_logo": "app_icon",
+        "convert_deface_engine": "allineate-robust",
+    }
     probes = {
         str: "allineate-robust",
     }
+    # Written only by their remember_* calls when the view switches, so a Settings
+    # dialog saving a copy it loaded earlier cannot switch the view back.
+    remembered_elsewhere = {"active_view", "editor_sidecar_view"}
     fields = [
         f for f in dataclasses.fields(AppSettings)
         if f.type in (str, "str") and f.name in KEYS
+        and f.name not in remembered_elsewhere
     ]
     assert fields, "no string settings found; the introspection broke"
 
@@ -113,6 +128,10 @@ def test_every_string_setting_round_trips_a_non_boolish_value():
         # Use the field's own default when it is a constrained vocabulary;
         # a free-form field gets a value no bool encoder could produce.
         probe = constrained.get(field.name) or current or probes[str]
+        assert probe != current, (
+            f"{field.name}: probe with a value other than the default "
+            f"{current!r}, or a field flattened to '1' still passes"
+        )
         setattr(s, field.name, probe)
         after = _round_trip(s)
         assert getattr(after, field.name) == probe, (

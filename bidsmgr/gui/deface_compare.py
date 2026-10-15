@@ -8,7 +8,7 @@ is still identifiable, which is the failure the user was trying to avoid. Too
 much removed and the cerebellum or the front of the brain is gone, which
 quietly ruins the analysis and survives every validator.
 
-The side-by-side viewer itself is :class:`~bidsmgr.gui.widgets.compare_panes
+The side-by-side viewer itself is :class:`~bidsmgr.gui.viz.compare
 .ComparePanes`, shared with the general "compare any two images" dialog. What
 is here is the part that is about DEFACING: finding the undefaced copy,
 explaining when there is not one, and offering to restore from it.
@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..deface import compare, status
-from .widgets.compare_panes import ComparePanes
+from .viz.compare import ComparePanes
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +81,8 @@ class DefaceCompareDialog(QDialog):
             + (f", defaced with {eng.label}." if eng else ".")
         )
 
-        self._panes = ComparePanes()
+        # Before and after are the SAME image: one window serves both.
+        self._panes = ComparePanes(link_contrast=True)
         outer.addWidget(self._panes, 1)
         self._panes.both_loaded.connect(self._on_both_loaded)
 
@@ -151,27 +152,10 @@ class DefaceCompareDialog(QDialog):
             self._panes.stop()
         super().closeEvent(event)
 
-    # -- what the tests reach for -----------------------------------------
-
     @property
-    def _before(self):
-        return self._panes.left
-
-    @property
-    def _after(self):
-        return self._panes.right
-
-    @property
-    def _link(self):
-        return self._panes.link
-
-    @property
-    def _link_note(self):
-        return self._panes.note
-
-    @property
-    def _same_grid(self) -> bool:
-        return self._panes._same_grid
+    def panes(self):
+        """The two linked viewers (``None`` when there is no original)."""
+        return self._panes
 
 
 def size_to_screen(widget, want_w: int, want_h: int) -> None:

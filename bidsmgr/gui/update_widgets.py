@@ -264,7 +264,7 @@ def _on_startup_check_done(window: QWidget, latest: str) -> None:
 # page: 1.2.6 is ``#v126``, 1.2.4.2 is ``#v1242``. Dropping the dots is the
 # convention the documentation already uses.
 _UPDATES_URL = (
-    "https://ancplaboldenburg.github.io/bids_manager_documentation/updates.html"
+    "https://ancplaboldenburg.github.io/bids_manager_documentation/updates/"
 )
 
 

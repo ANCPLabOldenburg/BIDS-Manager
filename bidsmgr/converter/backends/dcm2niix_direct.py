@@ -31,6 +31,7 @@ directly, no wrapper layer.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -163,6 +164,7 @@ class Dcm2niixDirect:
 
         staged = _collect_outputs(output_dir, task.basename)
         staged = _drop_disallowed_extensions(staged, task)
+        staged = _name_phase_part(staged, task.basename)
 
         if task.skip_residuals:
             staged, dropped = _partition_residuals(staged, task.basename)
@@ -313,6 +315,59 @@ def _run_dcm2niix(
         str(dicom_dir),
     ]
     return run_dcm2niix(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def _name_phase_part(staged: list[Path], basename: str) -> list[Path]:
+    """A series the scan named ``part-phase`` IS the phase image, and
+    dcm2niix still appends its ``_ph`` token (``..._part-phase_bold_ph``,
+    a name BIDS does not define). Drop the token so the file lands at the
+    planned name, and say the image's ``Units``, which BIDS requires of
+    every ``part-phase`` file and dcm2niix does not write. Anything else is
+    left as it is."""
+    if "_part-phase_" not in f"_{basename}_":
+        return staged
+    out = []
+    for path in staged:
+        ext = _matching_ext(path.name, _KNOWN_OUTPUT_EXTS)
+        if ext and path.name == f"{basename}_ph{ext}":
+            target = path.with_name(basename + ext)
+            if not target.exists():
+                path.rename(target)
+                path = target
+        out.append(path)
+    image = next((p for p in out if p.name in (f"{basename}.nii.gz", f"{basename}.nii")), None)
+    sidecar = next((p for p in out if p.name == f"{basename}.json"), None)
+    if image is not None and sidecar is not None:
+        _write_phase_units(sidecar, image)
+    return sorted(out)
+
+
+def _phase_units(image: Path) -> str:
+    """``"rad"`` when the phase values lie within one turn, else
+    ``"arbitrary"`` (Siemens stores raw phase as integers in +-4096). Reads
+    the first volume only."""
+    try:
+        import nibabel as nib
+        import numpy as np
+
+        img = nib.load(str(image))
+        data = img.dataobj[..., 0] if len(img.shape) > 3 else img.dataobj[...]
+        values = np.asarray(data, dtype=float)
+        low, high = float(np.nanmin(values)), float(np.nanmax(values))
+    except Exception:  # noqa: BLE001 - a unit is a courtesy, never a failure
+        return "arbitrary"
+    return "rad" if -3.1416 * 1.01 <= low and high <= 3.1416 * 1.01 else "arbitrary"
+
+
+def _write_phase_units(sidecar: Path, image: Path) -> None:
+    try:
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(meta, dict) or meta.get("Units"):
+        return
+    meta["Units"] = _phase_units(image)
+    sidecar.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
 
 def _drop_disallowed_extensions(staged: list[Path], task) -> list[Path]:

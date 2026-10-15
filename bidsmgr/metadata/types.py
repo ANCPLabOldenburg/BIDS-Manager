@@ -59,11 +59,12 @@ class SidecarFill(BaseModel):
 
 
 class TodoFill(BaseModel):
-    """Placeholder ``"TODO"`` strings inserted into one sidecar.
+    """Placeholder ``"TODO"`` strings written into, or taken out of, one sidecar.
 
-    Created only when ``fill_todos=True`` is passed to ``run_metadata``.
-    Each entry records which fields were missing and got the literal
-    string ``"TODO"`` written. Existing values are never overwritten.
+    Created only when ``run_metadata`` is given a ``fill_scope``. In
+    ``todo_fills`` each entry records which missing fields got a placeholder;
+    in ``todo_removed``, which placeholders were taken back because their
+    field is outside the scope. Existing values are never overwritten.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -89,6 +90,10 @@ class MetadataReport(BaseModel):
     files_written: list[Path] = Field(default_factory=list)
     sidecar_fills: list[SidecarFill] = Field(default_factory=list)
     todo_fills: list[TodoFill] = Field(default_factory=list)
+    # Placeholders an earlier, wider run wrote into fields the scope of this
+    # run leaves out. Taken back, so the dataset carries what the setting
+    # says and not the sum of every setting it was ever run with.
+    todo_removed: list[TodoFill] = Field(default_factory=list)
     missing_required: list[str] = Field(default_factory=list)
     missing_recommended: list[str] = Field(default_factory=list)
     # Fields that are missing and can take NO placeholder, with the reason.
@@ -98,7 +103,8 @@ class MetadataReport(BaseModel):
     # cannot report itself as complete.
     unmarkable: list[str] = Field(default_factory=list)
     # How much of what the standard declares this run was asked to mark.
-    fill_scope: str = "none"
+    # "unchanged" when it was asked nothing: placeholders were left alone.
+    fill_scope: str = "unchanged"
     warnings: list[str] = Field(default_factory=list)
 
 

@@ -30,10 +30,14 @@ from .types import FieldLevel, Issue, Severity, SidecarField
 
 # Recognised BIDS datatype directory names, used to infer a file's datatype from
 # its path the same way the old in-house validator did.
-_BIDS_DATATYPE_NAMES: tuple[str, ...] = (
-    "anat", "func", "dwi", "fmap", "perf",
-    "meg", "eeg", "ieeg", "beh", "pet", "micr", "nirs",
-)
+def _datatype_names() -> frozenset[str]:
+    """The datatype folders the standard defines, read from it.
+
+    A hand-kept list stood here and predated ``mrs``, ``emg`` and ``motion``,
+    so every spectroscopy sidecar was skipped: no placeholder, no template
+    answer, no level in the form.
+    """
+    return frozenset(schema_mod.list_datatypes())
 
 # Multi-part extensions stripped (longest first) to recover the BIDS suffix.
 _KNOWN_EXTS: tuple[str, ...] = (
@@ -104,7 +108,7 @@ def infer_datatype_suffix(
 
     datatype: Optional[str] = None
     for part in rel_parts:
-        if part in _BIDS_DATATYPE_NAMES:
+        if part in _datatype_names():
             datatype = part
             break
 
@@ -166,7 +170,7 @@ def _shown_level(level: FieldLevel, spec) -> FieldLevel:
     demand the standard is not making, and it sends the user hunting for a
     field they must not add.
     """
-    if getattr(spec, "speculative", False) and level in (
+    if schema_mod.effective_level(spec) == "optional" and level in (
         FieldLevel.REQUIRED,
         FieldLevel.RECOMMENDED,
     ):
@@ -214,10 +218,13 @@ def sidecar_fields_for(
 
     seen: set[str] = set()
     fields: list[SidecarField] = []
+    # This file's entities, so the rows are the ones the metadata step marks:
+    # a T1w with no task is not offered TaskName.
+    entities = schema_mod.name_entities(Path(fp).name)
 
     def _add_level(level: FieldLevel, getter) -> None:
         try:
-            schema_fields = getter(datatype, suffix, bids_root)
+            schema_fields = getter(datatype, suffix, bids_root, entities=entities)
         except (KeyError, ValueError, AttributeError):
             schema_fields = []
         for fi in schema_fields or []:

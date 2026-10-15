@@ -15,6 +15,8 @@ Object-name conventions (consumed by ``theme.qss``):
   ``path-field`` (readonly QLineEdit), ``tb-btn-ghost`` (change button).
 * ``ElidedLabel``   → keeps the object name it is given; used wherever
   runtime text (a path, a log line) must never widen the window.
+* ``Segmented``     → ``seg-track`` / ``seg-pill``: a compact segmented
+  control for a panel's title bar.
 
 All four respect palette swaps through the QSS alone; no per-widget
 ``repaint_for_palette`` is needed.
@@ -22,7 +24,7 @@ All four respect palette swaps through the QSS alone; no per-widget
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPalette, QPen
@@ -37,8 +39,9 @@ from PyQt6.QtWidgets import (
 )
 
 
-def _chip_qcolor(token: str) -> QColor:
-    """Parse a palette token (hex or ``rgba(r,g,b,a)``) into a QColor.
+def qcolor(token: str) -> QColor:
+    """Parse a palette token (hex or ``rgba(r,g,b,a)``) into a QColor, for
+    anything painted with the palette.
 
     ``QColor`` cannot parse the CSS ``rgba(...)`` strings the palette uses
     for translucent tints, so handle those explicitly.
@@ -126,9 +129,9 @@ class Chip(QLabel):
         bg_t, fg_t, br_t = self._KIND_TOKENS.get(
             self._kind, self._KIND_TOKENS["default"]
         )
-        bg = _chip_qcolor(pal.get(bg_t, "#1c2128"))
-        fg = _chip_qcolor(pal.get(fg_t, "#8b949e"))
-        border = _chip_qcolor(pal.get(br_t, "#21262d"))
+        bg = qcolor(pal.get(bg_t, "#1c2128"))
+        fg = qcolor(pal.get(fg_t, "#8b949e"))
+        border = qcolor(pal.get(br_t, "#21262d"))
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -140,6 +143,75 @@ class Chip(QLabel):
         p.setPen(QPen(fg))
         p.setFont(self.font())
         p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+
+
+class Segmented(QFrame):
+    """A compact segmented control: one choice of a few, the chosen one
+    raised in its track.
+
+    Sized for a panel's 30 px title bar (QSS ``seg-track`` / ``seg-pill``),
+    the header's view switcher made small. The chosen segment is neutral
+    (``surface3`` and the text colour): the accent is for actions.
+    """
+
+    #: The key of the segment chosen by a click.
+    changed = pyqtSignal(str)
+
+    def __init__(self, options: Sequence[tuple], current: str = "", parent=None) -> None:
+        """``options`` are ``(key, text, tooltip)``, or ``(key, text, tooltip,
+        icon)`` with an icon name from :mod:`bidsmgr.gui.icons`; an empty text
+        makes an icon-only segment (its tooltip names it)."""
+        super().__init__(parent)
+        from PyQt6.QtWidgets import QButtonGroup
+
+        self.setObjectName("seg-track")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(2)
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self.buttons: dict[str, QPushButton] = {}
+        self._icons: dict[str, str] = {}
+        for option in options:
+            key, text, tip = option[:3]
+            btn = QPushButton(text, self)
+            btn.setObjectName("seg-pill")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tip)
+            if len(option) > 3 and option[3]:
+                self._icons[key] = option[3]
+                btn.setProperty("iconOnly", not text)
+            btn.clicked.connect(lambda _c=False, k=key: self._on_clicked(k))
+            self._group.addButton(btn)
+            lay.addWidget(btn)
+            self.buttons[key] = btn
+        self.refresh_icons()
+        self.set_current(current or (options[0][0] if options else ""))
+
+    def refresh_icons(self) -> None:
+        """Re-make the icons in the current palette (after a theme change)."""
+        from PyQt6.QtCore import QSize
+
+        from .. import icons
+        from ..theme_manager import scaled_px
+
+        for key, name in self._icons.items():
+            btn = self.buttons[key]
+            btn.setIcon(icons.icon(name))
+            btn.setIconSize(QSize(scaled_px(14), scaled_px(14)))
+
+    def current(self) -> str:
+        return next((k for k, b in self.buttons.items() if b.isChecked()), "")
+
+    def set_current(self, key: str) -> None:
+        """Choose ``key`` without announcing it."""
+        btn = self.buttons.get(key)
+        if btn is not None:
+            btn.setChecked(True)
+
+    def _on_clicked(self, key: str) -> None:
+        self.changed.emit(key)
 
 
 class VSep(QFrame):
@@ -255,6 +327,20 @@ class ElidedLabel(QLabel):
         )
 
 
+class CappedLabel(ElidedLabel):
+    """A name that asks for at most ``cap`` pixels and elides (in the middle,
+    where a file name's entities are) beyond them, so a long name never
+    decides how narrow its panel may be."""
+
+    def __init__(self, cap: int, text: str = "", parent=None) -> None:
+        super().__init__(text, parent, mode=Qt.TextElideMode.ElideMiddle)
+        self._cap = int(cap)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        hint = super().sizeHint()
+        return QSize(min(hint.width(), self._cap), hint.height())
+
+
 class ElidedPushButton(QPushButton):
     """A button whose label shortens instead of widening its window.
 
@@ -329,6 +415,8 @@ class PathBar(QFrame):
         ok: bool = False,
         trailing_chips: Sequence[tuple[str, str]] | None = None,
         parent=None,
+        *,
+        button: Optional[str] = "change…",
     ) -> None:
         super().__init__(parent)
         self.setObjectName("pathbar")
@@ -336,11 +424,13 @@ class PathBar(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 9, 14, 9)
         lay.setSpacing(10)
+        self._lay = lay
 
         lbl = QLabel(label)
         lbl.setObjectName("path-label")
         lbl.setMinimumWidth(80)
         lay.addWidget(lbl)
+        self._label = lbl
 
         ico = "✔  " if ok else "○  "
         field = QLineEdit(f"{ico}{value}")
@@ -350,10 +440,23 @@ class PathBar(QFrame):
 
         for chip_kind, chip_text in trailing_chips or ():
             lay.addWidget(Chip(chip_text, chip_kind))
+        # What the path IS (a project, a folder open for viewing): set by the
+        # view with :meth:`set_chip`, hidden until then.
+        self._chip: Optional[Chip] = None
+        # One action about the path (Back to the project, Open as project):
+        # :meth:`set_action`.
+        self.action_button = QPushButton("")
+        self.action_button.setObjectName("tb-btn")
+        self.action_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.action_button.setVisible(False)
+        lay.addWidget(self.action_button)
 
-        btn = QPushButton("change…")
+        # ``button=None``: the view opens paths from its own toolbar, and two
+        # buttons that do one thing is one too many.
+        btn = QPushButton(button or "")
         btn.setObjectName("tb-btn-ghost")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setVisible(button is not None)
         lay.addWidget(btn)
 
         # Expose the change-button + value field so views can
@@ -372,12 +475,41 @@ class PathBar(QFrame):
         raw = self._field.text()
         return raw[3:] if raw[:1] in ("✔", "○") else raw
 
+    def set_label(self, text: str) -> None:
+        self._label.setText(text)
+
+    def set_chip(self, kind: str = "", text: str = "", tip: str = "") -> None:
+        """A chip after the path saying what it is; ``text`` empty hides it."""
+        if self._chip is not None:
+            self._lay.removeWidget(self._chip)
+            self._chip.hide()
+            self._chip.setParent(None)
+            self._chip.deleteLater()
+            self._chip = None
+        if text:
+            self._chip = Chip(text, kind)
+            self._chip.setToolTip(tip)
+            self._lay.insertWidget(self._lay.indexOf(self.action_button), self._chip)
+
+    def chip_text(self) -> str:
+        return self._chip.text() if self._chip is not None else ""
+
+    def set_action(self, text: str = "", tip: str = "") -> None:
+        """The action button's text (``""`` hides it); connect to
+        ``action_button.clicked``."""
+        self.action_button.setText(text)
+        self.action_button.setToolTip(tip)
+        self.action_button.setVisible(bool(text))
+
 
 __all__ = [
+    "CappedLabel",
     "Chip",
     "ElidedLabel",
     "ElidedPushButton",
     "PaneHeader",
     "PathBar",
+    "Segmented",
     "VSep",
+    "qcolor",
 ]

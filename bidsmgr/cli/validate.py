@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 from typing import Sequence, Iterable, Optional
 
+from ..util.oplog import add_log_arguments, dataset_root_for, log_keywords, logged
 from ..editor import Severity, ValidationReport, render_html, validate
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,10 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+@logged("validate", lambda a: (
+    dataset_root_for(Path(a["target"]) / a["dataset"] if a["dataset"] else Path(a["target"])),
+    {"target": a["target"], "dataset": a["dataset"], "deep checks": a["strict"],
+     "schema": a["schema"] or "bundled"}))
 def run_validate_cli(
     target: Path,
     *,
@@ -298,6 +303,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
 
+    add_log_arguments(parser)
     args = parser.parse_args(argv)
     # One version for the whole run, adopted before any schema question is
     # asked. Without this the flag would reach the validator alone and a
@@ -319,6 +325,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         flag_todos=args.flag_todos,
         write_report=args.write_report,
         html_report=args.html_report,
+        **log_keywords(args),
     )
 
 

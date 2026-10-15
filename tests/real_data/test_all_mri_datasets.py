@@ -48,7 +48,10 @@ pytestmark = [
 def _dataset_dirs() -> list[Path]:
     if not REAL_MRI_ROOT.exists():
         return []
-    return sorted(p for p in REAL_MRI_ROOT.iterdir() if p.is_dir())
+    # ``vendor_test_data`` is a collection of 52 sets, each tested on its own
+    # in test_vendor_test_data.py; scanning it as one dataset tests nothing.
+    return sorted(p for p in REAL_MRI_ROOT.iterdir()
+                  if p.is_dir() and p.name != "vendor_test_data")
 
 
 @pytest.mark.parametrize("dataset", _dataset_dirs(), ids=lambda p: p.name)

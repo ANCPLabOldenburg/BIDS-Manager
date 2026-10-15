@@ -208,7 +208,7 @@ class SidecarRow(QFrame):
         # Field name, with the unit the schema declares. A dose box that
         # does not say MBq is a box somebody will put Bq in.
         unit = getattr(schema_field, "unit", "") or ""
-        label_text = f'"{key}"' + (f"  ({unit})" if unit else "")
+        label_text = key + (f"  ({unit})" if unit else "")
         key_lbl = QLabel(label_text)
         key_lbl.setObjectName("sc-key-dep" if level == "dep" else "sc-key")
         key_lbl.setMinimumWidth(220)

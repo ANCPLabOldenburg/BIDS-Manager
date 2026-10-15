@@ -34,10 +34,11 @@ from PyQt6.QtCore import QSettings, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
+
+from .splitter import Splitter
 
 #: Where the per-tool choice is kept.
 _KEY = "dialogs/preview_orientation/{0}"
@@ -46,7 +47,7 @@ _BESIDE = "beside"
 _BELOW = "below"
 
 
-class PreviewSplit(QSplitter):
+class PreviewSplit(Splitter):
     """A two-pane splitter that can be flipped between stacked and side by side.
 
     ``controls`` is the pane that says what to do, ``preview`` the one that

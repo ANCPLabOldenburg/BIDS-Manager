@@ -247,7 +247,7 @@ def test_release_notes_url_anchors_at_the_version(version, expected_anchor):
 
     url = release_notes_url(version)
     assert url.endswith(expected_anchor)
-    assert "bids_manager_documentation/updates.html" in url
+    assert "bids_manager_documentation/updates/" in url
 
 
 @pytest.mark.parametrize("version", ["1.2.6.dev0", "", "not-a-version", "1.2.6rc1"])
@@ -256,7 +256,7 @@ def test_release_notes_url_degrades_to_the_page(version):
     at the top beats sending somebody to a fragment that does not exist."""
     from bidsmgr.gui.update_widgets import release_notes_url
 
-    assert release_notes_url(version).endswith("updates.html")
+    assert release_notes_url(version).endswith("updates/")
 
 
 def test_the_notes_url_points_at_a_page_the_documentation_actually_has():
@@ -266,7 +266,7 @@ def test_the_notes_url_points_at_a_page_the_documentation_actually_has():
 
     assert release_notes_url("1.2.6") == (
         "https://ancplaboldenburg.github.io/bids_manager_documentation/"
-        "updates.html#v126"
+        "updates/#v126"
     )
 
 
@@ -278,15 +278,15 @@ def test_the_sample_datasets_section_link_is_the_documentation_page():
 
     assert _SAMPLE_DATASETS_URL == (
         "https://ancplaboldenburg.github.io/bids_manager_documentation/"
-        "tutorial.html#datasets"
+        "start/sample-data/"
     )
 
 
 def test_every_dataset_the_documentation_offers_is_downloadable_from_the_gui():
-    """The list here and the "Pick a dataset" section drifted once already: the
-    panel had four while the documentation offered six, and one share link had
-    been reissued so the application handed out a stale file. Six distinct
-    downloads, each a share link, is the shape that has to hold."""
+    """The list here and the documentation's Sample data page drifted twice
+    already: the panel had four while the documentation offered six, and in
+    October 2026 every share was reissued, which left all six links here dead.
+    Six distinct downloads, each a share link, is the shape that has to hold."""
     from bidsmgr.gui.welcome_panel import _SAMPLE_DATASETS
 
     assert len(_SAMPLE_DATASETS) == 6

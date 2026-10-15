@@ -1,10 +1,12 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+# 77: the first setuptools that reads `license = "MIT"` with `license-files`
+# (PEP 639); an older one rejects the project table outright.
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "1.4.1"
+version = "1.5.0"
 description = "Schema-driven BIDS converter, curator, and editor (re-imagination of BIDS-Manager v0.2.5)"
 readme = "README.md"
 license = "MIT"
@@ -47,7 +49,6 @@ classifiers = [
 dependencies = [
     # Schema engine. The keystone of the architecture.
     "bidsschematools>=1.0,<=1.2.2",
-    "ancpbids>=0.3,<=0.3.1",
 
     # bidsval, the BIDS validation engine and the interpreter of the schema,
     # is VENDORED at ``bidsmgr/vendor/bidsval`` rather than depended on. It is
@@ -116,6 +117,13 @@ dependencies = [
     # Data handling.
     "pandas>=2.0,<3.0",
     "numpy>=1.26,<3.0",
+    # The viewer's own maths: resampling a slice in world space
+    # (``scipy.ndimage.map_coordinates``), filters and spectra. It used to
+    # arrive only through mne, which made a direct import an accident of
+    # someone else's dependencies. Floor = mne's own floor; ceiling = newest
+    # release (1.18 ships no 3.10/3.11 wheels, so those Pythons resolve to
+    # 1.15 / 1.17 inside this range).
+    "scipy>=1.13,<=1.18.1",
     "joblib>=1.3,<=1.5.3",
 
     # System info (CPU thread count, total RAM) shown in Settings and used
@@ -143,13 +151,30 @@ dependencies = [
     # brainchop runs the mindgrab network on tinygrad, which is pure Python
     # (no torch, no onnxruntime).
     #
-    # The marker is load-bearing. niimath tags its wheels per Python version
-    # rather than abi3, and there is no 3.14 wheel yet, so an unconditional
-    # pin would make BIDS Manager itself UNINSTALLABLE on a Python we claim
-    # to support. On 3.14 the app installs, the menu entry greys out, and the
-    # tooltip says why. Drop the marker once the wheel exists.
+    # The markers are load-bearing. niimath tags its wheels per Python version
+    # rather than abi3, and there is no 3.14 wheel yet (1.0.20260924 ships
+    # cp37 to cp313), so an unconditional pin would make BIDS Manager itself
+    # UNINSTALLABLE on a Python we claim to support: pip falls back to the
+    # sdist, whose build needs CMake, a C compiler and OpenMP. brainchop needs
+    # the same marker, because it requires niimath itself on every Python;
+    # with niimath alone marked, a 3.14 install still failed through
+    # brainchop (measured 2026-10-15). On 3.14 the app installs, defacing and
+    # the quality check's brain models say they need brainchop, and the
+    # quality check uses its numpy fallback. Drop both markers once niimath
+    # publishes a 3.14 wheel.
     "niimath>=1.0.20250526; python_version < '3.14'",
-    "brainchop>=0.2.5",
+    "brainchop>=0.2.5; python_version < '3.14'",
+
+    # EyeLink eye tracking (.edf). eyelinkio is one pure-Python wheel that
+    # ships SR Research's EDF reader for macOS (x86_64 and arm64), Linux
+    # (x86_64) and Windows (32 and 64 bit), loaded through ctypes, so the
+    # Python version does not matter. Measured 2026-10-12 on Python 3.10 to
+    # 3.14: macOS arm64 and x86_64, Linux x86_64 (slim and full images).
+    # Where the library cannot load (Linux on ARM; Windows without the
+    # Visual C++ 2008 runtime its DLL is linked against, which the Windows
+    # installer adds), the reader falls back to edf2asc or a .asc export
+    # and says what is missing; nothing else depends on it.
+    "eyelinkio>=0.3.0,<0.4",
 ]
 
 [project.optional-dependencies]
@@ -177,11 +202,14 @@ bidsmgr-create    = "bidsmgr.cli.create:main"
 bidsmgr-adopt     = "bidsmgr.cli.adopt:main"
 bidsmgr-project   = "bidsmgr.cli.project:main"
 bidsmgr-scan      = "bidsmgr.cli.scan:main"
+bidsmgr-classify  = "bidsmgr.cli.classify:main"
 bidsmgr-convert   = "bidsmgr.cli.convert:main"
 bidsmgr-rebuild   = "bidsmgr.cli.rebuild:main"
 bidsmgr-metadata  = "bidsmgr.cli.metadata:main"
 bidsmgr-validate  = "bidsmgr.cli.validate:main"
 bidsmgr-deface    = "bidsmgr.cli.deface:main"
+bidsmgr-view      = "bidsmgr.cli.view:main"
+bidsmgr-qc        = "bidsmgr.cli.qc:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -198,6 +226,9 @@ include = ["bidsmgr*"]
     "assets/macos/*.png",
     "assets/macos/*.icns",
     "assets/windows/*.ico",
+    "assets/fonts/*.ttf",
+    "assets/fonts/*.txt",
+    "assets/fonts/*.md",
 ]
 # NOTE: no "bidsmgr.schema" entry. That package is a pure adapter over
 # bidsval and ships no data; it used to carry a "bundled/**/*" glob pointing
@@ -205,13 +236,23 @@ include = ["bidsmgr*"]
 # The defacing atlas: a matched template and mask that must travel together.
 # See bidsmgr/deface/atlas/PROVENANCE.md.
 "bidsmgr.deface"            = ["atlas/*.nii.gz", "atlas/PROVENANCE.md"]
+# The quality check's template: the MNI ICBM 152 2009c images at 2 mm, 8-bit,
+# with the licence notice they must travel with. See
+# bidsmgr/qc/templates/PROVENANCE.md.
+"bidsmgr.qc.templates"      = ["*.nii.gz", "PROVENANCE.md"]
 "bidsmgr.vendor"            = ["README.md"]
+# The parameter-based classifier's rulebook: data, edited by the user as a delta.
+"bidsmgr.classifier.acquisition" = ["rulebook.json"]
 # A Windows dcm2niix that can convert MR spectroscopy. The released one
 # cannot: it is killed with 0xC00000FD before it writes anything. Used only
 # as a fallback on that exit code, never in preference to the wheel's binary.
 # See bidsmgr/vendor/dcm2niix_win/PROVENANCE.md.
 "bidsmgr.vendor.dcm2niix_win" = ["dcm2niix.exe", "PROVENANCE.md", "LICENSE"]
 "bidsmgr.vendor.bidsphysio" = ["LICENSE"]
+# NiiVue's colour maps, read by bidsmgr.viz.compute.colormaps through
+# importlib.resources. Without them every map silently falls back to... a
+# map that is not there either, and colouring a slice raises.
+"bidsmgr.vendor.niivue_colormaps" = ["*.json", "LICENSE"]
 "bidsmgr.vendor.bidsval"    = ["LICENSE"]
 # The schema files bidsval resolves against. Vendoring the code without this
 # ships a validator that cannot find a schema: it fell back to a separately

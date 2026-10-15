@@ -174,6 +174,10 @@ def import_scan_as_version(
         Path(str(staged) + ".files_by_uid.json.gz"),
         Path(str(dest) + ".files_by_uid.json.gz"),
     )
+    # How each series was acquired, for re-scoring the names without a scan.
+    from ..classifier.acquisition.cache import features_path
+
+    _move_if_exists(features_path(staged), features_path(dest))
     workspace.write_version_meta(
         version_dir,
         source_label=label,

@@ -1,6 +1,6 @@
 """One rounded Tools menu instead of four toolbar buttons.
 
-Fix ups, Rename and Track changes were three rarely-used buttons crowding out
+Fix ups and Rename were rarely-used buttons crowding out
 the ones pressed constantly, and the list was going to grow. The validation
 buttons deliberately stay OUTSIDE the menu: they are the Editor's main verb,
 not a tool.
@@ -56,6 +56,7 @@ def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
         "LOOK AT THE DATASET",
         "Dashboard",
         "Compare images...",
+        "Quality check...",
 
         "CHECK AND REPAIR",
         # All three answer "what is wrong with this dataset": coherence
@@ -84,9 +85,6 @@ def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
 
         "REMOVE",
         "Delete...",
-
-        "HISTORY",
-        "Track changes",
     ]
 
 
@@ -100,7 +98,7 @@ def test_the_headings_are_not_clickable(panel: EditorPanel) -> None:
     headings = [
         a for a in panel._tools_menu.actions() if a.text().isupper()
     ]
-    assert len(headings) == 6
+    assert len(headings) == 5
     assert not any(a.isEnabled() for a in headings)
 
 
@@ -224,18 +222,6 @@ def test_opening_a_dataset_enables_it(panel: EditorPanel, dataset: Path) -> None
     assert panel._tools_btn.isEnabled()
 
 
-def test_track_changes_hides_once_the_dataset_is_tracked(
-    panel: EditorPanel, dataset: Path,
-) -> None:
-    """It only means anything for a dataset this tool did not convert."""
-    panel._set_root(dataset, persist=False)
-    assert panel._adopt_action.isVisible() or not panel._adopt_action.isVisible()
-
-    (dataset / ".bidsmgr" / "project").mkdir(parents=True)
-    panel._refresh_adopt_button()
-    assert not panel._adopt_action.isVisible()
-
-
 def test_it_sits_after_the_deep_checks_toggle(panel: EditorPanel) -> None:
     """Toolbars read left to right, and the ordering is the grouping.
 
@@ -297,7 +283,6 @@ def test_every_entry_does_something(panel: EditorPanel, dataset: Path) -> None:
         ("Dashboard", "_on_dashboard"),
         ("Fix ups...", "_on_fixups"),
         ("Rename entity...", "_on_rename"),
-        ("Track changes", "_on_adopt"),
     ):
         setattr(panel, attr, lambda *a, n=name: called.append(n))
 
@@ -306,14 +291,13 @@ def test_every_entry_does_something(panel: EditorPanel, dataset: Path) -> None:
         (panel._dashboard_action, "_on_dashboard"),
         (panel._fixups_action, "_on_fixups"),
         (panel._rename_action, "_on_rename"),
-        (panel._adopt_action, "_on_adopt"),
     ):
         action.triggered.disconnect()
         action.triggered.connect(getattr(panel, attr))
         action.trigger()
 
     assert called == [
-        "Dashboard", "Fix ups...", "Rename entity...", "Track changes",
+        "Dashboard", "Fix ups...", "Rename entity...",
     ]
 
 
@@ -338,10 +322,8 @@ def test_the_open_image_is_re_read_after_it_changes(
     )
     panel._set_root(dataset, persist=False)
     panel._nifti_viewer.set_file(image, dataset)
-    qtbot.waitUntil(
-        lambda: panel._nifti_viewer._data is not None, timeout=20_000
-    )
-    assert float(np.asarray(panel._nifti_viewer._data).max()) == 1.0
+    qtbot.waitUntil(lambda: panel._nifti_viewer.is_loaded(), timeout=20_000)
+    assert float(panel._nifti_viewer.source().frame(0).max()) == 1.0
 
     # Something rewrites it, the way a deface does.
     nifti.save(
@@ -350,8 +332,8 @@ def test_the_open_image_is_re_read_after_it_changes(
     )
     panel._reload_open_image()
     qtbot.waitUntil(
-        lambda: panel._nifti_viewer._data is not None
-        and float(np.asarray(panel._nifti_viewer._data).max()) == 7.0,
+        lambda: panel._nifti_viewer.is_loaded()
+        and float(panel._nifti_viewer.source().frame(0).max()) == 7.0,
         timeout=20_000,
     )
 
@@ -370,9 +352,7 @@ def test_reloading_an_image_that_went_away_clears_the_viewer(
     )
     panel._set_root(dataset, persist=False)
     panel._nifti_viewer.set_file(image, dataset)
-    qtbot.waitUntil(
-        lambda: panel._nifti_viewer._data is not None, timeout=20_000
-    )
+    qtbot.waitUntil(lambda: panel._nifti_viewer.is_loaded(), timeout=20_000)
 
     image.unlink()
     panel._reload_open_image()

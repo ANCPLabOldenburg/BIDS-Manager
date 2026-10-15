@@ -48,6 +48,10 @@ class TestRenameForFmapToken:
                 "sub-001_ses-pre_acq-fm2_run-1_magnitude1_e2.nii.gz",
                 "sub-001_ses-pre_acq-fm2_run-1_magnitude2.nii.gz",
             ),
+            # A two-echo magnitude series the scan named ``magnitude``
+            # (Shayam's B0 map set): ``_magnitude_magnitude1`` before.
+            ("sub-001_acq-gre_magnitude_e1.nii.gz", "sub-001_acq-gre_magnitude1.nii.gz"),
+            ("sub-001_acq-gre_magnitude_e2.json", "sub-001_acq-gre_magnitude2.json"),
         ],
     )
     def test_renames_known_tokens(self, name: str, expected: str) -> None:
@@ -60,6 +64,10 @@ class TestRenameForFmapToken:
             "sub-001_magnitude2.nii.gz",
             "sub-001_phasediff.nii.gz",
             "sub-001_T1w.nii.gz",              # no token at all
+            # The phase of an EPI reference is not a gradient echo's
+            # phasediff (Shayam's reversed-phase series became one).
+            "sub-001_dir-AP_run-1_epi_ph.nii.gz",
+            "sub-001_dir-AP_run-1_epi_ph.json",
         ],
     )
     def test_returns_none_for_canonical_or_unrelated(self, name: str) -> None:

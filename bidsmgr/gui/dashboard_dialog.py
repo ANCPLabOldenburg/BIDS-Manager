@@ -37,7 +37,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..editor import dashboard as dash
-from .dialog_chrome import build_footer, build_header, card, hint
+from .dialog_chrome import build_footer, build_header, card, hint, stat
 from .theme_manager import CUR, scaled_px
 
 
@@ -71,21 +71,6 @@ class _Bar(QWidget):
         painter.drawRoundedRect(
             QRect(0, 0, width, self.height()), radius, radius,
         )
-
-
-def _stat(label: str, value: str, tone: str = "text") -> QWidget:
-    """One headline number with its name under it."""
-    box = QWidget()
-    layout = QVBoxLayout(box)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(1)
-    number = QLabel(value)
-    number.setObjectName(f"stat-value-{tone}")
-    caption = QLabel(label)
-    caption.setObjectName("stat-caption")
-    layout.addWidget(number)
-    layout.addWidget(caption)
-    return box
 
 
 def _table(headers: list[str]) -> QTableWidget:
@@ -171,15 +156,15 @@ class DashboardDialog(QDialog):
         frame, layout = card()
         row = QHBoxLayout()
         row.setSpacing(28)
-        row.addWidget(_stat("subjects", str(len(board.subjects))))
-        row.addWidget(_stat("sessions", str(board.sessions)))
-        row.addWidget(_stat("datatypes", str(len(board.datatypes))))
-        row.addWidget(_stat("suffixes", str(len(board.suffixes))))
-        row.addWidget(_stat("files", f"{board.total_files:,}"))
-        row.addWidget(_stat("size", dash.human_bytes(board.total_bytes)))
+        row.addWidget(stat("subjects", str(len(board.subjects))))
+        row.addWidget(stat("sessions", str(board.sessions)))
+        row.addWidget(stat("datatypes", str(len(board.datatypes))))
+        row.addWidget(stat("suffixes", str(len(board.suffixes))))
+        row.addWidget(stat("files", f"{board.total_files:,}"))
+        row.addWidget(stat("size", dash.human_bytes(board.total_bytes)))
         if board.validated:
-            row.addWidget(_stat("errors", str(board.errors), "err"))
-            row.addWidget(_stat("warnings", str(board.warnings), "warn"))
+            row.addWidget(stat("errors", str(board.errors), "err"))
+            row.addWidget(stat("warnings", str(board.warnings), "warn"))
         row.addStretch(1)
         layout.addLayout(row)
 

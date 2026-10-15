@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict
 from .models import (
     AcquisitionSpec,
     EventMap,
+    EyetrackSpec,
     PetAcquisitionSpec,
     RecordingMetaSpec,
     TaskProtocol,
@@ -91,6 +92,20 @@ def merge_pet(
             merged[key] = value
 
     return PetAcquisitionSpec.model_validate(merged)
+
+
+def merge_eyetrack(base: EyetrackSpec, over: Optional[EyetrackSpec]) -> EyetrackSpec:
+    """``base`` with every set field of ``over`` on top."""
+    if over is None:
+        return base.model_copy(deep=True)
+    merged = base.model_dump()
+    merged.update(over.model_dump(exclude_none=True))
+    return EyetrackSpec.model_validate(merged)
+
+
+def resolve_eyetrack(spec: RecordingMetaSpec, row_id: str) -> EyetrackSpec:
+    """The effective eye-tracking block for one recording."""
+    return merge_eyetrack(spec.eyetrack_defaults, spec.eyetrack_overrides.get(row_id))
 
 
 def resolve_pet(spec: RecordingMetaSpec, row_id: str) -> PetAcquisitionSpec:

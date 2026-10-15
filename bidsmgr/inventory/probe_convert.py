@@ -415,6 +415,85 @@ def _enrich_pet_probe(stats: "ProbeFileStats", staging_dir: Path) -> None:
         stats.sidecar_fields.setdefault(key, value)
 
 
+def series_files(folder: Path, series_uid: str, cancel=None) -> list[str]:
+    """Every DICOM under ``folder`` whose SeriesInstanceUID is ``series_uid``.
+
+    Reads only that one tag of each candidate file (``specific_tags``), so a
+    folder of a few thousand files is seconds, on a worker. For the series
+    preview, which has no scan result to look the files up in.
+    """
+    import pydicom
+
+    from .mri_dicom import is_dicom_file
+
+    out: list[str] = []
+    for dirpath, _dirs, names in os.walk(folder):
+        for name in names:
+            if cancel is not None and cancel():
+                raise RuntimeError("cancelled")
+            path = os.path.join(dirpath, name)
+            if not is_dicom_file(path):
+                continue
+            try:
+                ds = pydicom.dcmread(path, stop_before_pixels=True, force=True,
+                                     specific_tags=["SeriesInstanceUID"])
+            except Exception:  # noqa: BLE001 - not every file is readable DICOM
+                continue
+            if str(getattr(ds, "SeriesInstanceUID", "")) == series_uid:
+                out.append(path)
+    return sorted(out)
+
+
+def preview_dicom(path: str | Path, work_dir: Path, *, cancel=None) -> list[Path]:
+    """The series one DICOM file belongs to, converted for a look.
+
+    Every DICOM in the file's folder (and below it) with the same
+    SeriesInstanceUID goes through :func:`preview_series`. For the DICOM
+    header pane, which has a file and no scan.
+    """
+    import pydicom
+
+    path = Path(path)
+    ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=True,
+                         specific_tags=["SeriesInstanceUID"])
+    uid = str(getattr(ds, "SeriesInstanceUID", "") or "")
+    files = series_files(path.parent, uid, cancel=cancel) if uid else []
+    return preview_series(files or [str(path)], work_dir)
+
+
+def preview_series(
+    files: Iterable[str | Path],
+    work_dir: Path,
+    *,
+    dcm2niix_bin: Optional[Path] = None,
+) -> list[Path]:
+    """Convert ONE series' DICOMs with plain dcm2niix, for a look.
+
+    The same staging and the same dcm2niix call as the probe, into
+    ``work_dir`` (which the caller removes). Returns the images dcm2niix
+    made, several when the series splits (echoes, magnitude and phase).
+    For a series the plan does not convert (a scout, an unclassified
+    series); the others go through the conversion itself
+    (``cli.convert.preview_row``).
+    """
+    files = [str(f) for f in files]
+    if not files:
+        raise ValueError("no DICOM of this series was found")
+    work_dir = Path(work_dir)
+    staging = work_dir / "_dicoms"
+    _stage_series("series", files, staging)
+    output = work_dir / "out"
+    output.mkdir(parents=True, exist_ok=True)
+    proc = _run_dcm2niix_full(staging, output, dcm2niix_bin=dcm2niix_bin)
+    images = sorted(output.glob("*.nii.gz")) + sorted(output.glob("*.nii"))
+    if not images:
+        detail = (proc.stderr or proc.stdout or "").strip()[-400:]
+        raise RuntimeError(
+            f"dcm2niix made no image of this series (exit {proc.returncode})"
+            + (f": {detail}" if detail else ""))
+    return images
+
+
 def probe_rows(
     rows: Iterable[InventoryRow],
     work_root: Path,
