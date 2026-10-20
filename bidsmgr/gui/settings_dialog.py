@@ -324,8 +324,8 @@ class SettingsDialog(QDialog):
 
     # Combo presets for the header brand mark.
     _HEADER_LOGO_PRESETS: list[tuple[str, str]] = [
-        ("Default (monochrome mark)", "default"),
-        ("App icon (full color)",     "app_icon"),
+        ("App icon (full colour)", "app_icon"),
+        ("Monochrome mark",        "mark"),
     ]
 
     def _build_display_tab(self) -> QWidget:
@@ -403,6 +403,15 @@ class SettingsDialog(QDialog):
             "what was there before."
         )
         form.addRow("Editor saving:", self._editor_autosave)
+
+        # A request for a star on GitHub (gui/star_request.py).
+        self._ask_for_star = QCheckBox("Ask for a star on GitHub")
+        self._ask_for_star.setToolTip(
+            "BIDS Manager collects no usage data, so a star is how its authors know "
+            "it is useful. It asks at most once a day, on the first launch of the day, "
+            "and stops once you have opened the project's page from it. Home's Help us "
+            "button opens the request at any time.")
+        form.addRow("GitHub star:", self._ask_for_star)
 
         hint = QLabel(
             "The header's sun or moon button lists every theme and switches at once. "
@@ -563,11 +572,72 @@ class SettingsDialog(QDialog):
         grid.setColumnStretch(2, 1)
         grid.setColumnStretch(5, 1)
         widths_outer.addLayout(grid)
-        form.addRow("", widths_box)
 
+        # The two groups about names stand beside "Scan defaults", not
+        # inside its form: as a form row they sat in the field column,
+        # indented by the width of the longest label.
         v.addWidget(defaults)
+        v.addWidget(widths_box)
+        v.addWidget(self._build_leave_out_box())
         v.addStretch(1)
         return w
+
+    def _build_leave_out_box(self) -> QGroupBox:
+        """Entities left out of the names a scan proposes.
+
+        The readable name is the checkbox's text, so it is what a click
+        lands on; the key follows as code for those who think in filenames.
+        Offered from the schema (``inventory.leave_out.offered``).
+        """
+        from ..inventory.leave_out import offered
+
+        box = QGroupBox("Leave out of proposed names")
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(8)
+
+        explain = QLabel(
+            "Entities you never want in a name, such as " + code("acq-") + ". "
+            "Each one is still kept where the standard requires it, and where "
+            "it is what tells two recordings apart, so no recording overwrites "
+            "another. Ticking " + code("run-") + " keeps runs only where there "
+            "really are two.<br><br>Applies from the next scan; a scan table "
+            "already open is offered the change, as one Undo."
+        )
+        explain.setWordWrap(True)
+        explain.setObjectName("dlg-hint")
+        outer.addWidget(explain)
+
+        self._drop_entities: dict[str, QCheckBox] = {}
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        # Two columns, read downwards in filename order: three did not fit
+        # the longer names ("Phase-Encoding Direction") beside their keys.
+        keys = offered()
+        columns = 2
+        per_column = -(-len(keys) // columns)
+        for i, key in enumerate(keys):
+            try:
+                info = schema.entity_key_info(key)
+                display, why = info.display_name, info.description.strip()
+            except KeyError:
+                display, why = key, ""
+            check = QCheckBox(display)
+            check.setToolTip(
+                f"{display} ({key}-)\n\n{why[:300]}" if why else f"The {key} entity.")
+            tag = QLabel(code(f"{key}-"))
+            tag.setObjectName("dlg-hint")
+            self._drop_entities[key] = check
+            col, row = divmod(i, per_column)
+            grid.addWidget(check, row, col * 3)
+            grid.addWidget(tag, row, col * 3 + 1)
+            if col < columns - 1:
+                grid.setColumnMinimumWidth(col * 3 + 2, 14)
+        for col in range(columns):
+            grid.setColumnStretch(col * 3 + 1, 1)
+        outer.addLayout(grid)
+        return box
 
     # ------------------------------------------------------------------
     # Scan rules tab (exclusions + user hints + read-only built-ins)
@@ -1015,6 +1085,16 @@ class SettingsDialog(QDialog):
             "audit of every sidecar."
         )
         pv.addWidget(self._post_run_metadata)
+        self._post_metadata_tables = QCheckBox("Write scans and sessions tables")
+        self._post_metadata_tables.setToolTip(
+            "A *_scans.tsv per session listing every recording with its "
+            "acquisition time, and a *_sessions.tsv per subject with sessions. "
+            "Every datatype the standard defines is listed, converted here or "
+            "not. Tables already there are kept: their rows, columns and "
+            "values; rows are only added, and blanks become n/a.\n\n"
+            "The same as the Editor's Tools, Scans and sessions tables."
+        )
+        pv.addWidget(_indented(self._post_metadata_tables))
         self._post_metadata_fill_todos = QCheckBox("Write TODO into missing fields")
         self._post_metadata_fill_todos.setToolTip(
             "Only placeholders, nothing else. Every field the standard declares "
@@ -1114,6 +1194,33 @@ class SettingsDialog(QDialog):
         citation_note.setContentsMargins(44, 0, 0, 4)
         pv.addWidget(citation_note)
 
+        # Anonymisation, LAST in the metadata step: run before the
+        # participants file and the tables are written, what it removed would
+        # be written again.
+        from ..anonymise import PRESET_LABELS, PRESETS
+
+        anon_row = QHBoxLayout()
+        anon_row.setContentsMargins(0, 0, 0, 0)     # its left edge on its siblings'
+        anon_row.setSpacing(8)
+        anon_label = QLabel("Anonymise the metadata, last:")
+        self._post_anonymise = QComboBox()
+        for value, label in PRESET_LABELS.items():
+            self._post_anonymise.addItem(label, userData=value)
+        tips = ["Off: nothing is anonymised (the default; patient names and IDs are "
+                "still never written into sidecars)."]
+        for value, policy in PRESETS.items():
+            tips.append(f"{PRESET_LABELS[value]}:\n" + "\n".join(
+                f"  - {line}" for line in policy.describe()))
+        tips.append("Recordings' data are never changed. What a format does not let "
+                    "BIDS Manager rewrite (EEGLAB, SNIRF, CTF...) is listed in the log. "
+                    "The same as the Editor's Tools, Anonymise metadata.")
+        self._post_anonymise.setToolTip("\n\n".join(tips))
+        anon_row.addWidget(anon_label)
+        anon_row.addWidget(self._post_anonymise, 1)
+        anon_holder = QWidget()
+        anon_holder.setLayout(anon_row)
+        pv.addWidget(_indented(anon_holder))
+
         self._post_run_validate = QCheckBox("Validate the dataset")
         self._post_run_validate.setToolTip(
             "Schema-driven validation (bidsval), the same as the Editor's Validate "
@@ -1146,9 +1253,11 @@ class SettingsDialog(QDialog):
 
         _bind_children(
             self._post_run_metadata,
+            self._post_metadata_tables,
             self._post_metadata_fill_todos,
             self._post_fixup_companions,
             self._post_fixup_citation,
+            anon_holder,
         )
         _bind_children(
             self._post_run_validate,
@@ -1328,6 +1437,7 @@ class SettingsDialog(QDialog):
         self._editor_show_hidden.setChecked(s.editor_show_hidden)
         self._editor_autosave.setChecked(s.editor_autosave)
         self._log_clear_on_run.setChecked(s.log_clear_on_run)
+        self._ask_for_star.setChecked(s.ask_for_star)
         self._font_scale_combo.setCurrentIndex(
             self._closest_font_scale_index(s.font_scale)
         )
@@ -1341,6 +1451,8 @@ class SettingsDialog(QDialog):
         self._scan_skip_bids_guess.setChecked(s.scan_skip_bids_guess)
         for entity, box in self._index_widths.items():
             box.setValue(int(s.scan_index_widths.get(entity, 0) or 0))
+        for key, check in self._drop_entities.items():
+            check.setChecked(key in s.scan_drop_entities)
 
         self._convert_jobs.setValue(max(1, min(s.convert_n_jobs, cap)))
         idx = self._convert_on_existing.findData(s.convert_on_existing)
@@ -1376,6 +1488,9 @@ class SettingsDialog(QDialog):
         self._metadata_fill_scope.setEnabled(s.post_metadata_fill_todos)
         self._post_fixup_companions.setChecked(s.post_fixup_companions)
         self._post_fixup_citation.setChecked(s.post_fixup_citation)
+        self._post_metadata_tables.setChecked(s.post_metadata_tables)
+        self._post_anonymise.setCurrentIndex(
+            max(0, self._post_anonymise.findData(s.post_anonymise)))
         self._post_run_validate.setChecked(s.post_run_validate)
         self._post_validate_strict.setChecked(s.post_validate_strict)
         self._post_validate_html.setChecked(s.post_validate_html)
@@ -1445,6 +1560,7 @@ class SettingsDialog(QDialog):
         s.editor_show_hidden = self._editor_show_hidden.isChecked()
         s.editor_autosave = self._editor_autosave.isChecked()
         s.log_clear_on_run = self._log_clear_on_run.isChecked()
+        s.ask_for_star = self._ask_for_star.isChecked()
         s.font_scale = self._FONT_SCALE_PRESETS[
             self._font_scale_combo.currentIndex()
         ][1]
@@ -1462,6 +1578,8 @@ class SettingsDialog(QDialog):
             entity: box.value()
             for entity, box in self._index_widths.items() if box.value()
         }
+        s.scan_drop_entities = [
+            key for key, check in self._drop_entities.items() if check.isChecked()]
 
         s.convert_n_jobs = self._convert_jobs.value()
         s.convert_on_existing = self._convert_on_existing.currentData() or "skip"
@@ -1490,6 +1608,8 @@ class SettingsDialog(QDialog):
         )
         s.post_fixup_companions = self._post_fixup_companions.isChecked()
         s.post_fixup_citation = self._post_fixup_citation.isChecked()
+        s.post_metadata_tables = self._post_metadata_tables.isChecked()
+        s.post_anonymise = self._post_anonymise.currentData() or "off"
         s.post_run_validate = self._post_run_validate.isChecked()
         s.post_validate_strict = self._post_validate_strict.isChecked()
         s.post_validate_html = self._post_validate_html.isChecked()

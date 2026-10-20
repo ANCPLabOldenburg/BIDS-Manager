@@ -72,7 +72,11 @@ def build_footer_with(
     """A footer with something on the left, usually a status line."""
     footer = build_footer(buttons)
     if left is not None:
-        footer.layout().insertWidget(0, left)
+        # The status line takes the free width, not the spacer: a wrapping
+        # label left at its minimum broke "122 changes" over two lines.
+        layout = footer.layout()
+        layout.insertWidget(0, left, 1)
+        layout.setStretch(1, 0)
     return footer
 
 

@@ -108,6 +108,14 @@ class Chip(QLabel):
         self.updateGeometry()
         self.update()
 
+    def set_kind(self, kind: str) -> None:
+        """Paint it in another colour set (see ``_KIND_TOKENS``)."""
+        kind = kind or "default"
+        if kind != self._kind:
+            self._kind = kind
+            self.setProperty("chipKind", kind)
+            self.update()
+
     def set_clickable(self, clickable: bool) -> None:
         """Toggle whether mouse presses on the chip emit ``clicked``."""
         self._clickable = clickable

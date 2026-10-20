@@ -132,6 +132,10 @@ class FieldSpec:
     accepts_free_text: bool = False
     # The literal "n/a" is an accepted value, whether by enum or by variant.
     accepts_na: bool = False
+    # VENDORED CHANGE: the format a string value must be written in
+    # (``objects.formats``: ``time``, ``bids_uri``, ``hed_version``...), empty
+    # when none. Says why a placeholder cannot go here.
+    format: str = ""
 
     @property
     def is_required(self) -> bool:
@@ -735,17 +739,38 @@ def _accepted_types(meta: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def _accepts_free_text(meta: Mapping[str, Any]) -> bool:
+def _accepts_free_text(meta: Mapping[str, Any], formats: Any = None) -> bool:
     """Is an arbitrary string valid here?
 
     A string variant carrying an ``enum`` is NOT free text: the only strings
-    it accepts are the ones listed. This is the difference between a field a
+    it accepts are the ones listed. Nor is one with a ``format`` whose pattern
+    refuses an arbitrary word (VENDORED CHANGE): ``"TODO"`` in a ``time`` or a
+    ``hed_version`` is a JSON_SCHEMA_VALIDATION_ERROR, so a placeholder there
+    turns a gap into an error. This is the difference between a field a
     placeholder can be written into and one where it would be a violation.
     """
-    return any(
-        str(v.get("type", "")) == "string" and not v.get("enum")
-        for v in _variants(meta)
-    )
+    for v in _variants(meta):
+        if str(v.get("type", "")) != "string" or v.get("enum"):
+            continue
+        fmt = v.get("format")
+        pattern = _as_mapping(_get(formats, fmt)).get("pattern") if fmt and formats else None
+        if pattern and not re.fullmatch(str(pattern), "TODO"):
+            continue
+        return True
+    return False
+
+
+def _string_format(meta: Mapping[str, Any]) -> str:
+    """The format a string value of this field is written in, if any: the
+    string's own, or that of the strings in an array of them (HEDVersion is
+    one version or a list of them, both formatted)."""
+    for v in _variants(meta):
+        if str(v.get("type", "")) == "string" and v.get("format"):
+            return str(v["format"])
+        items = _as_mapping(v.get("items"))
+        if str(v.get("type", "")) == "array" and items.get("format"):
+            return str(items["format"])
+    return ""
 
 
 def _accepts_na(meta: Mapping[str, Any]) -> bool:
@@ -853,8 +878,10 @@ def _fields_of(
                 enum=tuple(meta.get("enum", ()) or ()),
                 unit=str(meta.get("unit", "") or ""),
                 accepts=_accepted_types(meta),
-                accepts_free_text=_accepts_free_text(meta),
+                accepts_free_text=_accepts_free_text(
+                    meta, _namespace_get(ns, "objects", "formats")),
                 accepts_na=_accepts_na(meta),
+                format=_string_format(meta),
                 # Public flag: the level or the applicability is not settled
                 # here, whichever of the two it is.
                 conditional=applicability != "certain"

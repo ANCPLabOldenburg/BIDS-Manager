@@ -48,6 +48,8 @@ class MetadataWorker(QThread):
         fill_scope: Optional[str] = None,
         generate_companions: bool = False,
         write_citation_file: bool = False,
+        tables: bool = True,
+        anonymise: str = "off",
         datasets=None,
         parent=None,
     ) -> None:
@@ -62,6 +64,8 @@ class MetadataWorker(QThread):
         self._fill_scope = fill_scope
         self._generate_companions = generate_companions
         self._write_citation_file = write_citation_file
+        self._tables = tables
+        self._anonymise = anonymise
 
     def run(self) -> None:
         from ..cli.metadata import run_metadata_cli
@@ -82,6 +86,8 @@ class MetadataWorker(QThread):
                 fill_scope=self._fill_scope,
                 generate_companions=self._generate_companions,
                 write_citation_file=self._write_citation_file,
+                tables=self._tables,
+                anonymise=self._anonymise,
                 datasets=self._datasets,
             )
             verdict = "completed" if rc == 0 else f"completed with rc={rc}"

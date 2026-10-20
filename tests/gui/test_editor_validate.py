@@ -256,24 +256,25 @@ def test_change_root_clears_old_badges_and_report(
         assert chip.isHidden()
 
 
-def test_strict_toggle_defaults_off_and_persists(
+def test_deep_checks_default_on_and_persist(
     qapp, isolated_settings,
 ) -> None:
-    """The Strict BIDS toggle starts OFF, and clicking it persists
-    the new state to :class:`AppSettings`."""
+    """Deep checks start ON (the NIfTI headers are read: about 5 percent of a
+    validation, and seven header defects otherwise go unreported), and
+    clicking the toggle persists the new state to :class:`AppSettings`."""
     from bidsmgr.gui.app_settings import AppSettings
     from bidsmgr.gui.editor_panel import EditorPanel as _EP
 
     panel = _EP()
     assert panel._strict_btn.isCheckable()
-    assert not panel._strict_btn.isChecked()
-    assert not AppSettings.load().editor_strict_validate
-
-    panel._strict_btn.setChecked(True)
+    assert panel._strict_btn.isChecked()
     assert AppSettings.load().editor_strict_validate
 
     panel._strict_btn.setChecked(False)
     assert not AppSettings.load().editor_strict_validate
+
+    panel._strict_btn.setChecked(True)
+    assert AppSettings.load().editor_strict_validate
 
 
 def test_persisted_strict_setting_restores_toggle(
@@ -318,7 +319,7 @@ def test_strict_toggle_drives_report_worker_strict_flag(
 def test_strict_toggle_off_passes_strict_false(
     qapp, qtbot, isolated_settings, bids_root: Path, monkeypatch,
 ) -> None:
-    """Default toggle state (off) still flows through as ``strict=False``."""
+    """Turned off, the toggle flows through as ``strict=False``."""
     from bidsmgr.gui.editor_panel import EditorPanel as _EP
     from bidsmgr.workers import report as report_mod
 
@@ -333,10 +334,39 @@ def test_strict_toggle_off_passes_strict_false(
 
     panel = _EP()
     panel._set_root(bids_root, persist=False)
-    assert not panel._strict_btn.isChecked()
+    panel._strict_btn.setChecked(False)
     panel.start_dataset_validation()
     qtbot.waitUntil(lambda: panel._report_worker is None, timeout=10000)
     assert captured.get("strict") is False
+
+
+def test_file_and_folder_validation_follow_deep_checks(
+    qapp, qtbot, isolated_settings, bids_root: Path, monkeypatch,
+) -> None:
+    """Validate file and Validate folder read the headers when Deep checks
+    is on: they used to skip them whatever the toggle said."""
+    from bidsmgr.editor import validator
+    from bidsmgr.gui.editor_panel import EditorPanel as _EP
+
+    seen: list = []
+    real_file, real_folder = validator.validate_file, validator.validate_folder
+    monkeypatch.setattr(validator, "validate_file",
+                        lambda *a, **kw: seen.append(("file", kw["strict"])) or real_file(*a, **kw))
+    monkeypatch.setattr(validator, "validate_folder",
+                        lambda *a, **kw: seen.append(("folder", kw["strict"]))
+                        or real_folder(*a, **kw))
+    panel = _EP()
+    qtbot.addWidget(panel)
+    panel._set_root(bids_root, persist=False)
+    some_file = next(p for p in sorted(bids_root.rglob("*.json")) if "sub-" in str(p))
+    for target, start in ((some_file, panel.start_file_validation),
+                          (some_file.parent, panel.start_folder_validation)):
+        monkeypatch.setattr(panel, "_tree_pane_current_path", lambda t=target: t)
+        start()
+        qtbot.waitUntil(lambda: panel._partial_worker is None
+                        or not panel._partial_worker.isRunning(), timeout=20000)
+        qtbot.wait(50)
+    assert seen == [("file", True), ("folder", True)]
 
 
 def test_strict_button_has_tooltip(qapp, isolated_settings) -> None:

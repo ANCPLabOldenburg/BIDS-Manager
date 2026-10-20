@@ -57,6 +57,9 @@ def run_metadata_cli(
     participants_file: Optional[Path] = None,
     phenotype_files: Optional[list[Path]] = None,
     datasets: Optional[Sequence[str]] = None,
+    tables: bool = True,
+    tables_only: bool = False,
+    anonymise: Optional[str] = None,
 ) -> int:
     """Run the metadata engine on every BIDS root under ``target``.
 
@@ -68,6 +71,14 @@ def run_metadata_cli(
     conversion: projects are normally kept side by side, so the parent of one is
     the home of all of them, and this run's dataset name was written into every
     one of its neighbours.
+
+    ``anonymise`` ("recommended" or "strict") anonymises each dataset's
+    metadata LAST, after the tables and the participants file are written
+    (``bidsmgr.anonymise``); run before them, what it removed would be
+    written again.
+
+    ``tables`` writes the ``*_scans.tsv`` and ``*_sessions.tsv`` tables;
+    ``tables_only`` writes those and nothing else (``metadata.tables``).
 
     ``participants_file`` is an optional demographics spreadsheet whose
     ``age`` / ``sex`` / ``handedness`` columns override the inventory; it is
@@ -86,6 +97,9 @@ def run_metadata_cli(
 
     n_failed = 0
     for bids_root in bids_roots:
+        if tables_only:
+            n_failed += _write_tables_only(bids_root, inventory_tsv)
+            continue
         meta = DatasetMetadata(
             # Omit name when unset so the engine preserves an existing
             # dataset_description Name (e.g. from `bidsmgr create`) instead of
@@ -112,6 +126,7 @@ def run_metadata_cli(
                 write_report=write_report,
                 participants_file=participants_file,
                 phenotype_files=phenotype_files,
+                tables=tables,
             )
         except Exception:
             log.exception("metadata engine failed on %s", bids_root)
@@ -133,7 +148,54 @@ def run_metadata_cli(
             for line in fixups.lines():
                 print(line)
 
+        if anonymise and anonymise != "off":
+            n_failed += _anonymise(bids_root, anonymise)
+
     return 0 if n_failed == 0 else 1
+
+
+def _anonymise(bids_root: Path, preset: str) -> int:
+    """The dataset's metadata anonymised; 1 when it failed."""
+    from ..anonymise import anonymise as run, policy_for
+
+    try:
+        plan = run(bids_root, policy_for(preset))
+    except Exception:  # noqa: BLE001 - reported, and the next dataset still runs
+        log.exception("anonymisation failed on %s", bids_root)
+        return 1
+    print(f"{bids_root.name}: anonymised ({preset}): {plan.summary()}")
+    for path, why in plan.cannot:
+        print(f"  not changed: {path}: {why}")
+    for path, why in plan.failed:
+        print(f"  NOT anonymised, could not be rewritten: {path}: {why}")
+    if plan.reviews:
+        print(f"  {len(plan.reviews)} value(s) to review by hand (free text, labels); "
+              "see bidsmgr-anonymise --dry-run")
+    return 1 if plan.failed else 0
+
+
+def _write_tables_only(bids_root: Path, inventory_tsv: Optional[Path]) -> int:
+    """The scans and sessions tables of one dataset, and nothing else.
+    Returns 1 when it failed."""
+    import pandas as pd
+
+    from ..metadata.tables import plan_tables, times_from_inventory, write_tables
+
+    try:
+        times = {}
+        if inventory_tsv is not None and Path(inventory_tsv).is_file():
+            times = times_from_inventory(pd.read_csv(
+                inventory_tsv, sep="\t", dtype=str, keep_default_na=False))
+        edits = plan_tables(bids_root, times=times)
+        write_tables(edits)
+    except Exception:  # noqa: BLE001 - reported, and the next dataset still runs
+        log.exception("tables failed on %s", bids_root)
+        return 1
+    print(f"{bids_root.name}: {len(edits)} table(s) written"
+          + (":" if edits else ", all already up to date."))
+    for edit in edits:
+        print(f"  {edit.path.relative_to(bids_root).as_posix()}: {edit.summary()}")
+    return 0
 
 
 def _iter_bids_roots(
@@ -378,6 +440,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.set_defaults(write_report=True)
+    tables = parser.add_mutually_exclusive_group()
+    tables.add_argument(
+        "--no-tables", dest="tables", action="store_false",
+        help="Do not write the *_scans.tsv and *_sessions.tsv tables (both are "
+             "optional in the standard). By default they are written, and tables "
+             "already there are kept and only added to.")
+    tables.add_argument(
+        "--tables-only", action="store_true",
+        help="Write the *_scans.tsv and *_sessions.tsv tables and nothing else: "
+             "for a dataset converted elsewhere. Every recording the standard "
+             "defines gets a row; rows, columns and values already there stay.")
+    parser.set_defaults(tables=True)
+    parser.add_argument(
+        "--anonymise", choices=("off", "recommended", "strict"), default="off",
+        help="Anonymise the metadata last (dates shifted per participant into "
+             "1902-1925, names and IDs removed, UIDs pseudonymised; strict also "
+             "sets times to midnight). See bidsmgr-anonymise.")
     parser.add_argument(
         "-v", "--verbose", action="count", default=0,
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
@@ -448,6 +527,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         write_report=args.write_report,
         participants_file=args.participants_file,
         phenotype_files=args.phenotype_files,
+        tables=args.tables,
+        tables_only=args.tables_only,
+        anonymise=args.anonymise,
         **log_keywords(args),
     )
 

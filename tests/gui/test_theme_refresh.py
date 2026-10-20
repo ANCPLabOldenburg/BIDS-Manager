@@ -46,10 +46,18 @@ def test_logo_loads_bundled_pixmap(qapp, qtbot) -> None:
 
 
 def test_logo_inverts_in_dark_theme(qapp, qtbot) -> None:
-    """Dark theme inverts the bundled PNG so the dark-on-transparent
+    """Dark theme inverts the monochrome mark so the dark-on-transparent
     artwork reads as light-on-transparent against the dark surface.
     Sampled by hashing a center scanline of pixel RGB.
+
+    The mark is chosen explicitly: since 2026-10-16 the full-colour app icon
+    is the default header logo, and a colour icon is never inverted.
     """
+    from bidsmgr.gui.app_settings import AppSettings
+
+    settings = AppSettings.load()
+    settings.header_logo = "mark"
+    settings.save()
     theme = ThemeManager(qapp)
     win = MainWindow(theme)
     qtbot.addWidget(win)

@@ -115,14 +115,17 @@ class TestDatasetLevel:
         ), [(i.rule_id, i.message) for i in report.dataset_issues]
 
     def test_no_subjects_emits_dataset_warning(self, tmp_path: Path) -> None:
+        """The schema's own SUBJECT_FOLDERS check, on dataset_description.json
+        (the bespoke NO_SUBJECTS that duplicated it is gone)."""
         root = tmp_path / "study"
         root.mkdir()
         _make_dd(root)
         report = validate(root)
-        assert any(
-            "sub-" in i.message or "subject" in i.message.lower()
-            for i in report.dataset_issues
-        ), [(i.rule_id, i.message) for i in report.dataset_issues]
+        found = list(report.dataset_issues) + [
+            i for f in report.files if f.path.name == "dataset_description.json"
+            for i in f.issues]
+        assert [i.rule_id for i in found].count("SUBJECT_FOLDERS") == 1, \
+            [(i.rule_id, i.message) for i in found]
 
 
 # ---------------------------------------------------------------------------

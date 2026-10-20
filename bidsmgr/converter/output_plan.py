@@ -77,6 +77,9 @@ class PlanOptions:
     companions: bool = False
     #: The metadata step also writes CITATION.cff from the description.
     citation: bool = False
+    #: The metadata step writes the ``*_scans.tsv`` and ``*_sessions.tsv``
+    #: tables (``metadata.tables``).
+    tables: bool = True
     intended_for: str = "uri"            # "uri" | "relative"
     b0_field: bool = True
     deface: bool = False
@@ -457,6 +460,7 @@ def plan_output(df, included: Optional[Sequence[bool]] = None,
     """
     flags = _included(df, included)
     by_path: dict[str, PlannedFile] = {}
+    members: list[tuple[tuple[str, str], int, list]] = []
     sessions: dict[tuple[str, str], list[int]] = defaultdict(list)
     subjects: dict[str, list[int]] = defaultdict(list)
     keep = set(options.sourcedata_modalities or ())
@@ -479,8 +483,7 @@ def plan_output(df, included: Optional[Sequence[bool]] = None,
             put(f)
         subject = _cell(df, i, "participant_id")
         session = _cell(df, i, "session")
-        if _lists_in_scans(df, i):
-            sessions[(subject, session)].append(int(i))
+        members.append(((subject, session), int(i), files))
         subjects[subject].append(int(i))
         if options.sourcedata in ("copy", "archive"):
             from .sourcedata import kind_for, series_name
@@ -501,6 +504,13 @@ def plan_output(df, included: Optional[Sequence[bool]] = None,
                 put(PlannedFile(dest, "BIDS Manager (sourcedata)", (int(i),),
                                 role="archive" if dest.endswith(".tar.gz") else "data"))
 
+    # Which rows are rows of a scans table: decided per folder, over every
+    # file planned there, by the metadata step's own rule.
+    listed = _listed([f for _key, _i, files in members for f in files])
+    for key, i, files in members:
+        if any(f.path in listed for f in files):
+            sessions[key].append(i)
+
     for (subject, session), rows in sessions.items():
         folder = _folder(subject, session, "")
         label = f"{subject}_{session}" if session else subject
@@ -508,10 +518,19 @@ def plan_output(df, included: Optional[Sequence[bool]] = None,
         # the conversion; for anything else the metadata step writes it.
         mne = any(_cell(df, r, "datatype") in _MNE_DATATYPES
                   and not _cell(df, r, "series_uid") for r in rows)
-        if mne or options.run_metadata:
+        if mne or (options.run_metadata and options.tables):
             put(PlannedFile(f"{folder}/{label}_scans.tsv",
                             "MNE-BIDS" if mne else "BIDS Manager (metadata)",
                             tuple(rows), role="table"))
+    # A subject with sessions gets a sessions table from the metadata step.
+    if options.run_metadata and options.tables:
+        with_sessions: dict[str, list[int]] = defaultdict(list)
+        for (subject, session), rows in sessions.items():
+            if session:
+                with_sessions[subject].extend(rows)
+        for subject, rows in with_sessions.items():
+            put(PlannedFile(f"{subject}/{subject}_sessions.tsv",
+                            "BIDS Manager (metadata)", tuple(rows), role="table"))
     if options.sourcedata in ("copy", "archive"):
         for subject, rows in subjects.items():
             put(PlannedFile(f"sourcedata/{subject}/manifest.tsv",
@@ -593,11 +612,28 @@ def _add_companion_stubs(plan: OutputPlan) -> None:
         index[target] = len(plan.files) - 1
 
 
-def _lists_in_scans(df, i) -> bool:
-    """Whether a row's files are rows of ``*_scans.tsv``: physio and eye
-    tracking are not."""
-    name = _cell(df, i, "bids_name")
-    return not (_cell(df, i, "modality").lower() == "eyetrack" or name.endswith("_physio"))
+def _listed(files) -> set[str]:
+    """The planned paths that are rows of ``*_scans.tsv``: the metadata
+    step's own rule (``metadata.tables.list_recordings``), folder by folder,
+    so the two cannot drift."""
+    from ..metadata.tables import list_recordings
+
+    by_folder: dict[str, list[str]] = defaultdict(list)
+    for f in files:
+        if f.conditional or f.warning:
+            continue
+        folder, _sep, name = f.path.rstrip("/").rpartition("/")
+        by_folder[folder].append(name)
+    out: set[str] = set()
+    for folder, names in by_folder.items():
+        datatype = folder.rsplit("/", 1)[-1]
+        entries = [(n, n.endswith(_DIRECTORY_RECORDINGS)) for n in names]
+        out.update(f"{folder}/{n}" for n in list_recordings(datatype, entries))
+    return out
+
+
+#: Extensions of recordings that are folders (CTF, MEF, OME-Zarr).
+_DIRECTORY_RECORDINGS = (".ds", ".mefd", ".ome.zarr")
 
 
 def _sort_key(path: str) -> tuple:
@@ -681,6 +717,8 @@ def approximate(df, planned: PlannedFile, options: PlanOptions = PlanOptions(),
                                 "description of its columns.")
     if name.endswith("_scans.tsv"):
         return _scans_tsv(df, planned, features, options)
+    if name.endswith("_sessions.tsv"):
+        return _sessions_tsv(df, planned)
     if name == "manifest.tsv":
         return FilePreview("tsv", header=("source", "destination", "size", "sha256"),
                            note="One row per source file kept, with its checksum.")
@@ -912,29 +950,44 @@ def _iso_time(df, i) -> str:
     return UNKNOWN
 
 
-_NOT_IN_SCANS = (".eeg", ".vmrk", ".fdt")
-
-
 def _scans_tsv(df, planned: PlannedFile, features, options: PlanOptions) -> FilePreview:
     """``filename`` relative to the session folder, and the time."""
-    rows = []
+    by_row = {}
     for i in planned.rows:
-        datatype = _cell(df, i, "datatype")
         uid = _cell(df, i, "series_uid")
-        for f in _files_for_row(df, i, _two_echoes(features or {}, uid), options.force_edf,
-                                _diffusion(features or {}, uid), _echoes(features or {}, uid)):
-            # As the metadata step lists them: every file whose last name part
-            # is a BIDS suffix (a split echo's "_e1" is not), not the sidecars
-            # or the channels table, not BrainVision's or EEGLAB's side files.
-            if f.conditional or f.warning or f.role == "sidecar" \
-                    or f.path.endswith(("_channels.tsv",) + _NOT_IN_SCANS):
-                continue
-            rows.append((f"{datatype}/{f.path.rsplit('/', 1)[-1]}", _iso_time(df, i)))
+        by_row[i] = _files_for_row(df, i, _two_echoes(features or {}, uid), options.force_edf,
+                                   _diffusion(features or {}, uid), _echoes(features or {}, uid))
+    # As the metadata step lists them, by its own rule: the recordings, not
+    # their sidecars, gradient tables or side files.
+    listed = _listed([f for files in by_row.values() for f in files])
+    rows = []
+    for i, files in by_row.items():
+        datatype = _cell(df, i, "datatype")
+        for f in files:
+            if f.path in listed:
+                rows.append((f"{datatype}/{f.path.rsplit('/', 1)[-1]}", _iso_time(df, i)))
     rows.sort()
     return FilePreview("tsv", header=("filename", "acq_time"), rows=tuple(rows),
                        note="One row per recording of the session, its time from the scan. "
                             "For a series of many images dcm2niix writes the first volume's "
                             "time, which can be a second or two apart.")
+
+
+def _sessions_tsv(df, planned: PlannedFile) -> FilePreview:
+    """``session_id`` and the session's earliest recording."""
+    earliest: dict[str, str] = {}
+    for i in planned.rows:
+        session = _cell(df, i, "session")
+        stamp = _iso_time(df, i)
+        if not session:
+            continue
+        if stamp == UNKNOWN:
+            earliest.setdefault(session, UNKNOWN)
+        elif earliest.get(session, UNKNOWN) == UNKNOWN or stamp < earliest[session]:
+            earliest[session] = stamp
+    rows = tuple(sorted(earliest.items()))
+    return FilePreview("tsv", header=("session_id", "acq_time"), rows=rows,
+                       note="One row per session, its time the earliest recording's.")
 
 
 #: The columns MNE-BIDS describes in an events.json, in its words.

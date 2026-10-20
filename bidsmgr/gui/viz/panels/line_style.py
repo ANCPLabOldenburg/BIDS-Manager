@@ -29,6 +29,10 @@ why it cannot drift out of step with the shipped one.
 
 **One colour** is also offered, and is the right answer for a single-channel
 view where the type is already in the title and a second colour says nothing.
+The default is ALWAYS offered beside it, because it is the way back: with one
+channel type it was greyed out, so a colour once picked could not be undone
+(2026-10-19). A view with no channel types (the spectrum) calls its default
+the theme colour.
 """
 
 from __future__ import annotations
@@ -95,7 +99,6 @@ class LineStyleDialog(QDialog):
         width: int,
         colour: Optional[str],
         *,
-        allow_by_type: bool = True,
         channel_types: Sequence[str] = (),
         max_width: int = MAX_WIDTH,
         traces_shown: int = 0,
@@ -159,25 +162,25 @@ class LineStyleDialog(QDialog):
             outer.addWidget(note)
 
         # -- colour mode ---------------------------------------------------
-        self._by_type = QRadioButton("Colour by channel type")
-        self._by_type.setToolTip(
-            "What makes a multi-channel view readable: magnetometers one "
-            "colour and gradiometers another, a cardiac trace and a trigger "
-            "told apart without reading the labels."
-        )
+        # The default, always offered: it is the way back from one colour.
+        if self._types:
+            self._by_type = QRadioButton("Colour by channel type")
+            self._by_type.setToolTip(
+                "The default. What makes a multi-channel view readable: "
+                "magnetometers one colour and gradiometers another, a cardiac "
+                "trace and a trigger told apart without reading the labels."
+            )
+        else:
+            self._by_type = QRadioButton("Theme colour")
+            self._by_type.setToolTip(
+                "The default: the theme's accent, which follows a change of theme."
+            )
         self._one_colour = QRadioButton("One colour")
         self._one_colour.setToolTip(
-            "Right for a single-channel view, where the type is already in "
-            "the title and a second colour says nothing."
+            "Every trace in the colour you choose, whatever its type, in every "
+            "viewer that draws a line."
         )
-        if not allow_by_type:
-            self._by_type.setEnabled(False)
-            self._by_type.setToolTip(
-                "This view draws one channel, so there are no types to "
-                "tell apart."
-            )
-        (self._one_colour if colour or not allow_by_type
-         else self._by_type).setChecked(True)
+        (self._one_colour if colour else self._by_type).setChecked(True)
         self._by_type.toggled.connect(self._on_mode)
         outer.addWidget(self._by_type)
 

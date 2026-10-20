@@ -1650,8 +1650,7 @@ class SignalPresenter:
         cap = MAX_WIDTH if (traces is None or traces.max_pen_width(shown) > 1) else 1
         ts = self.ctx.settings.traces
         types = list(dict.fromkeys(src.ch_types)) if src is not None else []
-        dlg = LineStyleDialog(ts.line_width, ts.line_color or None,
-                              allow_by_type=len(set(types)) > 1, channel_types=types,
+        dlg = LineStyleDialog(ts.line_width, ts.line_color or None, channel_types=types,
                               max_width=cap, traces_shown=shown, parent=self.viewer)
         self.line_dialog = dlg
         dlg.exec()

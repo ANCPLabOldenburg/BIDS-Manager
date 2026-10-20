@@ -139,9 +139,13 @@ def bind(fieldmaps: Iterable[Fieldmap], runs: Iterable[Run]) -> tuple[dict[str, 
         parts.append(f"{by_time} run(s) by acquisition times (each to the last "
                      "fieldmap before it)")
     if fallback:
-        parts.append(f"{fallback} run(s) offered to every fieldmap, for lack of "
-                     "acquisition times")
+        parts.append(f"{fallback} run(s) {FALLBACK_NOTE}")
     return out, "linked " + "; ".join(parts) if parts else ""
+
+
+#: How the reason says a run was linked to every fieldmap, for want of times:
+#: a guess, which the Editor's coherence check does not hold a dataset to.
+FALLBACK_NOTE = "offered to every fieldmap, for lack of acquisition times"
 
 
 def serves_of(meta: Mapping, has_gradients: bool = False) -> Optional[str]:

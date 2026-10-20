@@ -74,7 +74,7 @@ def test_is_newer_string_fallback_when_packaging_missing(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# fetch_latest_pypi
+# fetch_latest
 # ---------------------------------------------------------------------------
 
 
@@ -92,27 +92,27 @@ class _FakeResponse:
         return False
 
 
-def test_fetch_latest_pypi_returns_info_version(monkeypatch):
+def test_fetch_latest_returns_info_version(monkeypatch):
     payload = {"info": {"version": "9.9.9"}, "releases": {"9.9.9": []}}
 
     def fake_urlopen(req, timeout=None, context=None):
         return _FakeResponse(payload)
 
     monkeypatch.setattr("bidsmgr.gui.updater.urlopen", fake_urlopen)
-    assert updater.fetch_latest_pypi() == "9.9.9"
+    assert updater.fetch_latest() == updater.Latest(version="9.9.9", newest="9.9.9")
 
 
-def test_fetch_latest_pypi_returns_none_on_network_error(monkeypatch):
+def test_fetch_latest_returns_none_on_network_error(monkeypatch):
     """A broken network must surface as ``None``, never raise."""
 
     def boom(*args, **kwargs):
         raise OSError("no internet")
 
     monkeypatch.setattr("bidsmgr.gui.updater.urlopen", boom)
-    assert updater.fetch_latest_pypi() is None
+    assert updater.fetch_latest() is None
 
 
-def test_fetch_latest_pypi_returns_none_on_malformed_json(monkeypatch):
+def test_fetch_latest_returns_none_on_malformed_json(monkeypatch):
     class BadResp:
         def read(self):
             return b"not-json-{"
@@ -123,17 +123,142 @@ def test_fetch_latest_pypi_returns_none_on_malformed_json(monkeypatch):
 
     monkeypatch.setattr("bidsmgr.gui.updater.urlopen",
                         lambda *a, **k: BadResp())
-    assert updater.fetch_latest_pypi() is None
+    assert updater.fetch_latest() is None
 
 
-def test_fetch_latest_pypi_returns_none_when_info_missing(monkeypatch):
+def test_fetch_latest_returns_none_when_info_missing(monkeypatch):
     """PyPI response lacking ``info.version`` is treated as 'unknown'."""
 
     monkeypatch.setattr(
         "bidsmgr.gui.updater.urlopen",
         lambda *a, **k: _FakeResponse({"releases": {}}),
     )
-    assert updater.fetch_latest_pypi() is None
+    assert updater.fetch_latest() is None
+
+
+# ---------------------------------------------------------------------------
+# latest_from: which release this Python can install
+#
+# Offering a release the environment's Python cannot run made the update
+# report success, change nothing, and ask again at every start.
+# ---------------------------------------------------------------------------
+
+
+def _release(requires_python: str = "", yanked: bool = False) -> list[dict]:
+    return [{"packagetype": "bdist_wheel", "requires_python": requires_python,
+             "yanked": yanked}]
+
+
+def _payload(newest: str, releases: dict[str, list[dict]]) -> dict:
+    return {"info": {"version": newest}, "releases": releases}
+
+
+def test_a_release_this_python_runs_is_offered_as_is():
+    payload = _payload("1.6.0", {"1.5.0": _release(">=3.10"), "1.6.0": _release(">=3.10")})
+    assert updater.latest_from(payload, "3.12.7") == updater.Latest("1.6.0", "1.6.0", "")
+
+
+def test_a_release_needing_a_newer_python_names_it_and_offers_the_last_that_runs():
+    payload = _payload("1.7.0", {
+        "1.5.0": _release(">=3.10,<3.15"),
+        "1.6.0": _release(">=3.10,<3.15"),
+        "1.7.0": _release(">=3.13"),
+    })
+    latest = updater.latest_from(payload, "3.12.7")
+    assert latest == updater.Latest(version="1.6.0", newest="1.7.0", needs_python="3.13")
+
+
+def test_yanked_releases_and_prereleases_are_never_offered():
+    payload = _payload("1.6.0", {
+        "1.6.0": _release(">=3.13"),
+        "1.5.2": _release(">=3.10", yanked=True),
+        "1.5.3rc1": _release(">=3.10"),
+        "1.5.1": _release(">=3.10"),
+    })
+    assert updater.latest_from(payload, "3.12.0").version == "1.5.1"
+
+
+@pytest.mark.parametrize(
+    ("requires", "python", "expected"),
+    [(">=3.13", "3.12.7", "3.13"), (">=3.14", "3.12.7", "3.14"),
+     (">=3.13.2", "3.12.7", "3.13"), ("<3.10", "3.12.7", "")],
+)
+def test_minimum_python_is_the_first_minor_version_that_fits(requires, python, expected):
+    assert updater.minimum_python(requires, python) == expected
+
+
+# ---------------------------------------------------------------------------
+# plan_update
+# ---------------------------------------------------------------------------
+
+
+def test_an_installer_installation_moves_to_the_python_the_newest_release_needs():
+    latest = updater.Latest(version="1.6.0", newest="1.7.0", needs_python="3.13")
+    assert updater.plan_update(latest, "1.5.0", can_move_python=True) == (
+        updater.UpdatePlan(version="1.7.0", move_to_python="3.13"))
+
+
+def test_any_other_installation_is_offered_what_its_python_runs():
+    latest = updater.Latest(version="1.6.0", newest="1.7.0", needs_python="3.13")
+    assert updater.plan_update(latest, "1.5.0", can_move_python=False) == (
+        updater.UpdatePlan(version="1.6.0"))
+
+
+def test_nothing_is_offered_when_nothing_newer_runs_here():
+    latest = updater.Latest(version="1.6.0", newest="1.7.0", needs_python="3.13")
+    assert updater.plan_update(latest, "1.6.0", can_move_python=False) is None
+    assert updater.plan_update(updater.Latest("1.6.0", "1.6.0"), "1.6.0",
+                               can_move_python=True) is None
+
+
+# ---------------------------------------------------------------------------
+# find_installation: the installer's record, for this environment only
+# ---------------------------------------------------------------------------
+
+
+def _installation(tmp_path: Path, *, environment: Path | None = None,
+                  uv_exists: bool = True) -> Path:
+    install = tmp_path / "BIDS-Manager"
+    env = install / "env"
+    env.mkdir(parents=True)
+    uv = install / "uv" / "uv"
+    if uv_exists:
+        uv.parent.mkdir()
+        uv.write_text("")
+    (install / "installation.json").write_text(json.dumps({
+        "environment": str(environment or env),
+        "uv": {"version": "0.13.1", "executable": str(uv)},
+        "uv_environment": {"UV_NO_CONFIG": "1"},
+    }))
+    return env
+
+
+def test_the_installer_record_beside_the_environment_is_found(tmp_path):
+    env = _installation(tmp_path)
+    found = updater.find_installation(env)
+    assert found == updater.Installation(
+        manifest=env.parent / "installation.json", uv=env.parent / "uv" / "uv")
+
+
+def test_a_record_naming_another_environment_is_ignored(tmp_path):
+    env = _installation(tmp_path, environment=tmp_path / "elsewhere")
+    assert updater.find_installation(env) is None
+
+
+def test_a_record_whose_uv_is_gone_is_ignored(tmp_path):
+    env = _installation(tmp_path, uv_exists=False)
+    assert updater.find_installation(env) is None
+
+
+def test_no_record_means_no_installation(tmp_path):
+    assert updater.find_installation(tmp_path / "env") is None
+
+
+def test_the_update_log_of_an_installer_installation_stays_in_its_folder(tmp_path):
+    env = _installation(tmp_path)
+    found = updater.find_installation(env)
+    assert updater.update_log_path(found) == env.parent / "update.log"
+    assert updater.update_log_path(None) == Path.home() / ".bidsmgr" / "update.log"
 
 
 # ---------------------------------------------------------------------------
@@ -206,19 +331,57 @@ def test_launch_update_helper_invokes_popen_with_helper_path(monkeypatch, tmp_pa
             captured["cmd"] = list(cmd)
             captured["kwargs"] = kwargs
 
+    monkeypatch.setattr("bidsmgr.gui.updater.find_installation", lambda: None)
     monkeypatch.setattr("bidsmgr.gui.updater.subprocess.Popen", FakePopen)
     ok = updater.launch_update_helper(restart=True)
     assert ok is True
 
     cmd = captured["cmd"]
-    # python <helper.py> --parent-pid <pid> --python <python> --package bids-manager --restart-cmd <argv0>
+    # python -I <helper.py> --parent-pid <pid> --python <python> --package bids-manager --restart-cmd <argv0>
     assert cmd[0] == sys.executable or cmd[0] == "python"
-    assert cmd[1].endswith("_update_helper.py")
+    assert cmd[1] == "-I"
+    assert cmd[2].endswith("_update_helper.py")
     assert "--parent-pid" in cmd
     assert "--package" in cmd
     pkg_idx = cmd.index("--package") + 1
     assert cmd[pkg_idx] == "bids-manager"
     assert "--restart-cmd" in cmd
+    assert "--installation" not in cmd
+
+
+def test_an_installer_installation_updates_through_its_record(monkeypatch, tmp_path):
+    """The helper is told where the installer's record is, so it uses that uv;
+    it runs on the Python the environment was built from, which a move to a
+    newer Python can replace the environment around (Windows cannot delete a
+    running program); and on macOS and Linux it logs inside the install folder."""
+    env = _installation(tmp_path)
+    installation = updater.find_installation(env)
+    captured: dict[str, Any] = {}
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr("bidsmgr.gui.updater.find_installation", lambda: installation)
+    monkeypatch.setattr("bidsmgr.gui.updater.subprocess.Popen", FakePopen)
+    monkeypatch.setattr("bidsmgr.gui.updater.platform.system", lambda: "Darwin")
+    assert updater.launch_update_helper(restart=False, move_to_python="3.13") is True
+
+    cmd = captured["cmd"]
+    assert cmd[0] == updater._base_python()
+    assert cmd[1] == "-I"
+    assert cmd[cmd.index("--installation") + 1] == str(installation.manifest)
+    assert cmd[cmd.index("--move-to-python") + 1] == "3.13"
+    assert Path(captured["kwargs"]["stdout"].name) == env.parent / "update.log"
+    captured["kwargs"]["stdout"].close()
+
+
+def test_only_an_installer_installation_can_move_to_another_python(monkeypatch):
+    monkeypatch.setattr("bidsmgr.gui.updater.find_installation", lambda: None)
+    monkeypatch.setattr("bidsmgr.gui.updater.subprocess.Popen",
+                        lambda *a, **k: pytest.fail("nothing may be spawned"))
+    assert updater.launch_update_helper(restart=False, move_to_python="3.13") is False
 
 
 # ---------------------------------------------------------------------------

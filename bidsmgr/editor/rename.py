@@ -51,6 +51,8 @@ from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Optional
 
+from ..project.operations import is_os_junk
+
 log = logging.getLogger(__name__)
 
 # Directories the tool owns rather than the standard: our own state and the
@@ -58,13 +60,6 @@ log = logging.getLogger(__name__)
 # the schema (see :func:`_skip_top_level`).
 _TOOL_DIRS = (".bidsmgr", ".git")
 
-# Files the operating system drops into any folder a person has looked at.
-# They carry no information, nobody put them there on purpose, and they are
-# the reason an emptied subject folder survived a merge: ``rmdir`` refuses a
-# directory holding a ``.DS_Store`` exactly as it refuses one holding data.
-# Treated as absent when deciding whether a folder is empty, and removed with
-# it, which is the only moment this tool ever deletes one.
-_OS_JUNK = frozenset({".DS_Store", "Thumbs.db", "desktop.ini", ".directory"})
 
 
 def folder_entities() -> tuple[str, ...]:
@@ -436,7 +431,7 @@ def plan_rename(
         travels = carries or any(_within(f, r) for r in fused_roots)
         if not travels:
             continue
-        if not carries and f.name in _OS_JUNK:
+        if not carries and is_os_junk(f.name):
             continue            # goes with the folder, not into the target
         parent = _remap_parent(f.parent, moved_dirs)
         target = parent / (
@@ -925,7 +920,8 @@ def apply_rename(
             if actual == dst:
                 continue          # the folder rename already did it
             try:
-                dst.parent.mkdir(parents=True, exist_ok=True)
+                # The history creates (and records) the folders it needs, so
+                # undo removes them again; made here, they were invisible to it.
                 op.rename(actual, dst)
                 touched += 1
             except OSError as exc:
@@ -955,7 +951,6 @@ def apply_rename(
             for src, dst in plan.tool_state_moves:
                 try:
                     if src.exists():
-                        dst.parent.mkdir(parents=True, exist_ok=True)
                         op.rename(src, dst)
                         touched += 1
                 except OSError as exc:
@@ -1436,50 +1431,21 @@ def _fold_row(op, path: Path, column: str,
 def _remove_if_empty(op, directory: Path, root: Path) -> None:
     """Drop ``directory`` if nothing is in it, and any parent it empties.
 
-    Just asks the filesystem. ``rmdir`` fails harmlessly on a directory that
-    still holds something, which is exactly the test, so there is no need to
-    look inside first.
-
-    That matters more than it sounds: this used to ``rglob`` the whole subtree
-    of every candidate directory, and callers hand it one candidate per
-    ancestor of every moved file. On a twelve-file dataset that was 270,000
-    ``rglob`` calls and 7.8 of a 8.7 second rename.
+    A folder holding only the operating system's droppings (``.DS_Store``)
+    counts as empty and they go with it, recorded, so undo puts back the
+    folder and them. Each removal is recorded too: undo restores the folders
+    a rename emptied, and removes the ones it created.
 
     Walking UP afterwards is what removes a session folder whose only
-    datatype folder just went.
+    datatype folder just went. It stops at the first folder that still holds
+    something, which is cheap: this used to ``rglob`` every candidate's whole
+    subtree, 270,000 calls and 7.8 of a 8.7 second rename on twelve files.
     """
     current = directory
     while current.is_dir() and _within(current, root):
-        _drop_os_junk(op, current)
-        try:
-            current.rmdir()
-        except OSError:
-            return              # still holds something; so does everything above
-        current = current.parent
-
-
-def _drop_os_junk(op, directory: Path) -> None:
-    """Remove ``.DS_Store`` and friends, but ONLY from a folder that is
-    otherwise empty and therefore about to go.
-
-    The guard is the whole point. Deleting these wherever they are found would
-    be a tool tidying a user's disk uninvited; deleting one that is the sole
-    remaining occupant of a folder being removed is just letting the folder
-    go. They are recorded through the operation, so undo puts them back with
-    everything else.
-    """
-    try:
-        contents = list(directory.iterdir())
-    except OSError:
-        return
-    if not contents or any(p.name not in _OS_JUNK or p.is_dir()
-                           for p in contents):
-        return
-    for junk in contents:
-        try:
-            op.delete(junk)
-        except OSError:
+        if not op.remove_if_empty(current):
             return
+        current = current.parent
 
 
 def build_ref_map(root: Path, moves: list[tuple[Path, Path]]) -> dict[str, str]:

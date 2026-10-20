@@ -320,9 +320,9 @@ class TestScansTsv:
         assert "filename" in df.columns and "acq_time" in df.columns
         # Three NIfTIs in the fixture: anat, func, fmap.
         assert len(df) == 3
-        # Every entry has an acq_time (no n/a since fixture wrote AcquisitionTime).
-        assert all(t == "120000" or t == "120500" or t == "120100"
-                   for t in df["acq_time"])
+        # The fixture's sidecars state a time with no date. acq_time is a date
+        # and time or nothing: a bare "120000" is not valid there (META-02).
+        assert set(df["acq_time"]) == {"n/a"}
 
     def test_per_session_when_sessions_exist(self, tmp_path: Path) -> None:
         root = tmp_path / "study"

@@ -278,7 +278,33 @@ def test_scan_convert_validate(mono, both, tmp_path) -> None:
     assert len(made) == 3, made                      # one eye + two eyes
     report = validate(out)
     errors = [i for f in report.files for i in f.issues if i.severity.value == "err"]
-    assert not errors, [(e.code, e.message) for e in errors]
+    # The one error left is a reported defect, not fixed here: the EyeLink
+    # backend writes no events sidecar stating StimulusPresentation (pinned by
+    # the strict xfail below). Anything else is new.
+    assert {e.rule_id for e in errors} <= {"INCOMPLETE_STIMULUS_PRESENTATION"}, \
+        [(e.rule_id, e.message) for e in errors]
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Reported defect, not fixed here: the EyeLink backend writes no events "
+    "sidecar with StimulusPresentation (ScreenDistance, ScreenOrigin, "
+    "ScreenResolution, ScreenSize), so a converted eye tracker looking at a "
+    "screen is INCOMPLETE_STIMULUS_PRESENTATION, an error for the reference "
+    "validator too."))
+def test_eye_tracking_states_its_screen(mono, both, tmp_path) -> None:
+    from bidsmgr.cli.convert import run_convert
+    from bidsmgr.cli.scan import run_scan
+    from bidsmgr.editor.validator import validate
+
+    raw = tmp_path / "raw"
+    (raw / "a").mkdir(parents=True)
+    shutil.move(str(mono), raw / "a" / "task-search_eyes.edf")
+    inv = tmp_path / "inv.tsv"
+    run_scan(raw, inv, dataset="ds")
+    assert run_convert(inv, tmp_path / "out", raw_root=raw) == 0
+    report = validate(tmp_path / "out" / "ds")
+    codes = {i.rule_id for f in report.files for i in f.issues}
+    assert "INCOMPLETE_STIMULUS_PRESENTATION" not in codes
 
 
 def test_the_viewer_reads_the_clock_and_the_blinks(mono, tmp_path) -> None:

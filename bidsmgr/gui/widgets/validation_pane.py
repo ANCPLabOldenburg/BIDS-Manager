@@ -97,27 +97,10 @@ def _find_verdict(
     root: Optional[Path],
     path: Optional[Path],
 ) -> Optional[FileVerdict]:
-    """Same path-resolution logic as the sidecar form's lookup."""
-    if report is None or root is None or path is None:
-        return None
-    try:
-        target_abs = str(path.resolve())
-    except OSError:
-        target_abs = str(path)
-    try:
-        root_resolved = root.resolve()
-    except OSError:
-        root_resolved = root
-    for fv in report.files:
-        fp = fv.path
-        candidate = fp if fp.is_absolute() else root_resolved / fp
-        try:
-            candidate_abs = str(candidate.resolve())
-        except OSError:
-            candidate_abs = str(candidate)
-        if candidate_abs == target_abs:
-            return fv
-    return None
+    """The verdict for ``path``: one lookup (``editor.report_index``)."""
+    from ...editor.report_index import find_verdict
+
+    return find_verdict(report, root, path)
 
 
 class _ClipRow(QFrame):
@@ -321,6 +304,18 @@ class ValidationPane(QWidget):
     def set_report(self, report: Optional[ValidationReport]) -> None:
         """Bind the panel to a fresh :class:`ValidationReport`."""
         self._report = report
+        self._grouped_cache = None
+        self._render()
+
+    def set_report_and_file(self, report: Optional[ValidationReport],
+                            path: Optional[Path], root: Optional[Path]) -> None:
+        """A report and the file in focus together: ONE render. The Editor
+        used to call the two setters in turn, and each tore the pane down and
+        built it again."""
+        self._report = report
+        self._grouped_cache = None
+        self._current_file = path
+        self._current_root = root
         self._render()
 
     def set_current_file(
@@ -335,6 +330,10 @@ class ValidationPane(QWidget):
         """
         self._current_file = path
         self._current_root = root
+        # The whole-dataset view does not depend on the file in focus, so a
+        # click while it is shown rebuilds nothing.
+        if self._grouped:
+            return
         self._render()
 
     def repaint_for_palette(self, pal: dict) -> None:
@@ -538,6 +537,13 @@ class ValidationPane(QWidget):
 
             is_image = target_file is not None and str(target_file).lower().endswith(
                 (".nii", ".nii.gz"))
+            # The first SECTION_CAP, then a button for the rest: a dozen
+            # widgets per finding, uncapped, is what froze the chip dialogs,
+            # and a dataset section can hold thousands.
+            hidden = 0
+            if len(issues) > self.SECTION_CAP and title not in self._uncapped:
+                hidden = len(issues) - self.SECTION_CAP
+                issues = issues[: self.SECTION_CAP]
             for issue in issues:
                 msg = ValMessage(
                     severity=(
@@ -580,8 +586,30 @@ class ValidationPane(QWidget):
                         )
                     )
                 sl.addWidget(msg)
+            if hidden:
+                more = QPushButton(f"Show all {hidden + len(issues):,}")
+                more.setObjectName("tb-btn")
+                more.setToolTip(f"{hidden:,} more in this section. Listing them all can "
+                                "take a moment on a large dataset.")
+                more.clicked.connect(lambda _=False, t=title: self._uncap(t))
+                sl.addWidget(more, 0, Qt.AlignmentFlag.AlignLeft)
 
         self._insert_section_widget(section)
+
+    #: Findings a section lists before offering the rest.
+    SECTION_CAP = 50
+
+    @property
+    def _uncapped(self) -> set:
+        found = getattr(self, "_uncapped_titles", None)
+        if found is None:
+            found = self._uncapped_titles = set()
+        return found
+
+    def _uncap(self, title: str) -> None:
+        """List every finding of one section, asked for."""
+        self._uncapped.add(title)
+        self._render()
 
     # ------------------------------------------------------------------
     # Grouped (whole-dataset) mode
@@ -595,8 +623,18 @@ class ValidationPane(QWidget):
         self._render()
 
     def _render_grouped(self) -> None:
-        """One row per kind of finding, with the file count beside it."""
-        groups = group_report(self._report, allowed=self._severity_filter())
+        """One row per kind of finding, with the file count beside it.
+
+        Grouped once per report and severity filter: a file click rebuilt it
+        from every finding in the report (2.1 s on 287,000)."""
+        allowed = self._severity_filter()
+        key = (id(self._report), frozenset(allowed) if allowed is not None else None)
+        cached = getattr(self, "_grouped_cache", None)
+        if cached is not None and cached[0] == key and cached[1] is self._report:
+            groups = cached[2]
+        else:
+            groups = group_report(self._report, allowed=allowed)
+            self._grouped_cache = (key, self._report, groups)
         if self._sev_sort.isChecked():
             rank = {Severity.ERR: 0, Severity.WARN: 1, Severity.OK: 2}
             groups = sorted(
@@ -677,7 +715,12 @@ class ValidationPane(QWidget):
         listing = QLabel(text)
         listing.setObjectName("pane-hint")
         listing.setWordWrap(True)
-        listing.setToolTip("\n".join(str(x) for x in grp.files))
+        # The first twenty, then how many more: a tooltip naming every file
+        # was 287,000 strings joined for one hover.
+        tip = [str(x) for x in grp.files[:20]]
+        if len(grp.files) > 20:
+            tip.append(f"and {len(grp.files) - 20:,} more")
+        listing.setToolTip("\n".join(tip))
         cl.addWidget(listing)
         return card
 

@@ -124,11 +124,16 @@ class Link:
     field: str
     targets: tuple[str, ...]        # as written, usually bids:: URIs
     resolved: tuple[Optional[Path], ...]   # None where nothing is there
+    #: Targets that cannot be checked from here: a URL, a file in another
+    #: dataset this one names but does not hold (``bids:raw:...``), or, in a
+    #: derivative dataset, a source written relative to the raw dataset.
+    unchecked: tuple[str, ...] = ()
 
     @property
     def broken(self) -> tuple[str, ...]:
         return tuple(
-            t for t, r in zip(self.targets, self.resolved) if r is None
+            t for t, r in zip(self.targets, self.resolved)
+            if r is None and t not in self.unchecked
         )
 
 
@@ -192,22 +197,64 @@ def resolve(root: Path, target: str) -> Optional[Path]:
     if not text:
         return None
 
-    body = text
-    if body.startswith("bids:"):
-        body = body.split(":", 2)[-1]
-        candidate = root / body
-        return candidate if candidate.is_file() else None
+    # ``exists`` rather than ``is_file``: a CTF ``.ds``, an OME-Zarr or a MEF
+    # recording is a FOLDER, and every link to one was reported broken.
+    if text.startswith("bids:"):
+        name, _sep, body = text[len("bids:"):].partition(":")
+        base = root if not name else _linked_dataset(root, name)
+        if base is None:
+            return None
+        candidate = base / body.lstrip("/")
+        return candidate if candidate.exists() else None
 
     # Legacy: relative to the SUBJECT folder, so it has to be tried under
-    # each one. Cheap, because it stops at the first hit.
+    # each one. Cheap, because it stops at the first hit. A leading slash is
+    # a common slip for the same thing, and the file is there.
+    body = text.lstrip("/")
     candidate = root / body
-    if candidate.is_file():
+    if candidate.exists():
         return candidate
     for subject in sorted(root.glob("sub-*")):
         candidate = subject / body
-        if candidate.is_file():
+        if candidate.exists():
             return candidate
     return None
+
+
+def _description(root: Path) -> dict:
+    return _load(Path(root) / "dataset_description.json")
+
+
+def _linked_dataset(root: Path, name: str) -> Optional[Path]:
+    """The local folder of a dataset named in ``DatasetLinks``, or ``None``
+    when it is a URL or not here."""
+    links = _description(root).get("DatasetLinks")
+    value = links.get(name) if isinstance(links, dict) else None
+    if not isinstance(value, str) or "://" in value or value.startswith("doi:"):
+        return None
+    folder = Path(value)
+    folder = folder if folder.is_absolute() else Path(root) / folder
+    return folder if folder.is_dir() else None
+
+
+def checkable(root: Path, target: str, *, field: str = "") -> bool:
+    """Can ``target`` be checked from ``root``?
+
+    Not a URL, not a file in another dataset that is not here
+    (``bids:raw:...`` whose ``DatasetLinks`` entry is a URL or absent), and,
+    in a derivative dataset, not a ``Sources``/``RawSources`` entry written
+    the old way (relative to the raw dataset, which this one is not). Those
+    were reported as broken links, and removing them erased provenance.
+    """
+    text = str(target).strip()
+    if "://" in text or text.startswith("doi:"):
+        return False
+    if text.startswith("bids:"):
+        name = text[len("bids:"):].partition(":")[0]
+        return not name or _linked_dataset(root, name) is not None
+    if field in ("Sources", "RawSources"):
+        return str(_description(root).get("DatasetType", "raw")) != "derivative"
+    return True
 
 
 def read_links(root: Path, path: Path) -> list[Link]:
@@ -228,6 +275,7 @@ def read_links(root: Path, path: Path) -> list[Link]:
             field=name,
             targets=targets,
             resolved=tuple(resolve(root, t) for t in targets),
+            unchecked=tuple(t for t in targets if not checkable(root, t, field=name)),
         ))
     return out
 
@@ -647,6 +695,7 @@ FIELD_RULE: dict[str, str] = {
 
 __all__ = [
     "BROKEN",
+    "checkable",
     "BrokenLink",
     "DIFFERS",
     "FIELD_HELP",

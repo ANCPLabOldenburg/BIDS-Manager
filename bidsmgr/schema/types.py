@@ -95,6 +95,9 @@ class FieldInfo:
     # The literal "n/a" is accepted, which is how BIDS spells "asked, and
     # there is no answer".
     accepts_na: bool = False
+    # The format a string value is written in (time, bids_uri, hed_version,
+    # ...), empty when none: a placeholder cannot match it.
+    format: str = ""
     required: bool = False
     # True when the level or the rule's applicability depends on something a
     # datatype and suffix cannot settle. Show such a field, but present it as

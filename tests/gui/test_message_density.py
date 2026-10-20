@@ -26,7 +26,7 @@ import pytest
 from PyQt6.QtWidgets import QLabel, QPushButton
 
 from bidsmgr.editor.types import FileVerdict, Issue, Severity, ValidationReport
-from bidsmgr.gui.issues_dialog import IssuesDialog, _RowCard
+from bidsmgr.gui.issues_dialog import IssuesDialog
 from bidsmgr.gui.models import InventoryTableModel
 from bidsmgr.gui.widgets import Chip, ElidedPushButton
 from bidsmgr.gui.widgets.val_message import ValMessage
@@ -207,26 +207,31 @@ def test_a_long_basename_does_not_set_the_dialog_width(qtbot) -> None:
     assert dlg.layout().minimumSize().width() <= dlg.minimumWidth()
 
 
-def test_the_row_title_is_elided_not_clipped(qtbot) -> None:
+def test_the_row_title_is_listed_whole_and_painted_to_fit(qtbot) -> None:
+    """The title is drawn elided by the list (no widget to set a width
+    floor), and the model still holds it whole for anything that asks."""
     dlg = _warn_dialog(qtbot)
-    cards = dlg.findChildren(_RowCard)
-    assert len(cards) == 1
-    assert isinstance(cards[0]._title_btn, ElidedPushButton)
-    # Still readable by anything that asks, tests included.
-    assert "sub-002" in cards[0]._title_btn.text()
+    model = dlg._list.view.findings_model()
+    assert model.rowCount() == 1
+    assert "sub-002" in model.index(0, 0).data()
 
 
 def test_the_scanner_notes_render_compactly(qtbot) -> None:
     """A scanner note carries no rule id, so it takes the compact path."""
     dlg = _warn_dialog(qtbot)
-    messages = dlg.findChildren(ValMessage)
-    assert len(messages) == 2
-    for msg in messages:
-        assert _captions(msg) == []
+    view = dlg._list.view
+    model = view.findings_model()
+    group = model.index(0, 0)
+    assert model.rowCount(group) == 2
+    for row in range(2):
+        view.setCurrentIndex(model.index(row, 0, group))
+        messages = dlg.findChildren(ValMessage)
+        assert len(messages) == 1, "the selected note, in full"
+        assert _captions(messages[0]) == []
 
 
 def test_the_editor_dialog_elides_its_paths_too(qtbot, tmp_path: Path) -> None:
-    from bidsmgr.gui.editor_issues_dialog import EditorIssuesDialog, _FileCard
+    from bidsmgr.gui.editor_issues_dialog import EditorIssuesDialog
 
     root = tmp_path / "DS"
     (root / "sub-01" / "ses-01" / "func").mkdir(parents=True)
@@ -255,9 +260,7 @@ def test_the_editor_dialog_elides_its_paths_too(qtbot, tmp_path: Path) -> None:
     )
     dlg = EditorIssuesDialog(report, "err", root)
     qtbot.addWidget(dlg)
-    cards = dlg.findChildren(_FileCard)
-    assert len(cards) == 1
-    assert isinstance(cards[0]._title_btn, ElidedPushButton)
+    assert dlg._list.view.findings_model().rowCount() == 1
     assert dlg.layout().minimumSize().width() <= dlg.minimumWidth()
 
 

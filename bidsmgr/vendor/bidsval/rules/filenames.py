@@ -181,6 +181,65 @@ def _entities_extensions_fit(
     return ext_ok and file_entities.issubset(rule_entities)
 
 
+def match_file_rule(schema: Namespace, relpath: str, *, is_dir: bool = False) -> str | None:
+    """The ``rules.files`` rule a raw dataset path fits, by its schema path
+    (``rules.files.raw.anat.nonparametric``), or ``None``.
+
+    VENDORED CHANGE (BIDS Manager): a public entry point to the rule matching
+    above, so the one place that knows which rule a file belongs to also
+    answers "is this a recording" for the scans table and the coherence
+    checks, instead of each keeping its own list of suffixes and extensions.
+
+    Stricter than the validator's identification, because it answers for a
+    file that is valid rather than explaining one that is not: the rule must
+    take the extension, the folder, every entity the file has, every entity
+    it requires, and any fixed value (``acq-crosstalk`` is the MEG crosstalk
+    file, not a recording). ``is_dir`` marks a directory recording (CTF
+    ``.ds``, MEF ``.mefd``, OME-Zarr, a BTi folder).
+    """
+    from ..context.entities import parse_filename
+    from ..schema import introspect
+
+    relpath = relpath.strip("/")
+    name = relpath.rsplit("/", 1)[-1]
+    entities, suffix, extension = parse_filename(schema, name)
+    if is_dir:
+        extension += "/"
+    parts = relpath.split("/")
+    parent = parts[-2] if len(parts) >= 2 else ""
+    datatype = parent if parent in introspect.datatypes(schema) else ""
+    context = {"path": "/" + relpath, "__name__": name, "entities": entities,
+               "datatype": datatype, "suffix": suffix, "extension": extension}
+    for path, node in _narrow(schema, context, _find_rule_matches(schema, context, "raw")):
+        if _fits(schema, context, node):
+            return path
+    return None
+
+
+def _fits(schema: Namespace, context: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
+    """Does a file with this context satisfy ``rule`` entirely?"""
+    if "extensions" in rule:
+        allowed = list(rule["extensions"])
+        if context["extension"] not in allowed and ".*" not in allowed:
+            return False
+    if "datatypes" in rule and context["datatype"] not in list(rule["datatypes"]):
+        return False
+    if "entities" not in rule:
+        return not context["entities"] or "path" in rule
+    file_entities = context["entities"]
+    allowed_short = set()
+    for long_name, spec in rule["entities"].items():
+        short = _short(schema, long_name)
+        allowed_short.add(short)
+        level = spec if isinstance(spec, str) else str(spec.get("level", "optional"))
+        if level == "required" and short not in file_entities:
+            return False
+        enum = None if isinstance(spec, str) else spec.get("enum")
+        if enum is not None and short in file_entities and file_entities[short] not in list(enum):
+            return False
+    return set(file_entities) <= allowed_short
+
+
 # --- per-file checks ------------------------------------------------------
 
 
@@ -414,8 +473,9 @@ def _validate_location(
 
 # Metadata may sit higher in the tree than the data it describes, which is what
 # the inheritance principle is for, so these are never "missing a datatype
-# directory".
-_INHERITABLE_EXTENSIONS = frozenset({".json", ".tsv"})
+# directory". VENDORED CHANGE: ``.bval`` and ``.bvec`` are inherited too (a
+# dataset-root ``dwi.bval`` is valid), and were reported INVALID_LOCATION.
+_INHERITABLE_EXTENSIONS = frozenset({".json", ".tsv", ".bval", ".bvec"})
 
 
 def _at_inheritance_level(relpath: str) -> bool:

@@ -355,8 +355,10 @@ class TestTheSharedControls:
         assert pen.width() == 6
         assert pen.color().name() == "#ff7b72"
 
-    def test_one_trace_means_no_colour_by_type(self, qtbot, spectrum_file, tmp_path,
-                                               monkeypatch):
+    def test_a_spectrum_can_go_back_to_the_theme_colour(self, qtbot, spectrum_file,
+                                                        tmp_path, monkeypatch):
+        """A colour once picked could not be undone: the default was greyed out."""
+        from bidsmgr.gui.viz.bridge import SettingsHub
         from bidsmgr.gui.viz.panels.line_style import LineStyleDialog
 
         monkeypatch.setattr(LineStyleDialog, "exec", lambda self: 0)
@@ -364,8 +366,12 @@ class TestTheSharedControls:
         viewer.trigger("traces.line")
         dlg = viewer.presenter.line_dialog
         qtbot.addWidget(dlg)
-        assert not dlg._by_type.isEnabled()
-        assert dlg._one_colour.isChecked()
+        assert dlg._by_type.text() == "Theme colour"
+        assert dlg._by_type.isEnabled() and dlg._by_type.isChecked()
+        dlg._one_colour.setChecked(True)
+        assert SettingsHub.instance().settings.traces.line_color
+        dlg._by_type.setChecked(True)
+        assert SettingsHub.instance().settings.traces.line_color == ""
 
     def test_the_crosshair_reads_out_ppm(self, qtbot, spectrum_file, tmp_path):
         from PyQt6.QtCore import QPointF

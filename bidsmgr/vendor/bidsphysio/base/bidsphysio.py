@@ -76,6 +76,9 @@ import numpy as np
 # under every version of the standard, which is what this produces.
 _LABEL_SEPARATORS = re.compile(r'[^0-9a-zA-Z]+')
 
+# VENDORED CHANGE: rows formatted at a time when the signals are written.
+_ROWS_PER_CHUNK = 100_000
+
 
 def bids_label(raw, fallback='signal'):
     """Turn a recording's own name into a valid BIDS entity label.
@@ -435,12 +438,20 @@ class PhysioData(object):
         else: # Eyetracking data case
             myFmt=['% d' if item.label in {'trigger','fixation', 'saccade', 'blink', 'samples'} else '%.1f' for item in self.signals]
         
-        np.savetxt(
-            data_fName,
-            np.transpose( [item.signal for item in self.signals] ),
-            fmt=myFmt,
-            delimiter='\t'
-        )
+        # VENDORED CHANGE (BIDS Manager): a missing sample is written n/a, the
+        # standard's word for it. numpy writes nan, which a validator reads as
+        # a value of the wrong type (TSV_VALUE_INCORRECT_TYPE). Written in
+        # chunks, so a 22-million-sample recording is never all text at once.
+        import gzip
+        import io
+
+        data = np.transpose( [item.signal for item in self.signals] )
+        with gzip.open(data_fName, 'wb') as out:
+            for start in range(0, len(data), _ROWS_PER_CHUNK):
+                buf = io.BytesIO()
+                np.savetxt(buf, data[start:start + _ROWS_PER_CHUNK], fmt=myFmt,
+                           delimiter='\t')
+                out.write(buf.getvalue().replace(b'nan', b'n/a'))
 
     def save_to_bids(self, bids_fName=None):
         """

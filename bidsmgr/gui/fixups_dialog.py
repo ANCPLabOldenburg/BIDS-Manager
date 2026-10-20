@@ -458,15 +458,26 @@ class FixupsDialog(QDialog):
             "and a TODO in any other field is taken back. participants.tsv "
             "and the scans tables are refreshed.\n\nValidation will then "
             "report each TODO, which is the point: an unanswered field "
-            "becomes visible rather than absent.",
+            "becomes visible rather than absent.\n\nOne Undo takes it all back.",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
             QMessageBox.StandardButton.Ok,
         )
         if answer != QMessageBox.StandardButton.Ok:
             return
+        from ..project.operations import run_as_operation
+        from .app_settings import AppSettings
+        from .fs_watch import watchers_released
+
+        tables = AppSettings.load().post_metadata_tables
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            report = run_metadata(self._root, fill_scope=scope, write_report=False)
+            # One undoable step: the engine writes for itself, so what it
+            # changed is captured and replayed through an operation.
+            with watchers_released():
+                report = run_as_operation(
+                    self._root, "Write TODO placeholders",
+                    lambda: run_metadata(self._root, fill_scope=scope,
+                                         write_report=False, tables=tables))
         except Exception as exc:  # noqa: BLE001 - report rather than crash
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Could not write placeholders", str(exc))

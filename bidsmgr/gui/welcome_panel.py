@@ -67,6 +67,7 @@ _RESOURCE_LINKS: tuple[tuple[str, str], ...] = (
     ("Learn BIDS Manager, step by step", "https://ancplaboldenburg.github.io/bids_manager_documentation/learn/"),
     ("Source code on GitHub", "https://github.com/ANCPLabOldenburg/BIDS-Manager"),
 )
+_DOCS_URL = _RESOURCE_LINKS[0][1]
 # Sample datasets, offered two ways: straight to the download for somebody who
 # knows which one they want, and to the documentation section for somebody who
 # does not. The section says what each dataset demonstrates and what a full run
@@ -424,8 +425,25 @@ class WelcomePanel(QWidget):
             "Documentation, tutorial, source code, and sample datasets to "
             "try the full scan to validate workflow.",
         )
+        # On the documentation's line, at the right: a request for a star on
+        # GitHub, the one sign of use BIDS Manager gets (gui/star_request.py).
+        from . import icons
+
+        self._star_button = QPushButton("Help us")
+        self._star_button.setObjectName("tb-btn")
+        self._star_button.setToolTip("Give BIDS Manager a star on GitHub: why it helps, and how")
+        icons.apply_button(self._star_button, "star")
+        self._star_button.clicked.connect(self._show_star_request)
         for text, url in _RESOURCE_LINKS:
-            lay.addWidget(self._link_label(text, url))
+            link = self._link_label(text, url)
+            if url != _DOCS_URL:
+                lay.addWidget(link)
+                continue
+            row = QHBoxLayout()
+            row.addWidget(link)
+            row.addStretch(1)
+            row.addWidget(self._star_button)
+            lay.addLayout(row)
 
         sample = QLabel("Sample datasets")
         sample.setObjectName("welcome-subsection")
@@ -475,6 +493,11 @@ class WelcomePanel(QWidget):
 
     def _show_whats_new(self) -> None:
         from .whats_new import show_dialog
+
+        show_dialog(self.window())
+
+    def _show_star_request(self) -> None:
+        from .star_request import show_dialog
 
         show_dialog(self.window())
 
@@ -873,6 +896,10 @@ class WelcomePanel(QWidget):
         for lbl in self.findChildren(QLabel):
             if lbl.objectName() == "welcome-link" and lbl.property("link_url"):
                 lbl.setText(self._link_html(lbl.property("link_text"), lbl.property("link_url")))
+        if hasattr(self, "_star_button"):
+            from . import icons
+
+            icons.apply_button(self._star_button, "star")
         # The recent-list delegate reads palette tokens at paint time; nudge
         # the viewport so the rows recolour immediately.
         if hasattr(self, "_recent"):

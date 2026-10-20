@@ -35,7 +35,7 @@ from .validate import validate, validate_file, validate_subject
 # Bump the local segment when the local delta changes; drop it entirely once
 # upstream carries the addition and this is a clean copy again. See the
 # divergence table in ``bidsmgr/vendor/README.md``.
-__version__ = "0.1.1+bidsmgr.1"
+__version__ = "0.1.1+bidsmgr.3"
 
 __all__ = [
     "Severity",

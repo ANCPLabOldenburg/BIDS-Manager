@@ -184,6 +184,8 @@ class DeleteDialog(QDialog):
         plan = rm.plan_delete(self._root, self._targets)
         self._plan = plan
         self._scope.setText(
+            f"<b>{where}</b><br>{len(plan.emptied)} empty folder(s), nothing in them"
+            if plan.only_folders else
             f"<b>{where}</b><br>{plan.n_files} file(s), "
             f"{_human(plan.bytes_freed())}, companions included"
         )
@@ -221,6 +223,12 @@ class DeleteDialog(QDialog):
     def _refresh_selection(self) -> None:
         if self._plan is None:
             return
+        if self._plan.only_folders:
+            n = len(self._plan.emptied)
+            self._ok.setEnabled(True)
+            self._status.setText(self._plan.summary())
+            self._ok.setText(f"Delete {n} empty folder{'s' if n != 1 else ''}")
+            return
         chosen = self.selected_keys()
         total = len(self._plan.files)
         self._ok.setEnabled(bool(chosen))
@@ -238,14 +246,20 @@ class DeleteDialog(QDialog):
 
         if self._plan is None:
             return
-        chosen = self.selected_keys()
-        if not chosen:
+        folders_only = self._plan.only_folders
+        chosen = None if folders_only else self.selected_keys()
+        if not folders_only and not chosen:
             return
-        confirm = QMessageBox.question(
-            self, "Delete from the dataset",
+        question = (
+            f"Delete {len(self._plan.emptied)} empty folder(s)?\n\n"
+            "Nothing is in them. One step, so you can undo it from the Editor's "
+            "Undo." if folders_only else
             f"Delete {len(chosen)} file(s)?\n\n"
             "The scans rows, IntendedFor entries and emptied folders go with "
-            "them, as one step. You can undo it from the Editor's history.",
+            "them, as one step. You can undo it from the Editor's Undo.")
+        confirm = QMessageBox.question(
+            self, "Delete from the dataset",
+            question,
             QMessageBox.StandardButton.Cancel
             | QMessageBox.StandardButton.Ok,
             QMessageBox.StandardButton.Cancel,

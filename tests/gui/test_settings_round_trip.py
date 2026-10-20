@@ -106,8 +106,9 @@ def test_every_string_setting_round_trips_a_non_boolish_value():
         "validate_show": "error", "scan_tsv_filename": "study.tsv",
         "convert_on_existing": "update", "convert_intended_for": "relative",
         "convert_sourcedata": "copy", "convert_sourcedata_modalities": "mri,eeg",
-        "metadata_fill_scope": "optional", "header_logo": "app_icon",
+        "metadata_fill_scope": "optional", "header_logo": "mark",
         "convert_deface_engine": "allineate-robust",
+        "post_anonymise": "strict",
     }
     probes = {
         str: "allineate-robust",
@@ -174,3 +175,17 @@ def test_a_nonsense_width_is_dropped_on_load(tmp_path, monkeypatch):
     back = AppSettings.load()
     assert "run" not in back.scan_index_widths
     assert back.scan_index_widths.get("echo") == 2
+
+
+def test_the_colour_app_icon_is_the_default_header_logo(isolated_settings):
+    assert AppSettings().header_logo == "app_icon"
+    assert AppSettings.load().header_logo == "app_icon"
+    store = QSettings(str(isolated_settings), QSettings.Format.IniFormat)
+    # Earlier versions stored "default" for the monochrome mark they showed by
+    # default; it is not a value any more, so it reads as the new default.
+    store.setValue(KEYS["header_logo"], "default")
+    store.sync()
+    assert AppSettings.load().header_logo == "app_icon"
+    store.setValue(KEYS["header_logo"], "mark")
+    store.sync()
+    assert AppSettings.load().header_logo == "mark"

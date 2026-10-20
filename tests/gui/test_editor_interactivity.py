@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from PyQt6.QtCore import Qt
+
 from pathlib import Path
 
 import pytest
@@ -111,26 +113,35 @@ def _make_report(bids_root: Path) -> ValidationReport:
 # ---------------------------------------------------------------------------
 
 
+def _titles(dlg) -> list[str]:
+    model = dlg._list.view.findings_model()
+    return [model.index(i, 0).data() for i in range(model.rowCount())]
+
+
 def test_issues_dialog_lists_files_for_given_severity(
     qapp, bids_root: Path,
 ) -> None:
     report = _make_report(bids_root)
     dlg = EditorIssuesDialog(report, "warn", bids_root)
-    # The one warn file in the report has a card.
-    cards = dlg.findChildren(QPushButton, "issue-card-title")
-    assert len(cards) == 1
-    assert "dataset_description.json" in cards[0].text()
+    # The one warn file in the report is listed.
+    titles = _titles(dlg)
+    assert len(titles) == 1
+    assert "dataset_description.json" in titles[0]
 
 
 def test_issues_dialog_card_activation_emits_absolute_path(
     qapp, qtbot, bids_root: Path,
 ) -> None:
+    from PyQt6.QtTest import QTest
+
     report = _make_report(bids_root)
     dlg = EditorIssuesDialog(report, "warn", bids_root)
-    card_btn = dlg.findChildren(QPushButton, "issue-card-title")[0]
+    qtbot.addWidget(dlg)
+    view = dlg._list.view
+    view.setCurrentIndex(view.findings_model().index(0, 0))
 
     with qtbot.waitSignal(dlg.file_selected, timeout=500) as sig:
-        card_btn.click()
+        QTest.keyClick(view, Qt.Key.Key_Return)
 
     emitted = sig.args[0]
     assert isinstance(emitted, Path)
@@ -141,19 +152,19 @@ def test_issues_dialog_card_activation_emits_absolute_path(
 def test_issues_dialog_ok_chip_lists_ok_files(qapp, bids_root: Path) -> None:
     report = _make_report(bids_root)
     dlg = EditorIssuesDialog(report, "ok", bids_root)
-    cards = dlg.findChildren(QPushButton, "issue-card-title")
-    assert len(cards) == 1
-    assert "sub-01_ses-01_T1w.json" in cards[0].text()
+    titles = _titles(dlg)
+    assert len(titles) == 1
+    assert "sub-01_ses-01_T1w.json" in titles[0]
 
 
 def test_issues_dialog_err_section_shows_empty_state(
     qapp, bids_root: Path,
 ) -> None:
-    """No err files in this report → empty hint, no cards."""
+    """No err files in this report → empty hint, nothing listed."""
     report = _make_report(bids_root)
     dlg = EditorIssuesDialog(report, "err", bids_root)
-    cards = dlg.findChildren(QPushButton, "issue-card-title")
-    assert cards == []
+    assert _titles(dlg) == []
+    assert dlg._list.isHidden()
 
 
 # ---------------------------------------------------------------------------

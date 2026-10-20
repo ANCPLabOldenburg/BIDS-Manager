@@ -2219,6 +2219,24 @@ class InventoryTableModel(QAbstractTableModel):
                 changed += 1
         return changed
 
+    def apply_leave_out(self, plan) -> int:
+        """Leave entities out of the open table's names
+        (``inventory.leave_out.plan_leave_out``) as ONE user action, entity
+        by entity through :meth:`set_entity`, so each is recorded like a
+        hand edit. Returns the rows changed."""
+        changed = 0
+        with self.edit_group():
+            for idx, kept in plan.changes.items():
+                row = int(idx)
+                if not (0 <= row < len(self._df)):
+                    continue
+                gone = [k for k in self.entities(row) if k not in kept]
+                for key in gone:
+                    self.set_entity(row, key, None)
+                if gone:
+                    changed += 1
+        return changed
+
     def apply_classification(self, changes, *, names: bool = True) -> int:
         """Lay re-scored names (``classifier.acquisition.scan.rescore``) onto
         the table as ONE user action: the classification columns always,

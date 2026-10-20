@@ -196,6 +196,9 @@ NAMES: dict[str, tuple[str, str]] = {
     "export":         ("mdi6.export-variant",         "text"),
     "copy":           ("mdi6.content-copy",           "text"),
     "mark_bad":       ("mdi6.cancel",                 "warning"),
+    # Home's "Help us": a star on GitHub (gui/star_request.py), in the accent
+    # like the links beside it.
+    "star":           ("mdi6.star",                   "accent"),
 }
 
 
@@ -347,7 +350,7 @@ _STYLE = "monochrome"
 #: Icons whose colour is their meaning, the same in every style: a status,
 #: a stop, an alert, the controls tab's own accent.
 _MEANINGFUL = frozenset({"ok", "warn", "err", "warning", "check", "stop", "close_data",
-                         "mark_bad", "info", "sun", "moon"})
+                         "mark_bad", "info", "sun", "moon", "star"})
 
 
 def set_style(style: str) -> None:

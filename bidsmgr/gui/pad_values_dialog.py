@@ -200,6 +200,14 @@ class PadValuesDialog(QDialog):
                     f"({', '.join(split.examples)}) across {split.files} "
                     "file(s), and needs settling"
                 )
+            elif used and len({len(v) for v in values}) > 1:
+                # run-1 to run-10: numbered without padding, which is one
+                # consistent choice and not a split.
+                text = (
+                    f"{len(values)} value(s), numbered without padding: "
+                    + ", ".join(f"{entity}-{v}" for v in values[:3])
+                    + (", ..." if len(values) > 3 else "")
+                )
             elif used:
                 text = (
                     f"{len(values)} value(s), all {widest} digit(s): "

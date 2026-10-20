@@ -200,3 +200,38 @@ def test_applying_the_ticked_subset_repairs_only_for_it(
     assert "sub-001" in (dataset / "participants.tsv").read_text(), (
         "the subject still has data, so it is still a participant"
     )
+
+
+# ---------------------------------------------------------------------------
+# Empty folders (2026-10-19: "in editor, we cannot remove empty folders")
+# ---------------------------------------------------------------------------
+
+
+def test_an_empty_folder_is_deleted_from_the_dialog(qtbot, dataset: Path, monkeypatch) -> None:
+    from PyQt6.QtWidgets import QMessageBox
+
+    empty = dataset / "sub-001" / "ses-01" / "dwi"
+    empty.mkdir()
+    dlg = DeleteDialog(dataset, [empty])
+    qtbot.addWidget(dlg)
+    assert "1 empty folder(s)" in dlg._scope.text()
+    assert dlg._ok.isEnabled() and dlg._ok.text() == "Delete 1 empty folder"
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Ok)
+    dlg._on_apply()
+    assert "empty folder" in asked[0]
+    assert not empty.exists()
+
+
+def test_the_tree_offers_to_delete_an_empty_folder_anywhere(dataset: Path) -> None:
+    from bidsmgr.gui.widgets.bids_tree_pane import _can_delete, _hollow_tree
+
+    stray = dataset / "notes"
+    stray.mkdir()
+    (stray / ".DS_Store").write_bytes(b"\x00")
+    assert _can_delete(stray, dataset), "not only under a subject"
+    assert _hollow_tree(stray), "the system's droppings do not count"
+    assert not _hollow_tree(dataset / "sub-001")
+    assert not _can_delete(dataset / ".bidsmgr", dataset)
+    assert not _can_delete(dataset, dataset)

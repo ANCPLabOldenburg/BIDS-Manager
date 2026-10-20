@@ -31,7 +31,7 @@ clean. The current motivation list:
 ### `bidsmgr.vendor.bidsval`
 
 **Upstream:** `bidsval` (`karellopez/bidsval`, MIT), vendored at **0.1.1 plus
-one local addition**, so the copy reports `0.1.1+bidsmgr.1`.
+local additions**, so the copy reports `0.1.1+bidsmgr.3`.
 
 "Ahead of upstream" applies to exactly one of the three differences below.
 The other two are ADAPTATIONS that vendoring requires and that would be wrong
@@ -49,7 +49,7 @@ through PyPI made that arrangement expensive: changing a schema rule meant
 editing bidsval, bumping, building, uploading, and only then testing. In tree
 it is one edit and one test run.
 
-**What changed during the copy: THREE files.** Each is marked
+**What changed during the copy: the files below.** Each is marked
 `VENDORED CHANGE` in the source. Keep this list in step, because the refresh
 policy below is "wholesale", and a divergence that is not written down here is
 one that gets silently deleted the next time.
@@ -58,7 +58,25 @@ one that gets silently deleted the next time.
 |---|---|---|
 | `schema/resolve.py` | adaptation | `_bundled_dir()` uses `resources.files(__package__)`, was `resources.files("bidsval.schema")` |
 | `__init__.py` | adaptation | `__version__` stated literally, was `importlib.metadata.version("bidsval")` |
-| `schema/fields.py` | **ahead** | `FieldSpec.accepts` / `accepts_free_text` / `accepts_na`, the `_variants` helpers, and an `anyOf` lookup in `_item_type`. Not in upstream at all |
+| `schema/fields.py` | **ahead** | `FieldSpec.accepts` / `accepts_free_text` / `accepts_na` / `format`, the `_variants` helpers, `_string_format`, and an `anyOf` lookup in `_item_type`. A string with a `format` whose pattern refuses an arbitrary word (`time`, `bids_uri`, `hed_version`) is not free text, so the metadata step writes no `"TODO"` there. Not in upstream at all |
+| `rules/filenames.py` | **ahead** | `match_file_rule` and `_fits`: the raw file rule a path fits, strictly (extension, folder, every entity, required entities, fixed values). BIDS Manager's scans and sessions tables and the coherence checks ask it which files are recordings (`metadata/tables.py`), so there is one answer, the standard's. Also `.bval`/`.bvec` are inheritable (a dataset-root `dwi.bval` was INVALID_LOCATION) |
+| `rules/values.py` | **ahead** | JSON `format` checked against `objects.formats` patterns (`"TODO"` in HEDVersion or a time, `"9h28"`, were passed) |
+| `rules/engine.py` | **ahead** | `json` evaluated (every `coordsystem.json` rule); `_NULL_IS_FAILURE` (eye tracking without StimulusPresentation is reported, as the reference does); on a derivative dataset, raw-only sidecar rules not enforced (as the reference 3.0.2); rules flattened once per schema (speed) |
+| `rules/tables.py` | **ahead** | gzipped TSVs column-checked (named from the sidecar's `Columns`); `TSV_COLUMN_TYPE_REDEFINED` on the `.json` that redefines the column |
+| `context/loaders.py` | **ahead** | `load_columns(names=)` for headerless tables; a byte-order mark is `INVALID_JSON_ENCODING` |
+| `context/builder.py` | **ahead** | `bids::` URIs into the dataset are resolved (the reference answers true for any `bids:` string, so a dangling IntendedFor passed both); headerless tables read with the sidecar's `Columns` |
+| `context/entities.py` | speed | `parse_filename` memoised per schema (4.5 million parses on a 1,500-file folder) |
+| `files/tree.py` | speed | `BIDSFile.name` from the relpath; per-folder lists sorted once |
+| `rules/integrity.py` | **ahead** | the `INVALID_JSON_ENCODING` message |
+| `validate.py` | **ahead** | no bespoke `NO_SUBJECTS` (the schema's `SUBJECT_FOLDERS` says it, scoped by DatasetType); a file no rule names (`NOT_INCLUDED`) is not given sidecar rules; `validate_file` honours `.bidsignore` (an ignored file validated alone was reported as not BIDS) |
+| `files/bidsignore.py` | **ahead** | `compile_pattern` public and `BidsIgnore.deciding` names the line that hides a path, so the Editor's ignore list and tree use THIS matcher (it had one of its own that disagreed); `[...]` character classes read as gitignore reads them; a file inside an ignored folder stays ignored whatever a later `!` line says (gitignore's rule, and the reference validator's `ignore` package), folder answers cached |
+
+Measured against the reference validator (3.0.2, same schema) on the 61
+single-defect copies of a BIDS Manager dataset from the 1.5.1 audit: 55
+defects caught, as the reference (52 before). Not caught: HED (needs
+`hedtools`). Caught where the reference is not: a dangling `bids::`
+IntendedFor. 1,000 files in one folder: 64.6 s before, 17.7 s after, the same
+30,005 findings.
 
 1. **The absolute package name.** A package that is going to be copied cannot
    name itself absolutely, because the absolute name reaches whatever is
@@ -69,7 +87,7 @@ one that gets silently deleted the next time.
    without it, before the GUI could start.
 2. **The version lookup.** There is no `bidsval` distribution here, so
    `version("bidsval")` described the installed copy or fell back to
-   `"0.0.0"`. Stated literally now, as `0.1.1+bidsmgr.1`. The local segment
+   `"0.0.0"`. Stated literally now, as `0.1.1+bidsmgr.3`. The local segment
    is PEP 440's local version identifier and is load-bearing: plain `0.1.1`
    would name a PyPI artefact that does not contain change 3 below. Bump the
    local segment when the local delta changes, and drop it once upstream
@@ -195,7 +213,15 @@ entirely.
    labels against every schema the installed `bidsval` ships, so this
    claim is verified rather than asserted.
 
-5. Otherwise no behavioural changes. Every other function and class
+5. One correctness fix in `base/bidsphysio.py`, `save_bids_data`: a
+   missing sample is written `n/a`, the standard's word for it. numpy's
+   `savetxt` wrote `nan`, which a validator reads as a value of the wrong
+   type (`TSV_VALUE_INCORRECT_TYPE` on the multimodal sample's cardiac
+   channel). Written in chunks of 100,000 rows, so a 22-million-sample
+   recording is never all text at once. The viewers read `n/a` as a gap,
+   as they read `nan` (`tests/unit/test_physio_na.py`).
+
+6. Otherwise no behavioural changes. Every other function and class
    body is verbatim. Original per-file MIT headers are preserved.
 
 **What's in the tree:**

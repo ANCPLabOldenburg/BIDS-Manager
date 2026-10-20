@@ -151,12 +151,28 @@ def test_undo_with_nothing_to_undo_is_a_no_op(
     assert _disk(sidecar) == before
 
 
-def test_saving_keeps_the_history(pane: SidecarFormPane) -> None:
+def test_saving_keeps_the_history(pane: SidecarFormPane, sidecar: Path) -> None:
     """A save is not a new beginning. Clearing the stack on save is the other
-    way this feature can look broken."""
+    way this feature can look broken. Since 1.5.1 what was saved is a step of
+    the dataset's history (``project.operations``) rather than of the pane, so
+    it outlives the pane moving to another file and coming back."""
     _edit(pane, "EchoTime", "0.09")
     pane.save()
-    assert pane._history.can_undo
+    assert pane.can_undo()
+    pane.set_file(None, None, None)
+    pane.set_file(sidecar, sidecar.parents[2], None)
+    assert pane.can_undo(), "still undoable after looking at another file"
+    pane.undo()
+    assert _disk(sidecar)["EchoTime"] == 0.03
+
+
+def test_edits_saved_together_go_back_together(pane: SidecarFormPane, sidecar: Path) -> None:
+    """Two fields changed, then one save: one change to the file, one undo."""
+    _edit(pane, "EchoTime", "0.09")
+    _edit(pane, "FlipAngle", "12")
+    pane.save()
+    pane.undo()
+    assert _disk(sidecar) == {"EchoTime": 0.03, "FlipAngle": 9}
 
 
 def test_reverting_clears_the_history(pane: SidecarFormPane) -> None:

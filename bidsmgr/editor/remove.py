@@ -98,15 +98,26 @@ class DeletePlan:
     # ``sub-`` labels whose participants.tsv row would go, because the whole
     # subject is being removed.
     participants: list[str] = dc_field(default_factory=list)
+    # ``(sessions table, ses- label)`` rows that go with a session folder the
+    # deletion empties, in a subject that stays.
+    session_rows: list[tuple[Path, str]] = dc_field(default_factory=list)
     # Inherited sidecars left describing nothing once the files go.
     orphaned_sidecars: list[Path] = dc_field(default_factory=list)
     emptied: list[Path] = dc_field(default_factory=list)
     conflicts: list[str] = dc_field(default_factory=list)
     title: str = ""
+    # The picked folders themselves: every folder inside them goes when it
+    # ends up empty, the ones that never held a file included.
+    folders: list[Path] = dc_field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
-        return not self.files
+        return not self.files and not self.emptied
+
+    @property
+    def only_folders(self) -> bool:
+        """Nothing but empty folders to remove."""
+        return not self.files and bool(self.emptied)
 
     @property
     def n_files(self) -> int:
@@ -136,6 +147,8 @@ class DeletePlan:
         return total
 
     def summary(self) -> str:
+        if self.only_folders:
+            return f"{len(self.emptied)} empty folder(s)"
         parts = [f"{len(self.files)} file(s)"]
         rows = sum(len(d.rows) for d in self.scans_drops)
         if rows:
@@ -145,6 +158,8 @@ class DeletePlan:
             parts.append(f"{refs} IntendedFor entry(ies)")
         if self.participants:
             parts.append(f"{len(self.participants)} participants row(s)")
+        if self.session_rows:
+            parts.append(f"{len(self.session_rows)} sessions row(s)")
         if self.orphaned_sidecars:
             parts.append(f"{len(self.orphaned_sidecars)} orphaned sidecar(s)")
         if self.emptied:
@@ -277,7 +292,15 @@ def plan_delete(root: Path, targets: Iterable[Path]) -> DeletePlan:
         return plan
 
     plan.files = _keep_tables_still_needed(_files_under(root, keep))
+    plan.folders = [t for t in keep if t.is_dir()]
     if not plan.files:
+        # Nothing but empty folders (or folders holding only the operating
+        # system's droppings): they can be deleted too.
+        plan.emptied = _emptied(root, [], set(), plan.folders)
+        if plan.emptied:
+            plan.title = (f"Delete the empty folder {_rel(root, plan.emptied[-1])}"
+                          if len(plan.emptied) == 1
+                          else f"Delete {len(plan.emptied)} empty folders")
         return plan
 
     going = set(plan.files)
@@ -296,8 +319,9 @@ def plan_delete(root: Path, targets: Iterable[Path]) -> DeletePlan:
     gone |= set(plan.orphaned_sidecars)
     plan.participants = _orphaned_subjects(root, gone)
     plan.emptied = _emptied(
-        root, plan.files + plan.orphaned_sidecars, gone,
+        root, plan.files + plan.orphaned_sidecars, gone, plan.folders,
     )
+    plan.session_rows = _session_rows(plan.emptied, gone)
     return plan
 
 
@@ -312,11 +336,16 @@ def _title(root: Path, targets: list[Path], files: list[Path]) -> str:
         one = targets[0]
         rel = _rel(root, one)
         if one.is_dir():
-            return f"Delete {rel} and its {len(files)} file(s)"
+            return f"Delete {rel} and its {_count(len(files), 'file')}"
         if len(files) > 1:
-            return f"Delete {rel} and its companion(s)"
+            return f"Delete {rel} and its {_count(len(files) - 1, 'companion')}"
         return f"Delete {rel}"
-    return f"Delete {len(targets)} item(s), {len(files)} file(s)"
+    return f"Delete {_count(len(targets), 'item')}, {_count(len(files), 'file')}"
+
+
+def _count(n: int, word: str) -> str:
+    """``1 file``, ``3 files``: the title shows in the Editor's history."""
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
 def _scans_drops(
@@ -523,19 +552,53 @@ def _orphaned_subjects(root: Path, going: set[Path]) -> list[str]:
     return out
 
 
-def _emptied(root: Path, files: list[Path], going: set[Path]) -> list[Path]:
-    """Folders that would have nothing left in them, deepest first."""
+def _session_rows(emptied: list[Path], going: set[Path]) -> list[tuple[Path, str]]:
+    """The ``*_sessions.tsv`` rows of the session folders a deletion empties.
+
+    A row for a session that is gone is the sessions table claiming one the
+    subject no longer has. Only where the table stays: a whole subject takes
+    its table with it.
+    """
+    out: list[tuple[Path, str]] = []
+    for folder in emptied:
+        subject = folder.parent
+        if not (folder.name.startswith("ses-") and subject.name.startswith("sub-")):
+            continue
+        table = subject / f"{subject.name}_sessions.tsv"
+        if table.is_file() and table not in going and subject not in emptied:
+            out.append((table, folder.name))
+    return out
+
+
+def _emptied(root: Path, files: list[Path], going: set[Path],
+             folders: Iterable[Path] = ()) -> list[Path]:
+    """Folders that would have nothing left in them, deepest first.
+
+    The folders the files leave, every folder inside a picked folder (one
+    that never held a file would otherwise stop its parent from going), and
+    the operating system's droppings (``.DS_Store``) do not count as
+    something left: they go with the folder."""
+    import os
+
+    from ..project.operations import is_os_junk
+
     candidates: list[Path] = []
     for path in files:
         folder = path.parent
         while folder != root and _within(root, folder):
             candidates.append(folder)
             folder = folder.parent
+    for picked in folders:
+        if picked.is_dir() and picked != root and _within(root, picked):
+            candidates.append(picked)
+            for dirpath, _dirs, _files in os.walk(picked):
+                candidates.append(Path(dirpath))
 
     out: list[Path] = []
     for folder in dict.fromkeys(candidates):
         survivors = [
-            p for p in folder.rglob("*") if p.is_file() and p not in going
+            p for p in folder.rglob("*")
+            if p.is_file() and p not in going and not is_os_junk(p.name)
         ]
         if not survivors:
             out.append(folder)
@@ -570,7 +633,7 @@ def apply_delete(
         )
 
     files = plan.selected(root, only)
-    if not files:
+    if not files and not plan.only_folders:
         return 0, []
 
     # Everything downstream is derived from the files actually going, not from
@@ -583,6 +646,7 @@ def apply_delete(
         participants = plan.participants
         orphans = plan.orphaned_sidecars
         emptied = plan.emptied
+        session_rows = plan.session_rows
     else:
         # Recomputed from what is ACTUALLY going, including which tables are
         # still needed: unticking a recording must leave the table that
@@ -595,7 +659,8 @@ def apply_delete(
         orphans = _orphaned_sidecars(root, gone)
         gone |= set(orphans)
         participants = _orphaned_subjects(root, gone)
-        emptied = _emptied(root, files + orphans, gone)
+        emptied = _emptied(root, files + orphans, gone, plan.folders)
+        session_rows = _session_rows(emptied, gone)
 
     errors: list[str] = []
     touched = 0
@@ -626,6 +691,13 @@ def apply_delete(
             except OSError as exc:
                 errors.append(f"participants.tsv: {exc}")
 
+        for table in dict.fromkeys(t for t, _s in session_rows):
+            try:
+                touched += _drop_session_rows(
+                    op, table, {s for t, s in session_rows if t == table})
+            except OSError as exc:
+                errors.append(f"{_rel(root, table)}: {exc}")
+
         # The orphans first, then the files. Either order works; this one
         # reads as "clean up what these leave behind, then remove them".
         for path in list(orphans) + list(files):
@@ -639,7 +711,8 @@ def apply_delete(
         for folder in sorted(
             emptied, key=lambda p: len(p.parts), reverse=True,
         ):
-            _remove_if_empty(folder, root, errors)
+            if _remove_if_empty(op, folder, root, errors):
+                touched += 1
 
     return touched, errors
 
@@ -706,20 +779,39 @@ def _drop_participants(op, root: Path, labels: list[str]) -> int:
     return 1
 
 
-def _remove_if_empty(folder: Path, root: Path, errors: list[str]) -> None:
-    """Remove ``folder`` when nothing is left in it.
+def _drop_session_rows(op, table_path: Path, sessions: set[str]) -> int:
+    """Remove the rows of ``sessions``, or the table when none would remain
+    (a sessions table listing nothing describes nothing, like a scans one)."""
+    from .tsv_edit import read_table
 
-    Not recorded as an operation step: a directory holds no content to
-    restore, and undo recreates it as a side effect of putting the files
-    back, since restoring a file makes its parents.
-    """
+    table = read_table(table_path)
+    if table is None or "session_id" not in table.header:
+        return 0
+    kept = [row for row in table.rows
+            if _cell(row, table.header, "session_id") not in sessions]
+    if len(kept) == len(table.rows):
+        return 0
+    if not kept:
+        op.delete(table_path)
+        return 1
+    table.rows = kept
+    op.write_text(table_path, table.to_text())
+    return 1
+
+
+def _remove_if_empty(op, folder: Path, root: Path, errors: list[str]) -> bool:
+    """Remove ``folder`` when nothing is left in it but the operating
+    system's droppings, which go with it. Recorded, so undo puts the folder
+    back and redo removes it again (an empty folder holds nothing to restore,
+    but a folder the step removed must reappear on undo even if it was
+    empty). True when it went."""
     if folder == root or not _within(root, folder):
-        return
+        return False
     try:
-        if folder.is_dir() and not any(folder.iterdir()):
-            folder.rmdir()
+        return op.remove_if_empty(folder)
     except OSError as exc:
         errors.append(f"{_rel(root, folder)}: {exc}")
+        return False
 
 
 __all__ = [

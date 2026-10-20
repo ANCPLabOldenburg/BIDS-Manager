@@ -26,7 +26,6 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from functools import lru_cache
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
@@ -119,7 +118,6 @@ def todo_value_for(field) -> object:
     accepts = tuple(getattr(field, "accepts", ()) or ())
     enum = tuple(getattr(field, "enum", ()) or ())
     item_type = getattr(field, "item_type", "")
-    declared = getattr(field, "type", "")
 
     name = canonical_field_name(str(getattr(field, "name", "")))
     if name in _LINK_FIELDS or name in _PATH_FIELDS:
@@ -129,9 +127,11 @@ def todo_value_for(field) -> object:
     if enum:
         # A real vocabulary. Nothing in it means "unanswered".
         return NO_TODO
-    if getattr(field, "accepts_free_text", False) or declared == "string":
+    # Free text by the schema's own answer, which a format (a time, a URI, a
+    # HED version) rules out: "TODO" there is a validation error, not a gap.
+    if getattr(field, "accepts_free_text", False):
         return _TODO_VALUE
-    if "array" in accepts and item_type == "string":
+    if "array" in accepts and item_type == "string" and not getattr(field, "format", ""):
         return [_TODO_VALUE]
     # An array whose item type the schema does not state is NOT assumed to
     # hold strings. That assumption is what wrote ``["TODO"]`` into EchoTime,
@@ -152,6 +152,9 @@ def unmarkable_reason(field) -> str:
         return "links files by its value: a placeholder would link them"
     if name in _PATH_FIELDS:
         return "names another file: a placeholder would name one that does not exist"
+    fmt = getattr(field, "format", "")
+    if fmt:
+        return f"must be written as a {fmt.replace('_', ' ')}, which a placeholder is not"
     enum = tuple(getattr(field, "enum", ()) or ())
     if enum:
         shown = ", ".join(str(v) for v in enum[:4])
@@ -240,6 +243,7 @@ def run_metadata(
     generator_label: str = "bidsmgr",
     participants_file: Optional[Path] = None,
     phenotype_files: Optional[list[Path]] = None,
+    tables: bool = True,
 ) -> MetadataReport:
     """Generate dataset-level metadata for the BIDS root at ``bids_root``.
 
@@ -280,6 +284,10 @@ def run_metadata(
     phenotype_files
         Optional list of phenotype measure tables. Each becomes
         ``phenotype/<measure>.tsv`` + ``.json``.
+    tables
+        Write the ``*_scans.tsv`` and ``*_sessions.tsv`` tables
+        (``metadata.tables``; the standard makes both optional, so this
+        can be turned off). Existing tables are merged, never replaced.
 
     Returns
     -------
@@ -336,7 +344,8 @@ def run_metadata(
     write_phenotype(bids_root, phenotype_files, report)
     _write_readme(bids_root, meta.name, report)
     _write_changes(bids_root, report)
-    _refresh_scans_tsv(bids_root, report)
+    if tables:
+        _refresh_scans_tsv(bids_root, report, inventory_tsv)
     # One resolved scope for the whole run, so the two passes below cannot
     # disagree about what was asked for. It used to be a switch AND a scope,
     # and a scope passed with the switch off still marked: that is how the
@@ -901,197 +910,25 @@ def _write_changes(bids_root: Path, report: MetadataReport) -> None:
 # ---------------------------------------------------------------------------
 
 
-# Files that live in a datatype folder but are NOT the recording. BIDS is
-# explicit that the scans file describes "each neural recording file", so the
-# tables and sidecars that accompany one do not get a row.
-_SCANS_COMPANION_SUFFIXES: frozenset[str] = frozenset({
-    "events", "channels", "electrodes", "coordsystem", "headshape", "markers",
-    "photo", "physio", "stim", "blood", "scans", "sessions", "participants",
-})
+def _refresh_scans_tsv(bids_root: Path, report: MetadataReport,
+                       inventory_tsv: Optional[Path] = None) -> None:
+    """The ``*_scans.tsv`` and ``*_sessions.tsv`` tables (``metadata.tables``).
 
-# Extensions that are part of a recording rather than a recording themselves.
-# A BrainVision recording is a .vhdr header plus a .eeg binary and a .vmrk
-# marker file, and an EEGLAB one is a .set plus a .fdt: the header is the
-# recording and gets the row, the rest would be duplicates of it. ``.eeg``
-# here is always the BrainVision binary, because the other format that uses
-# the extension (Nihon Kohden) is not BIDS-native and cannot appear in a
-# converted dataset. ``.dat``, ``.mrk`` and ``.pos`` are the MEG calibration,
-# marker and headshape side files.
-_SCANS_COMPANION_EXTS: frozenset[str] = frozenset({
-    ".json", ".tsv", ".gz", ".vmrk", ".eeg", ".fdt", ".dat", ".mrk", ".pos",
-})
-
-# MEG system files mne-bids writes beside the data, named by entity rather
-# than by suffix: acq-calibration_meg.dat and acq-crosstalk_meg.fif. The
-# second carries a .fif extension, which is a real recording extension, so
-# only the entity tells them apart.
-_SCANS_SYSTEM_ENTITIES: tuple[str, ...] = ("acq-calibration", "acq-crosstalk")
-
-# Recordings that are a DIRECTORY: CTF and EGI. One row each, and the walk
-# must not descend into them or every internal file would get a row.
-_SCANS_DIR_EXTS: frozenset[str] = frozenset({".ds", ".mff"})
-
-
-@lru_cache(maxsize=1)
-def _schema_suffixes() -> frozenset:
-    """Every suffix the standard defines, across all datatypes."""
-    from .. import schema as schema_mod
-
-    return frozenset(
-        s for dt in schema_mod.list_datatypes()
-        for s in schema_mod.list_suffixes(dt)
-    )
-
-
-# Files an operating system or an editor leaves in a data folder. None of
-# them is BIDS and all of them turn up in real datasets.
-_OS_JUNK = frozenset({
-    ".DS_Store", "Thumbs.db", "desktop.ini", "Icon\r", ".directory",
-})
-
-
-def _is_recording_file(path: Path) -> bool:
-    """Does this path get a row in ``*_scans.tsv``?
-
-    True for the data files themselves, of every modality, and false for the
-    sidecars, tables and format side files that accompany them.
-
-    It also has to be false for everything that is not BIDS at all. This
-    used to end with "the last token carrying no hyphen is the suffix, so
-    if it is not a known companion it is a recording", which accepted
-    ``.DS_Store``, ``Thumbs.db``, ``notes.txt`` and every dotfile, and put
-    them in ``*_scans.tsv`` as though they were data. The standard is the
-    thing that decides what a recording is, so the suffix is now CHECKED
-    against it rather than assumed from the shape of the name.
+    Existing tables are MERGED, never replaced: mne-bids writes the scans
+    table during conversion with a real ``acq_time`` read from the
+    recording, and a user's rows and columns are theirs. What the scan
+    inventory knows about times fills a recording whose sidecar has none.
     """
-    name = path.name
+    from .tables import plan_tables, times_from_inventory, write_tables
 
-    # OS junk and editor droppings, before anything else. A leading dot is
-    # not a BIDS name on any platform and never will be.
-    if name.startswith(".") or name in _OS_JUNK:
-        return False
-    if name.endswith(".tsv.gz") or name.endswith(".nii.gz"):
-        ext = ".tsv.gz" if name.endswith(".tsv.gz") else ".nii.gz"
-    else:
-        ext = path.suffix.lower()
-    if ext == ".nii.gz":
-        return True
-    if ext in _SCANS_COMPANION_EXTS or ext == ".tsv.gz":
-        return False
-    if any(token in name for token in _SCANS_SYSTEM_ENTITIES):
-        return False
-    # The BIDS suffix is the last underscore-delimited token that carries no
-    # hyphen; entity tokens all do. It has to BE a suffix the standard
-    # defines, or the file is not a recording whatever it looks like.
-    stem = name.split(".")[0]
-    for token in reversed(stem.split("_")):
-        if "-" not in token:
-            if token in _SCANS_COMPANION_SUFFIXES:
-                return False
-            return token in _schema_suffixes()
-    return False
-
-
-def _scans_rows_for(root: Path) -> list[dict[str, str]]:
-    """One row per recording under ``root``, in path order.
-
-    Walks by hand rather than with ``rglob`` so a folder-shaped recording
-    (CTF ``.ds``, EGI ``.mff``) is taken as a single entry and not descended
-    into.
-    """
-    rows: list[dict[str, str]] = []
-
-    def walk(folder: Path) -> None:
-        for entry in sorted(folder.iterdir(), key=lambda p: p.name):
-            if entry.is_dir():
-                if entry.suffix.lower() in _SCANS_DIR_EXTS:
-                    rows.append({
-                        "filename": entry.relative_to(root).as_posix(),
-                        "acq_time": _acq_time_for(entry),
-                    })
-                else:
-                    walk(entry)
-            elif entry.is_file() and _is_recording_file(entry):
-                rows.append({
-                    "filename": entry.relative_to(root).as_posix(),
-                    "acq_time": _acq_time_for(entry),
-                })
-
-    walk(root)
-    return rows
-
-
-def _acq_time_for(recording: Path) -> str:
-    """``acq_time`` from the recording's own sidecar, or ``"n/a"``.
-
-    Only the MRI sidecars carry an acquisition time we can read this way.
-    EEG and MEG get theirs from mne-bids, which reads ``meas_date`` off the
-    recording at conversion and writes it into the scans table; that value is
-    preserved by the merge rather than recomputed here, because the sidecar
-    does not hold it.
-    """
-    json_path = _matching_json(recording)
-    if not json_path.exists():
-        return _NA_VALUE
-    try:
-        meta = json.loads(json_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return _NA_VALUE
-    adt = meta.get("AcquisitionDateTime") or meta.get("AcquisitionTime")
-    return adt if isinstance(adt, str) and adt else _NA_VALUE
-
-
-def _refresh_scans_tsv(bids_root: Path, report: MetadataReport) -> None:
-    """Generate one ``*_scans.tsv`` per subject (or subject/session).
-
-    Lists EVERY recording, of every modality, not just the NIfTIs. The
-    previous version globbed ``*.nii*``, which had two consequences on any
-    dataset holding EEG, MEG, iEEG or ECAT PET. A subject with no NIfTI at all
-    produced no scans table, and a mixed session produced one that listed the
-    images and silently omitted the recordings beside them.
-
-    Worse, mne-bids WRITES this table during conversion, with a real
-    ``acq_time`` taken from the recording's ``meas_date``. Regenerating it
-    from the NIfTIs deleted those rows and the only acquisition times the
-    dataset had for its recordings. So the fresh rows are MERGED into what is
-    already there rather than replacing it: existing rows keep their values
-    and their extra columns (mne-bids adds ``source`` when asked), rows for
-    recordings that are new get appended, and nothing that was measured at
-    conversion time is thrown away.
-    """
-    from .preserve import merge_scans_table
-
-    for subj_dir in sorted(bids_root.glob("sub-*")):
-        if not subj_dir.is_dir():
-            continue
-        ses_dirs = [s for s in sorted(subj_dir.glob("ses-*")) if s.is_dir()]
-        roots = ses_dirs or [subj_dir]
-        for root in roots:
-            rows = _scans_rows_for(root)
-            if not rows:
-                continue
-            ses_part = f"_{root.name}" if root.name.startswith("ses-") else ""
-            out = root / f"{subj_dir.name}{ses_part}_scans.tsv"
-
-            existing: list[dict[str, str]] = []
-            if out.is_file():
-                try:
-                    existing = pd.read_csv(
-                        out, sep="\t", dtype=str, keep_default_na=False,
-                    ).to_dict("records")
-                except (OSError, ValueError) as exc:
-                    log.warning("could not read %s: %s", out, exc)
-            # Rows whose file is gone are dropped: a stale filename is an
-            # error the validator reports (SCANS_FILENAME_NOT_MATCH_DATASET),
-            # and after a rename the old name is exactly that.
-            present = {row["filename"] for row in rows}
-            existing = [r for r in existing if r.get("filename", "") in present]
-
-            fields, merged = merge_scans_table(existing, rows)
-            pd.DataFrame(merged, columns=fields).to_csv(
-                out, sep="\t", index=False,
-            )
-            report.files_written.append(out)
+    times = {}
+    if inventory_tsv is not None and Path(inventory_tsv).is_file():
+        try:
+            times = times_from_inventory(pd.read_csv(
+                inventory_tsv, sep="\t", dtype=str, keep_default_na=False))
+        except (OSError, ValueError) as exc:
+            log.warning("could not read times from %s: %s", inventory_tsv, exc)
+    report.files_written.extend(write_tables(plan_tables(bids_root, times=times)))
 
 
 # ---------------------------------------------------------------------------
@@ -1450,18 +1287,6 @@ def _infer_datatype_suffix(
             suffix = tok
             break
     return datatype, suffix
-
-
-# ---------------------------------------------------------------------------
-# Misc helpers
-# ---------------------------------------------------------------------------
-
-
-def _matching_json(image: Path) -> Path:
-    """Return the JSON sidecar path for a NIfTI image."""
-    if image.suffix == ".gz" and image.name.endswith(".nii.gz"):
-        return image.with_suffix("").with_suffix(".json")
-    return image.with_suffix(".json")
 
 
 __all__ = ["run_metadata"]

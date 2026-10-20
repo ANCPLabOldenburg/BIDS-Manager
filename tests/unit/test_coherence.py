@@ -230,7 +230,7 @@ class TestTheNewChecks:
         found = next(f for f in coherence.check(dataset)
                      if f.kind is Kind.ENTITY_WIDTH_SPLIT)
         assert not found.fixable
-        assert "would both become" in found.detail
+        assert "would both become" in found.no_repair, "said where the dialog shows it"
 
     def test_two_spellings_of_one_value(self, dataset):
         """In two SUBJECTS, not two files in one folder: macOS and Windows

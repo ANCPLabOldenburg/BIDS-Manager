@@ -2083,6 +2083,12 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
 
+    parser.add_argument(
+        "--anonymise", choices=("off", "recommended", "strict"), default="off",
+        help="Anonymise each converted dataset's metadata when the conversion is done "
+             "(see bidsmgr-anonymise). If you run bidsmgr-metadata afterwards, give it "
+             "--anonymise instead: it writes participants.tsv, which comes after.")
+
     add_log_arguments(parser)
     args = parser.parse_args(argv)
     # One version for the whole run, adopted before any schema question is
@@ -2136,7 +2142,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
         if args.raw_root is None and seen.state in ("missing", "partial"):
             print(f"warning: {sources.describe(seen, found.root)} Pass --raw-root "
                   "<where the folder is now>, or locate it in the GUI.", file=sys.stderr)
-        return run_convert(
+        rc = run_convert(
             version.inventory,
             bids_root.parent,
             dataset=bids_root.name,
@@ -2160,11 +2166,12 @@ def _main(argv: Optional[list[str]] = None) -> int:
             sourcedata_modalities=args.sourcedata_modalities,
             **log_keywords(args),
         )
+        return _anonymise_after(rc, bids_root.parent, [bids_root.name], args)
 
     if not args.tsv or not args.bids_parent:
         parser.error("provide tsv and bids_parent, or use --project <dataset>")
 
-    return run_convert(
+    rc = run_convert(
         Path(args.tsv),
         Path(args.bids_parent),
         dataset=args.dataset,
@@ -2188,6 +2195,31 @@ def _main(argv: Optional[list[str]] = None) -> int:
         sourcedata_modalities=args.sourcedata_modalities,
         **log_keywords(args),
     )
+    names = [args.dataset] if args.dataset else _dataset_names(Path(args.tsv))
+    return _anonymise_after(rc, Path(args.bids_parent), names, args)
+
+
+def _dataset_names(tsv: Path) -> list[str]:
+    try:
+        df = pd.read_csv(tsv, sep="\t", dtype=str, keep_default_na=False,
+                         usecols=lambda c: c == "dataset")
+    except (OSError, ValueError):
+        return []
+    return sorted({n for n in df.get("dataset", []) if n})
+
+
+def _anonymise_after(rc: int, parent: Path, names: list[str], args) -> int:
+    """``--anonymise``: each converted dataset, once the conversion is done."""
+    if rc != 0 or args.dry_run or getattr(args, "anonymise", "off") == "off":
+        return rc
+    from .metadata import _anonymise
+
+    failed = 0
+    for name in names:
+        root = parent / name
+        if (root / "dataset_description.json").is_file():
+            failed += _anonymise(root, args.anonymise)
+    return 1 if failed else rc
 
 
 if __name__ == "__main__":

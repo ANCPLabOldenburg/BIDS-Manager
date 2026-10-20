@@ -35,6 +35,12 @@ _JSON_ERROR_DETAIL = {
         'A BIDS JSON file must contain one object {...}, not a list or a bare value. '
         'Example: {"Name": "My dataset", "BIDSVersion": "1.11.1"}.',
     ),
+    # VENDORED CHANGE: a byte-order mark named as the reference names it.
+    "INVALID_JSON_ENCODING": (
+        "the file starts with a byte-order mark",
+        "JSON files must be UTF-8 without a byte-order mark. Re-save the file as "
+        "UTF-8 without BOM (some editors call it plain UTF-8).",
+    ),
     "INVALID_FILE_ENCODING": (
         "the file is not valid UTF-8 text",
         "Re-save the file using UTF-8 encoding (the encoding BIDS text files require).",

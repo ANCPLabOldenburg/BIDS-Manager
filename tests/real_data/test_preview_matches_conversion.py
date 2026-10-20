@@ -122,3 +122,61 @@ def test_the_users_answers_are_where_they_said(converted) -> None:
     assert description["License"] == "CC-BY-4.0" and "Authors" not in description, \
         "the citation file holds the authors"
     assert "Lovelace" in (root / "CITATION.cff").read_text()
+
+
+def _tables(converted):
+    from bidsmgr.converter.output_plan import approximate
+    from bidsmgr.metadata.tables import read_table
+
+    inv, root = converted
+    df, spec, features, options, plan = _plan(inv, root)
+    maybe = {f.path for f in plan.files if f.conditional}
+    out = []
+    for f in plan.files:
+        if not f.path.endswith(("_scans.tsv", "_sessions.tsv")):
+            continue
+        header, rows = read_table(root / f.path)
+        written = {r[header[0]]: r.get("acq_time", "") for r in rows}
+        said = dict(approximate(df, f, options, features, spec).rows)
+        out.append((f.path, said, written, maybe))
+    return out
+
+
+def test_the_scans_and_sessions_tables_row_for_row(converted) -> None:
+    """Every row the preview predicts is a row written: the preview asks the
+    metadata step's own rule. A file the plan marks conditional (the second
+    eye of an eye tracker) may also get its row."""
+    tables = _tables(converted)
+    assert any(path.endswith("_sessions.tsv") for path, *_ in tables), "sessions predicted"
+    wrong = []
+    for path, said, written, maybe in tables:
+        home = path.rsplit("/", 1)[0]
+        missing = set(said) - set(written)
+        extra = {n for n in set(written) - set(said) if f"{home}/{n}" not in maybe}
+        if missing or extra:
+            wrong.append(f"{path}: predicted, not written {sorted(missing)}; "
+                         f"written, not predicted {sorted(extra)}")
+    assert not wrong, "\n".join(wrong)
+
+
+def test_the_predicted_times_are_the_written_ones(converted) -> None:
+    """Within the second or two the preview's note allows (the scan's time
+    against the first volume's, which dcm2niix writes). The scan kept the
+    time of whichever DICOM file it read first, and a multi-volume DWI came
+    out a minute late; it keeps the earliest now (2026-10-19)."""
+    from datetime import datetime
+
+    from bidsmgr.converter.output_plan import UNKNOWN
+
+    def seconds(stamp: str) -> float:
+        return datetime.fromisoformat(stamp.rstrip("Z")).timestamp()
+
+    wrong = []
+    for path, said, written, _maybe in _tables(converted):
+        for name, when in said.items():
+            got = written.get(name, "")
+            if when == UNKNOWN or not got or got == "n/a":
+                continue
+            if abs(seconds(when) - seconds(got)) > 3:
+                wrong.append(f"{path}: {name} predicted {when}, written {got}")
+    assert not wrong, "\n".join(wrong)

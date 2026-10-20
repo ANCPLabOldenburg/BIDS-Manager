@@ -1291,8 +1291,9 @@ QFrame#about-footer {
 }
 
 /* What's new: shown once per release (gui/whats_new.py). The animation is
- * painted on the dialog's own background; the text sits beside it. */
-QDialog#whatsnew-dialog { background: $bg; }
+ * painted on the dialog's own background; the text sits beside it. The
+ * request for a GitHub star (gui/star_request.py) uses the same styles. */
+QDialog#whatsnew-dialog, QDialog#star-dialog { background: $bg; }
 QLabel#whatsnew-kicker {
     color: $dim;
     font-size: 11px;
@@ -1818,6 +1819,27 @@ QLabel#val-explanation { color: $muted; font-size: 11px; }
 
 /* Section heading inside a dialog (Fix ups). */
 QLabel#dlg-section-title { color: $text; font-weight: 600; }
+
+/* Anonymise metadata (gui/anonymise_dialog): a category is a card, its
+   purpose a small heading above it. An active card carries the accent on its
+   edge; one switched off steps back, its explanation muted. */
+QLabel#anon-purpose {
+    color: $dim;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    padding-top: 4px;
+}
+QFrame#anon-category {
+    background: $surface;
+    border: 1px solid $border;
+    border-radius: 8px;
+}
+QFrame#anon-category[on="true"] { border: 1px solid $accent_border; }
+QFrame#anon-category[on="false"] { background: transparent; }
+QFrame#anon-category[on="false"] QLabel#dlg-hint { color: $muted; }
+QCheckBox#anon-category-title { color: $text; font-weight: 600; }
+QScrollArea#anon-scroll, QWidget#anon-scroll-body { background: $surface; border: none; }
 
 /* A row the action does not apply to, in the bulk-edit candidate list. */
 QCheckBox#candidate-off { color: $muted; }

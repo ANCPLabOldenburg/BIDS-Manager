@@ -311,8 +311,7 @@ class SpectrumPresenter:
 
             ts = self.ctx.settings.traces
             dlg = LineStyleDialog(ts.line_width, ts.line_color or None,
-                                  allow_by_type=False, channel_types=(),
-                                  parent=self.viewer)
+                                  channel_types=(), parent=self.viewer)
             self.line_dialog = dlg
             dlg.exec()
             return True

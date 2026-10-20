@@ -26,7 +26,9 @@ class BIDSFile:
 
     @property
     def name(self) -> str:
-        return self.abspath.name
+        # VENDORED CHANGE (speed): from the POSIX relpath, not pathlib, which
+        # was 12 million property calls on a 1,500-file folder.
+        return self.relpath.rsplit("/", 1)[-1]
 
     @property
     def parent(self) -> str:
@@ -65,6 +67,10 @@ class FileTree:
         self._dirs: set[str] = set()
         # Files grouped by parent directory, built once for O(1) per-dir lookups.
         self._by_dir: dict[str, list[BIDSFile]] = {}
+        # Sorted per-folder lists, made once: the tree does not change after
+        # it is built, and these were sorted again on every lookup.
+        self._sorted: dict[str, list[BIDSFile]] = {}
+        self._sidecars: dict[str, list[BIDSFile]] = {}
         if self.root.is_dir():
             for path in self.root.rglob("*"):
                 # Include regular files and symlinks: an unfetched git-annex file
@@ -124,11 +130,19 @@ class FileTree:
 
     def files_in(self, dir_relpath: str) -> list[BIDSFile]:
         """Files directly inside ``dir_relpath`` (``""`` is the root), sorted."""
-        return sorted(self._by_dir.get(dir_relpath, []), key=lambda f: f.relpath)
+        found = self._sorted.get(dir_relpath)
+        if found is None:
+            found = self._sorted[dir_relpath] = sorted(
+                self._by_dir.get(dir_relpath, []), key=lambda f: f.relpath)
+        return list(found)
 
     def json_sidecars_in(self, dir_relpath: str) -> list[BIDSFile]:
         """The ``.json`` files directly inside ``dir_relpath`` (``""`` is root)."""
-        return [f for f in self.files_in(dir_relpath) if f.name.endswith(".json")]
+        found = self._sidecars.get(dir_relpath)
+        if found is None:
+            found = self._sidecars[dir_relpath] = [
+                f for f in self.files_in(dir_relpath) if f.relpath.endswith(".json")]
+        return list(found)
 
     def ancestor_dirs(self, relpath: str) -> list[str]:
         """Directory paths from a file's own directory up to the root.

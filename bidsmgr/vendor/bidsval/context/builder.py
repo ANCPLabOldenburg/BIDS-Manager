@@ -98,6 +98,7 @@ class ContextBuilder:
         datatype = self._datatype_of(bids_file.relpath)
         is_json = extension == ".json"
         is_tsv = extension in (".tsv", ".tsv.gz")
+        sidecar = merged_sidecar(self.schema, self.tree, bids_file)
 
         json_data, json_error = load_json_checked(bids_file) if is_json else ({}, None)
 
@@ -110,13 +111,13 @@ class ContextBuilder:
             "suffix": suffix,
             "extension": extension,
             "modality": introspect.modality_for(self.schema, datatype),
-            "sidecar": merged_sidecar(self.schema, self.tree, bids_file),
+            "sidecar": sidecar,
             "json": json_data,
             # Whether this file (if it is JSON) parsed as a JSON object. The rule
             # engine skips field checks on a malformed JSON; integrity reports why.
             "__json_ok__": json_error is None,
             "__json_error__": json_error,
-            "columns": self._load_columns(bids_file, extension) if is_tsv else {},
+            "columns": self._load_columns(bids_file, extension, sidecar) if is_tsv else {},
             "nifti_header": (
                 load_nifti_header(bids_file)
                 if self.read_headers and extension.startswith(".nii")
@@ -141,11 +142,20 @@ class ContextBuilder:
         parent = parts[-2] if len(parts) >= 2 else ""
         return parent if parent in self._datatypes else ""
 
-    def _load_columns(self, bids_file: BIDSFile, extension: str) -> dict[str, list[str]]:
+    def _load_columns(self, bids_file: BIDSFile, extension: str,
+                      sidecar: Any = None) -> dict[str, list[str]]:
         """Read a TSV's columns, in full for the small tables that feed
         full-set-equality checks (participants / scans), capped otherwise."""
         name = bids_file.name
         uncapped = name == "participants.tsv" or name.endswith("_scans.tsv")
+        if extension == ".tsv.gz":
+            # VENDORED CHANGE. Headerless: the sidecar's Columns names them.
+            # Without it there is nothing to name them by, and the rows are
+            # not read.
+            names = sidecar.get("Columns") if isinstance(sidecar, dict) else None
+            if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+                return {}
+            return load_columns(bids_file, self.max_rows, names=names)
         return load_columns(bids_file, -1 if uncapped else self.max_rows)
 
     def _make_exists_resolver(self, bids_file: BIDSFile, short_entities: dict[str, str]):
@@ -161,7 +171,15 @@ class ContextBuilder:
             if not isinstance(item, str):
                 return False
             if rule == "bids-uri":
-                return item.startswith("bids:")
+                # VENDORED CHANGE: the reference validator answers true for any
+                # "bids:" string ("XXX To implement"), so an IntendedFor naming
+                # a file that is not there passed both. A URI into THIS dataset
+                # (``bids::path``) is checked; one naming another dataset
+                # (``bids:raw:path``) cannot be from here and still passes.
+                if not item.startswith("bids:"):
+                    return False
+                name, _sep, path = item[len("bids:"):].partition(":")
+                return bool(name) or self.tree.exists(path.lstrip("/"))
             if rule == "file":
                 target = f"{parent}/{item}" if parent else item
             elif rule == "subject":

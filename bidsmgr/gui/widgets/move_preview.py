@@ -308,6 +308,8 @@ def delete_extras(plan) -> list[tuple[str, str]]:
         out.append((drop.rel, what))
     for label in getattr(plan, "participants", ()):
         out.append(("participants.tsv", f"row for {label} removed"))
+    for table, session in getattr(plan, "session_rows", ()):
+        out.append((table.name, f"row for {session} removed"))
     for sidecar in getattr(plan, "orphaned_sidecars", ()):
         out.append((sidecar.name, "describes nothing now, so it is removed"))
     for folder in getattr(plan, "emptied", ()):

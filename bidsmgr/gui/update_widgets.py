@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 from typing import Optional
 
 from PyQt6.QtCore import QObject, QThread, QTimer, Qt, QUrl, pyqtSignal
@@ -50,20 +51,18 @@ log = logging.getLogger(__name__)
 
 
 class _LatestVersionWorker(QObject):
-    """Fetches the latest PyPI version off the GUI thread.
+    """Fetches what PyPI offers off the GUI thread.
 
-    Emits :pyattr:`finished` with the latest version string or an empty
-    string on failure. Never raises into the event loop.
+    Emits :pyattr:`finished` with an :class:`updater.Latest`, or ``None``
+    on failure. Never raises into the event loop.
     """
 
-    finished = pyqtSignal(str)
+    finished = pyqtSignal(object)
 
     def run(self) -> None:
-        latest = ""
+        latest = None
         try:
-            value = updater.fetch_latest_pypi()
-            if value:
-                latest = value
+            latest = updater.fetch_latest()
         except Exception as exc:
             log.debug("update check worker failed: %s", exc)
         self.finished.emit(latest)
@@ -86,7 +85,7 @@ class _UpdateChecker(QObject):
     QMessageBox.exec().
     """
 
-    finished = pyqtSignal(str)  # latest version, or "" on any failure
+    finished = pyqtSignal(object)  # updater.Latest, or None on any failure
 
     def __init__(self, parent: QObject) -> None:
         super().__init__(parent)
@@ -111,7 +110,7 @@ class _UpdateChecker(QObject):
     def start(self) -> None:
         self._thread.start()
 
-    def _on_worker_done(self, latest: str) -> None:
+    def _on_worker_done(self, latest) -> None:
         # Just re-emit. Do not deleteLater here — see the comment in
         # __init__ about the QThread destruction race.
         self.finished.emit(latest)
@@ -169,12 +168,12 @@ def check_for_updates_interactive(
         button.setEnabled(False)
     QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 
-    def _on_done(latest: str) -> None:
+    def _on_done(latest: Optional[updater.Latest]) -> None:
         QApplication.restoreOverrideCursor()
         if button is not None:
             button.setEnabled(True)
 
-        if not latest:
+        if latest is None:
             QMessageBox.warning(
                 parent, "Check updates",
                 "Could not reach PyPI to check for updates.\n\n"
@@ -183,14 +182,19 @@ def check_for_updates_interactive(
             return
 
         current = updater.installed_version()
-        if not updater.is_newer(latest, current):
-            QMessageBox.information(
-                parent, "Check updates",
-                f"You are up to date.\n\nInstalled: {current}\nPyPI: {latest}",
-            )
+        plan = _plan(latest, current)
+        if plan is None:
+            if latest.needs_python and updater.is_newer(latest.newest, current):
+                QMessageBox.information(parent, "Check updates",
+                                        python_notice(latest, current))
+            else:
+                QMessageBox.information(
+                    parent, "Check updates",
+                    f"You are up to date.\n\nInstalled: {current}\nPyPI: {latest.newest}",
+                )
             return
 
-        _prompt_and_launch_update(parent, current, latest)
+        _prompt_and_launch_update(parent, current, plan)
 
     checker = _UpdateChecker(parent)
     checker.finished.connect(_on_done)
@@ -242,17 +246,41 @@ def run_startup_check(window: QWidget, delay_ms: int = 2500) -> None:
     QTimer.singleShot(max(0, delay_ms), _start_thread)
 
 
-def _on_startup_check_done(window: QWidget, latest: str) -> None:
-    """Decide whether to nag the user about an available update."""
-    if not latest:
+def _on_startup_check_done(window: QWidget, latest: Optional[updater.Latest]) -> None:
+    """Decide whether to nag the user about an available update.
+
+    Silent when there is nothing this installation can install, including
+    a newer release that needs a Python it does not have and cannot move
+    to: asking at every start about an update that cannot happen helps
+    nobody. "Check updates" explains that case.
+    """
+    if latest is None:
         # Silent on any failure: no network, no PyPI, etc.
         return
 
     current = updater.installed_version()
-    if not updater.is_newer(latest, current):
+    plan = _plan(latest, current)
+    if plan is None:
         return
 
-    _prompt_and_launch_update(window, current, latest)
+    _prompt_and_launch_update(window, current, plan)
+
+
+def _plan(latest: updater.Latest, current: str) -> Optional[updater.UpdatePlan]:
+    return updater.plan_update(
+        latest, current, can_move_python=updater.find_installation() is not None)
+
+
+def python_notice(latest: updater.Latest, current: str) -> str:
+    """Why the newest release is not offered: it needs a newer Python than
+    this installation has, and only an installer installation can move."""
+    return (
+        f"You have the newest release this installation can run ({current}).\n\n"
+        f"BIDS Manager {latest.newest} needs Python {latest.needs_python} or newer, "
+        f"and this installation runs Python {platform.python_version()}. To use it, "
+        "install BIDS Manager with the installer from the documentation, or in an "
+        f"environment with Python {latest.needs_python} or newer."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +312,7 @@ def release_notes_url(version: str) -> str:
 def _prompt_and_launch_update(
     parent: QWidget,
     current: str,
-    latest: str,
+    plan: updater.UpdatePlan,
 ) -> None:
     """Confirmation dialog → detached helper → GUI quit.
 
@@ -296,7 +324,18 @@ def _prompt_and_launch_update(
     The default button is ``No`` so an accidental Enter / Space while the main
     window has focus cannot trigger a self-terminating update. The dialog
     reopens on the next launch if the user is still on an older version.
+
+    When the release needs a newer Python, the dialog says the update moves
+    the installation to it, which takes longer than an ordinary update.
     """
+    latest = plan.version
+    move = ""
+    if plan.move_to_python:
+        move = (
+            f"BIDS Manager {latest} needs Python {plan.move_to_python} or newer, "
+            "so the update also moves this installation to it. That takes a "
+            "few minutes longer. Your settings and datasets are not touched.\n\n"
+        )
     while True:
         msg = QMessageBox(parent)
         msg.setWindowTitle("Update available")
@@ -305,6 +344,7 @@ def _prompt_and_launch_update(
             f"A newer bids-manager release is available.\n\n"
             f"Installed: {current}\n"
             f"PyPI:        {latest}\n\n"
+            f"{move}"
             "Update now? The GUI will close, install the update, and reopen."
         )
         msg.setInformativeText(
@@ -324,18 +364,19 @@ def _prompt_and_launch_update(
             QDesktopServices.openUrl(QUrl(release_notes_url(latest)))
             continue
         if clicked is btn_yes:
-            _launch_helper_and_quit(parent)
+            _launch_helper_and_quit(parent, plan.move_to_python)
         return
 
 
-def _launch_helper_and_quit(parent: QWidget) -> None:
+def _launch_helper_and_quit(parent: QWidget, move_to_python: str = "") -> None:
     """Spawn the update helper, then close the application cleanly."""
-    ok = updater.launch_update_helper(restart=True)
+    ok = updater.launch_update_helper(restart=True, move_to_python=move_to_python)
     if not ok:
         QMessageBox.critical(
             parent, "Update failed",
-            "Could not start the update helper. Please try again or "
-            "run `pip install --upgrade bids-manager` manually.",
+            "Could not start the update helper. Please try again, run the "
+            "BIDS Manager installer again, or run "
+            "`pip install --upgrade bids-manager`.",
         )
         return
     # Give the helper a moment to actually start before we exit.
@@ -345,6 +386,7 @@ def _launch_helper_and_quit(parent: QWidget) -> None:
 __all__ = [
     "attach_update_widgets",
     "check_for_updates_interactive",
+    "python_notice",
     "release_notes_url",
     "run_startup_check",
 ]

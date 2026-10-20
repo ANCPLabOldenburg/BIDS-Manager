@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bids-manager"
-version = "1.5.0"
+version = "1.5.1"
 description = "Schema-driven BIDS converter, curator, and editor (re-imagination of BIDS-Manager v0.2.5)"
 readme = "README.md"
 license = "MIT"
@@ -164,6 +164,14 @@ dependencies = [
     # publishes a 3.14 wheel.
     "niimath>=1.0.20250526; python_version < '3.14'",
     "brainchop>=0.2.5; python_version < '3.14'",
+    # brainchop accepts any tinygrad, and tinygrad 0.12 and later (Python
+    # 3.11 and newer only) changed how it runs on the processor: a Mac app
+    # started under Rosetta then compiles with an Intel clang that refuses
+    # "-mcpu=native", and skull stripping failed from the app while it worked
+    # from a Terminal (2026-10-16, tinygrad 0.14). 0.11.0 is the version every
+    # skull strip here was measured with, and it is what Python 3.10 gets
+    # anyway; checked on 3.10, 3.12 and 3.13, from a Terminal and from an app.
+    "tinygrad>=0.11.0,<=0.11.0; python_version < '3.14'",
 
     # EyeLink eye tracking (.edf). eyelinkio is one pure-Python wheel that
     # ships SR Research's EDF reader for macOS (x86_64 and arm64), Linux
@@ -208,6 +216,7 @@ bidsmgr-rebuild   = "bidsmgr.cli.rebuild:main"
 bidsmgr-metadata  = "bidsmgr.cli.metadata:main"
 bidsmgr-validate  = "bidsmgr.cli.validate:main"
 bidsmgr-deface    = "bidsmgr.cli.deface:main"
+bidsmgr-anonymise = "bidsmgr.cli.anonymise:main"
 bidsmgr-view      = "bidsmgr.cli.view:main"
 bidsmgr-qc        = "bidsmgr.cli.qc:main"
 

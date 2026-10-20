@@ -730,6 +730,66 @@ def test_a_dicom_row_previews_its_series(qtbot, tmp_path) -> None:
     assert panel.preview_button.isEnabled(), "ready for another"
 
 
+def test_a_preview_opens_no_window_but_its_own(qtbot, qapp, tmp_path) -> None:
+    """Every window that appears takes the focus, and on macOS the main window
+    comes to the front when one goes, over the preview that had just opened:
+    the preview was left behind the main window (2026-10-19). Three widgets
+    were shown before they had a parent, which makes them windows for a
+    moment: the preview's spinner, Properties' spinner and the viewer's
+    side tab."""
+    pytest.importorskip("pydicom")
+    from PyQt6.QtCore import QEvent, QObject
+    from tests.fixtures.dicoms import write_mr_series
+
+    class Spy(QObject):
+        def __init__(self):
+            super().__init__()
+            self.shown = []
+
+        def eventFilter(self, obj, event):  # noqa: N802 - Qt signature
+            if event.type() == QEvent.Type.Show and obj.isWidgetType() and obj.isWindow():
+                self.shown.append(type(obj).__name__)
+            return False
+
+    write_mr_series(tmp_path / "raw" / "s1", "1.2.3.79", description="rest")
+    panel, _m = _build_panel_with_model(
+        qtbot, _func_row(series_uid="1.2.3.79", source_folder="s1"))
+    panel.set_sources(_sources_for(tmp_path / "raw", "1.2.3.79"))
+    spy = Spy()
+    qapp.installEventFilter(spy)
+    try:
+        panel.preview_button.click()
+        dlg = panel.preview_dialog
+        qtbot.addWidget(dlg)
+        qtbot.waitUntil(lambda: not dlg.is_pending(), timeout=60_000)
+        qtbot.waitUntil(lambda: dlg.viewer.is_loaded(), timeout=20_000)
+    finally:
+        qapp.removeEventFilter(spy)
+    assert spy.shown == ["PreviewDialog"], f"windows that appeared: {spy.shown}"
+    dlg.close()
+
+
+def test_the_preview_window_is_opengl_ready_before_it_is_shown(qtbot, monkeypatch) -> None:
+    """Its viewer arrives after it is on screen, and the first OpenGL view
+    added to a window already shown makes Qt rebuild the window; on macOS
+    the main window came to the front meanwhile. So when the viewer would
+    draw with OpenGL, the window holds a hidden OpenGL view from the start."""
+    import bidsmgr.gui.viz.canvases.render as render
+    from bidsmgr.gui.preview_dialog import PreviewDialog
+
+    monkeypatch.setattr(render, "gpu_available", lambda: True)
+    dlg = PreviewDialog("rest", None)
+    qtbot.addWidget(dlg)
+    assert dlg._gl_ready.parent() is dlg
+    dlg.show()
+    assert not dlg._gl_ready.isVisible(), "it never draws"
+
+    monkeypatch.setattr(render, "gpu_available", lambda: False)
+    plain = PreviewDialog("rest", None)
+    qtbot.addWidget(plain)
+    assert not hasattr(plain, "_gl_ready"), "no OpenGL without a GPU"
+
+
 def test_a_preview_that_fails_says_so_in_its_window(qtbot, tmp_path, monkeypatch) -> None:
     pytest.importorskip("pydicom")
     from tests.fixtures.dicoms import write_mr_series

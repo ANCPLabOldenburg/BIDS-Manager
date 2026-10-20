@@ -23,6 +23,8 @@ Center and right panes remain placeholders for Steps 4-6.
 
 from __future__ import annotations
 
+import os
+
 import logging
 from pathlib import Path
 from typing import Optional
@@ -71,6 +73,16 @@ from .widgets.splitter import Splitter
 log = logging.getLogger(__name__)
 
 
+def ignore_message(choice, added: list, removed: list) -> str:
+    """What an ignore choice did, for the status bar."""
+    if choice.ignores:
+        return f"Ignored in validation: {', '.join(added)}. Undo takes it back."
+    n = choice.files
+    return (f"Validated again: {n} file" + ("" if n == 1 else "s")
+            + (f" ({', '.join(removed)} removed)" if removed else "")
+            + ". Undo takes it back.")
+
+
 class EditorPanel(QWidget):
     """Post-convert BIDS editor (Editor pill in the top header).
 
@@ -91,6 +103,9 @@ class EditorPanel(QWidget):
         self._project_root: Optional[Path] = None
         #: The folder on screen is open for viewing only.
         self._view_only = False
+        #: The file last opened from the tree: shown again after an undo or
+        #: redo has changed the dataset under it.
+        self._open_path: Optional[Path] = None
 
         self._report: Optional[ValidationReport] = None
         self._report_worker: Optional[ReportWorker] = None
@@ -132,6 +147,10 @@ class EditorPanel(QWidget):
         self._tree_pane.strip_requested.connect(self._on_strip)
         self._tree_pane.compare_requested.connect(self._on_compare_images)
         self._tree_pane.links_requested.connect(self._on_links)
+        self._tree_pane.anonymise_requested.connect(self._on_anonymise)
+        self._tree_pane.ignore_requested.connect(self._on_ignore)
+        self._tree_pane.unignore_requested.connect(self._on_unignore)
+        self._tree_pane.ignore_list_requested.connect(self._on_ignore_list)
         self._tree_pane.overlay_requested.connect(self._on_overlay_requested)
         self._tree_pane.tree_changed.connect(self._on_tree_changed)
         self._tree_pane.overlay_base = self._overlay_base
@@ -196,10 +215,17 @@ class EditorPanel(QWidget):
         # Threaded panes drive the toolbar busy spinner + status bar.
         self._tsv_viewer.loading_changed.connect(self._on_pane_loading)
         self._tsv_viewer.status_message.connect(self.log_message)
-        # Undo/redo toolbar buttons follow the active editable pane.
+        # Undo/redo toolbar buttons follow the active editable pane and the
+        # dataset's history (a save, an operation, a change seen on disk).
         self._sidecar_form.history_changed.connect(self._sync_undo_redo)
         self._tsv_viewer.history_changed.connect(self._sync_undo_redo)
         self._center_stack.currentChanged.connect(self._sync_undo_redo)
+        self._tree_pane.tree_changed.connect(self._sync_undo_redo)
+        for pane in (self._sidecar_form, self._tsv_viewer, self._text_pane,
+                     self._citation_pane):
+            pane.file_saved.connect(self._sync_undo_redo)
+        self._bidsignore_pane.changed.connect(
+            lambda message: self._after_ignore_change(message, from_pane=True))
         self._validation_pane = ValidationPane()
         self._validation_pane.fix_requested.connect(self._on_fix_requested)
         self._validation_pane.fix_group_requested.connect(
@@ -305,7 +331,7 @@ class EditorPanel(QWidget):
         schema, max_rows, flag_todos = self._validation_engine_opts()
         worker = FileReportWorker(
             root, target, schema=schema, max_rows=max_rows,
-            flag_todos=flag_todos, parent=self,
+            flag_todos=flag_todos, strict=self._strict_btn.isChecked(), parent=self,
         )
         self._wire_partial_worker(worker)
         self._partial_worker = worker
@@ -327,7 +353,7 @@ class EditorPanel(QWidget):
         schema, max_rows, flag_todos = self._validation_engine_opts()
         worker = FolderReportWorker(
             root, target, schema=schema, max_rows=max_rows,
-            flag_todos=flag_todos, parent=self,
+            flag_todos=flag_todos, strict=self._strict_btn.isChecked(), parent=self,
         )
         self._wire_partial_worker(worker)
         self._partial_worker = worker
@@ -363,13 +389,16 @@ class EditorPanel(QWidget):
 
         lay.addWidget(VSep())
 
-        # Undo / Redo for in-memory edits to the active center pane (JSON
-        # sidecar + TSV table). They delegate to whichever editable pane is
-        # showing; disabled when nothing is undoable (or a NIfTI is shown).
+        # Undo / Redo: the open file's unsaved edits first, one at a time,
+        # then the dataset's history, where every change is ONE step however
+        # many files it touched (a saved field, a rename of a subject, a fix
+        # applied everywhere, a defacing run). Labelled with what they would
+        # do; Cmd/Ctrl+Z anywhere in the Editor, a field being typed in
+        # keeping its own undo.
         self._undo_btn = QPushButton("  Undo")
         self._undo_btn.setObjectName("tb-btn-ghost")
         icons.apply_button(self._undo_btn, "undo")
-        self._undo_btn.setToolTip("Undo the last edit (JSON / TSV)")
+        self._undo_btn.setToolTip("Nothing to undo")
         self._undo_btn.setEnabled(False)
         self._undo_btn.clicked.connect(self._on_editor_undo)
         lay.addWidget(self._undo_btn)
@@ -377,10 +406,25 @@ class EditorPanel(QWidget):
         self._redo_btn = QPushButton("  Redo")
         self._redo_btn.setObjectName("tb-btn-ghost")
         icons.apply_button(self._redo_btn, "redo")
-        self._redo_btn.setToolTip("Redo the last undone edit")
+        self._redo_btn.setToolTip("Nothing to redo")
         self._redo_btn.setEnabled(False)
         self._redo_btn.clicked.connect(self._on_editor_redo)
         lay.addWidget(self._redo_btn)
+        # Right-click either one for the whole history, like a browser's
+        # back button: every step newest first; picking one goes back (or
+        # forward) to it.
+        for which, btn in (("undo", self._undo_btn), ("redo", self._redo_btn)):
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, w=which, b=btn: self._show_history_menu(w, b.mapToGlobal(pos)))
+        from PyQt6.QtGui import QKeySequence, QShortcut
+
+        for sequence, slot in ((QKeySequence.StandardKey.Undo, self._on_editor_undo),
+                               (QKeySequence.StandardKey.Redo, self._on_editor_redo)):
+            shortcut = QShortcut(self)
+            shortcut.setKeys(sequence)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(slot)
 
         lay.addWidget(VSep())
 
@@ -510,6 +554,16 @@ class EditorPanel(QWidget):
         )
         self._coherence_action.triggered.connect(self._on_coherence)
 
+        self._tables_action = self._tools_menu.addAction("Scans and sessions tables...")
+        self._tables_action.setToolTip(
+            "Write the *_scans.tsv of each session (every recording, with when it "
+            "was acquired) and the *_sessions.tsv of each subject with sessions. "
+            "For a dataset that has none, or whose tables have fallen behind. "
+            "Tables already there are kept and only added to. Shown before "
+            "anything is written; one Undo."
+        )
+        self._tables_action.triggered.connect(self._on_tables)
+
         self._links_action = self._tools_menu.addAction(
             "References (IntendedFor, Sources...)..."
         )
@@ -529,6 +583,14 @@ class EditorPanel(QWidget):
             "unanswered."
         )
         self._fixups_action.triggered.connect(self._on_fixups)
+
+        self._ignore_action = self._tools_menu.addAction("Ignored files...")
+        self._ignore_action.setToolTip(
+            "What validation leaves out (.bidsignore): every pattern with the "
+            "files it hides, and the dataset's files to pick from. Right-click "
+            "a file or folder in the tree to ignore it, or to stop."
+        )
+        self._ignore_action.triggered.connect(self._on_ignore_list)
 
         menu_section(self._tools_menu, "Names and structure")
 
@@ -624,6 +686,15 @@ class EditorPanel(QWidget):
             "operation; this works however many edits came afterwards."
         )
         self._deface_revert_action.triggered.connect(self._on_deface_revert)
+
+        self._anonymise_action = self._tools_menu.addAction("Anonymise metadata...")
+        self._anonymise_action.setToolTip(
+            "Remove what identifies a participant from the metadata of every kind "
+            "of file: dates shifted per participant, names and IDs removed, UIDs "
+            "pseudonymised, recording headers and photos cleaned. Every change is "
+            "shown first; one Undo."
+        )
+        self._anonymise_action.triggered.connect(self._on_anonymise)
 
         menu_section(self._tools_menu, "Remove")
 
@@ -909,9 +980,9 @@ class EditorPanel(QWidget):
         current = self._sidecar_form.current_file()
         if current is not None:
             self._sidecar_form.set_file(current, self.current_root(), report)
-        # The validation panel binds against the in-memory report.
-        self._validation_pane.set_report(report)
-        self._validation_pane.set_current_file(current, self.current_root())
+        # The validation panel binds against the in-memory report, and the
+        # file in focus, in ONE render (two setters rendered it twice).
+        self._validation_pane.set_report_and_file(report, current, self.current_root())
         self.log_message.emit(
             f"Validation done — {report.counts.get('ok', 0)} ok, "
             f"{report.counts.get('warn', 0)} warn, "
@@ -947,22 +1018,27 @@ class EditorPanel(QWidget):
         # Ensure we have a report to merge into.
         if self._report is None:
             self._report = ValidationReport(bids_root=self.current_root())
-        existing_by_path = {fv.path: i for i, fv in enumerate(self._report.files)}
+        from ..editor import report_index
+
+        report = self._report
+        existing_by_path = {fv.path: i for i, fv in enumerate(report.files)}
         for fv in verdicts:
             if fv.path in existing_by_path:
-                self._report.files[existing_by_path[fv.path]] = fv
+                old = report.files[existing_by_path[fv.path]]
+                self._adjust_counts(report, old, -1)
+                report.files[existing_by_path[fv.path]] = fv
             else:
-                existing_by_path[fv.path] = len(self._report.files)
-                self._report.files.append(fv)
-        # Re-rollup severity + counts (cheap to recompute).
-        self._recompute_report_summary(self._report)
-        # Refresh the UI.
-        self._stamp_tree_badges(self._report)
-        self._update_chips(self._report)
-        self._validation_pane.set_report(self._report)
-        self._validation_pane.set_current_file(
-            self._sidecar_form.current_file(), self.current_root(),
-        )
+                existing_by_path[fv.path] = len(report.files)
+                report.files.append(fv)
+            self._adjust_counts(report, fv, +1)
+        report_index.forget(report)
+        # Refresh the UI: the merged files' badges only, and the folders above.
+        root = self.current_root()
+        if root is not None:
+            self._tree_pane.update_badges(*self._badge_maps(verdicts, root))
+        self._update_chips(report)
+        self._validation_pane.set_report_and_file(
+            report, self._sidecar_form.current_file(), self.current_root())
         # Sidecar pane re-binds against the now-fresh verdict.
         current = self._sidecar_form.current_file()
         if current is not None:
@@ -1017,28 +1093,26 @@ class EditorPanel(QWidget):
         icons.apply_button(self._validate_folder_btn, "folder_check")
 
     @staticmethod
-    def _recompute_report_summary(report: ValidationReport) -> None:
-        """Reset ``severity`` and ``counts`` after files were mutated.
+    def _adjust_counts(report: ValidationReport, verdict: FileVerdict, sign: int) -> None:
+        """Take one file's findings out of the counts (``sign`` -1) or put
+        them in (+1), and the severity from the counts.
 
-        Counts are PER-FINDING (every error/warning issue), matching the
-        adapter + bidsval; ``ok`` is the number of clean files.
+        By difference, because merging one re-validated file used to recount
+        every finding in the report (8.3 s on 287,000 findings). The counts
+        are per finding and include the dataset and folder findings, so the
+        severity follows from them alone.
         """
-        all_issues = [i for i in report.dataset_issues if not i.mirrored]
-        for issues in report.folder_issues.values():
-            all_issues.extend(i for i in issues if not i.mirrored)
-        for f in report.files:
-            all_issues.extend(i for i in f.issues if not i.mirrored)
-        report.counts = {
-            "ok": sum(1 for f in report.files if f.severity is Severity.OK),
-            "warn": sum(1 for i in all_issues if i.severity is Severity.WARN),
-            "err": sum(1 for i in all_issues if i.severity is Severity.ERR),
-        }
-        if any(i.severity is Severity.ERR for i in all_issues):
-            report.severity = Severity.ERR
-        elif any(i.severity is Severity.WARN for i in all_issues):
-            report.severity = Severity.WARN
-        else:
-            report.severity = Severity.OK
+        counts = dict(report.counts)
+        issues = [i for i in verdict.issues if not i.mirrored]
+        counts["err"] = counts.get("err", 0) + sign * sum(
+            1 for i in issues if i.severity is Severity.ERR)
+        counts["warn"] = counts.get("warn", 0) + sign * sum(
+            1 for i in issues if i.severity is Severity.WARN)
+        if verdict.severity is Severity.OK:
+            counts["ok"] = counts.get("ok", 0) + sign
+        report.counts = {k: max(0, v) for k, v in counts.items()}
+        report.severity = (Severity.ERR if report.counts.get("err") else
+                           Severity.WARN if report.counts.get("warn") else Severity.OK)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1054,34 +1128,39 @@ class EditorPanel(QWidget):
         root = self.current_root()
         if root is None:
             return
-        allowed = self._allowed_severities()
-        severities: dict[Path, str] = {}
-        counts: dict[Path, tuple[int, int]] = {}
-        for fv in report.files:
-            # Badge = worst ALLOWED issue on the file; clean / filtered-out
-            # files get the green "ok" dot. So "errors only" leaves only error
-            # files red and everything else green.
-            issues = [i for i in fv.issues if i.severity in allowed]
-            # Mirrored findings are the same finding shown on the editable
-            # sidecar as well as on the data file. Counting both would double
-            # every number in the tree.
-            countable = [
-                i for i in issues if not getattr(i, "mirrored", False)
-            ]
-            n_err = sum(1 for i in countable if i.severity is Severity.ERR)
-            n_warn = sum(1 for i in countable if i.severity is Severity.WARN)
-            if any(i.severity is Severity.ERR for i in issues):
-                value = "err"
-            elif any(i.severity is Severity.WARN for i in issues):
-                value = "warn"
-            else:
-                value = "ok"
-            absolute = (root / fv.path).resolve() if not fv.path.is_absolute() \
-                else fv.path
-            severities[absolute] = value
-            if n_err or n_warn:
-                counts[absolute] = (n_err, n_warn)
+        severities, counts = self._badge_maps(report.files, root)
         self._tree_pane.set_badges(severities, counts)
+
+    def _badge_maps(self, verdicts, root: Path) -> tuple[dict, dict]:
+        """``({path: badge}, {path: (errors, warnings)})`` for ``verdicts``."""
+        allowed = self._allowed_severities()
+        allow_err, allow_warn = Severity.ERR in allowed, Severity.WARN in allowed
+        severities: dict[str, str] = {}
+        counts: dict[str, tuple[int, int]] = {}
+        # Joined as strings, not resolved: the tree maps its root's spelling
+        # once (``BidsTreePane._key``). A resolve per file was 4.4 s on a
+        # 21,663-file report, and three passes over each file's findings
+        # most of what was left.
+        base = str(root) + os.sep
+        for fv in verdicts:
+            # Badge = worst ALLOWED issue on the file; clean / filtered-out
+            # files get the green "ok" dot. Mirrored findings (the same
+            # finding shown on the editable sidecar as well) colour the badge
+            # but are not counted, or every number in the tree would double.
+            worst = n_err = n_warn = 0
+            for issue in fv.issues:
+                if issue.severity is Severity.ERR and allow_err:
+                    worst = 2
+                    n_err += not issue.mirrored
+                elif issue.severity is Severity.WARN and allow_warn:
+                    worst = max(worst, 1)
+                    n_warn += not issue.mirrored
+            path = fv.path
+            key = str(path) if path.is_absolute() else base + str(path)
+            severities[key] = ("ok", "warn", "err")[worst]
+            if n_err or n_warn:
+                counts[key] = (n_err, n_warn)
+        return severities, counts
 
     def _update_chips(self, report: ValidationReport) -> None:
         counts = report.counts
@@ -1133,6 +1212,7 @@ class EditorPanel(QWidget):
         none keeps a stale file (the MRS pane used to, after any selection
         but a NIfTI).
         """
+        self._open_path = Path(path)
         root = self.current_root()
         if path.is_dir():
             if is_recording_path(path):
@@ -1426,6 +1506,55 @@ class EditorPanel(QWidget):
         if self._report is not None:
             self.start_dataset_validation()
 
+    # -- what validation ignores (.bidsignore) ----------------------------
+
+    def _on_ignore(self, choice) -> None:
+        """Ignore in validation (the tree's right-click): one step of the
+        history, written at once, the dataset validated again."""
+        self._apply_ignore_choice(choice)
+
+    def _on_unignore(self, choice) -> None:
+        """Stop ignoring: the lines removed and the exceptions added in ONE
+        step, however many files were picked."""
+        self._apply_ignore_choice(choice)
+
+    def _apply_ignore_choice(self, choice) -> None:
+        from ..editor import bidsignore as bi
+
+        root = self.current_root()
+        if root is None or self._tree_pane.read_only:
+            return
+        added, removed = bi.apply_choice(root, choice)
+        if not (added or removed):
+            self._after_ignore_change("Nothing to change in .bidsignore.", changed=False)
+            return
+        self._after_ignore_change(ignore_message(choice, added, removed))
+
+    def _after_ignore_change(self, message: str, *, changed: bool = True,
+                             from_pane: bool = False) -> None:
+        """The tree dims what is now ignored, the list recounts (the list
+        recounts itself when the change was made there), and the findings
+        follow by validating again (only when there were some)."""
+        window = self.window()
+        if hasattr(window, "statusBar"):
+            window.statusBar().showMessage(message, 6000)
+        if not changed:
+            return
+        self._tree_pane.refresh()
+        if not from_pane and self._center_stack.currentWidget() is self._bidsignore_pane:
+            self._bidsignore_pane.reload()
+        self._sync_undo_redo()
+        if self._report is not None:
+            self.start_dataset_validation()
+
+    def _on_ignore_list(self) -> None:
+        """The ignore list in the centre, without "Show hidden files" (the
+        file itself is a dotfile the tree hides)."""
+        root = self.current_root()
+        if root is None:
+            return
+        self._on_file_selected(root / ".bidsignore")
+
     def _on_links(self, targets: Optional[list] = None) -> None:
         """Edit the fields that point from one file to another.
 
@@ -1525,6 +1654,52 @@ class EditorPanel(QWidget):
         if dlg.applied_count():
             self._sidecar_form.set_file(None, None, None)
             self._tree_pane.set_root(root)
+            if self._report is not None:
+                self.start_dataset_validation()
+
+    def _on_anonymise(self, targets: Optional[list] = None) -> None:
+        """Anonymise the dataset's metadata, after showing every change. From
+        the tree's right-click, on the subjects and sessions clicked."""
+        from ..anonymise.scope import scope_of
+        from .anonymise_dialog import AnonymiseDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        scope = scope_of(root, [Path(t) for t in targets]) if targets else None
+        dlg = AnonymiseDialog(root, parent=self, scope=scope)
+        if dlg.exec() and dlg.written():
+            self._sidecar_form.set_file(None, None, None)
+            self._tree_pane.set_root(root)
+            if self._open_path is not None:
+                self._on_file_selected(self._open_path)
+            self._sync_undo_redo()
+            window = self.window()
+            if hasattr(window, "statusBar"):
+                window.statusBar().showMessage(
+                    f"Anonymised {dlg.written()} file(s). Undo takes it back.", 6000)
+            if self._report is not None:
+                self.start_dataset_validation()
+
+    def _on_tables(self) -> None:
+        """Write the scans and sessions tables, after showing what changes."""
+        from .tables_dialog import TablesDialog
+
+        root = self.current_root()
+        if root is None:
+            return
+        dlg = TablesDialog(root, parent=self)
+        if dlg.exec() and dlg.written():
+            self._tree_pane.set_root(root)
+            if self._open_path is not None and self._open_path in dlg.written():
+                self._on_file_selected(self._open_path)
+            self._sync_undo_redo()
+            window = self.window()
+            if hasattr(window, "statusBar"):
+                n = len(dlg.written())
+                window.statusBar().showMessage(
+                    f"Wrote {n} table{'s' if n != 1 else ''}. Undo takes "
+                    f"{'it' if n == 1 else 'them'} back.", 6000)
             if self._report is not None:
                 self.start_dataset_validation()
 
@@ -2113,25 +2288,11 @@ class EditorPanel(QWidget):
         return items
 
     def _verdict_for(self, path: Path) -> Optional[FileVerdict]:
-        """The :class:`FileVerdict` in the current report for ``path`` (matched
-        on the absolute path), or ``None``."""
-        report = self._report
-        root = self.current_root()
-        if report is None or root is None:
-            return None
-        try:
-            target_abs = str(path.resolve())
-        except OSError:
-            target_abs = str(path)
-        for fv in report.files:
-            cand = fv.path if fv.path.is_absolute() else (root / fv.path)
-            try:
-                cand_abs = str(cand.resolve())
-            except OSError:
-                cand_abs = str(cand)
-            if cand_abs == target_abs:
-                return fv
-        return None
+        """The :class:`FileVerdict` in the current report for ``path``, or
+        ``None``: one lookup (``editor.report_index``)."""
+        from ..editor.report_index import find_verdict
+
+        return find_verdict(self._report, self.current_root(), path)
 
     # ------------------------------------------------------------------
 
@@ -2140,27 +2301,275 @@ class EditorPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _active_history_pane(self):
-        """The current center pane if it supports undo/redo, else None."""
+        """The current center pane if it keeps unsaved edits to undo, else None."""
         w = self._center_stack.currentWidget()
         if w in (self._sidecar_form, self._tsv_viewer):
             return w
         return None
 
+    def _history_root(self) -> Optional[Path]:
+        """The dataset whose history Undo and Redo walk: none when a folder
+        is open for viewing only (nothing there was written by us)."""
+        if self._view_only:
+            return None
+        return self.current_root()
+
+    def _open_pane_unsaved(self) -> bool:
+        """The shown file has edits not saved yet. A dataset step would reload
+        it from disk and lose them, so it waits for a save or a revert."""
+        is_dirty = getattr(self._center_stack.currentWidget(), "is_dirty", None)
+        try:
+            return bool(is_dirty()) if callable(is_dirty) else False
+        except Exception:  # noqa: BLE001 - a pane mid-load
+            return False
+
+    def _dataset_step(self, which: str):
+        """The dataset history's next step to undo or redo, or None."""
+        root = self._history_root()
+        if root is None:
+            return None
+        from ..project import operations as ops
+
+        try:
+            return (ops.peek_undo if which == "undo" else ops.peek_redo)(root)
+        except OSError:
+            return None
+
+    @staticmethod
+    def _step_text(step) -> str:
+        """The step's label, with how many files it touched unless the label
+        already says ("Fill RepetitionTime in 3 files")."""
+        import re
+
+        n = len(step.files)
+        if n > 1 and not re.search(r"\b\d+ file", step.label):
+            return f"{step.label} ({n} files)"
+        return step.label
+
     def _sync_undo_redo(self, *args) -> None:
         del args
+        from PyQt6.QtGui import QKeySequence
+
+        def key(k) -> str:
+            return QKeySequence(k).toString(QKeySequence.SequenceFormat.NativeText)
+
         pane = self._active_history_pane()
-        self._undo_btn.setEnabled(bool(pane) and pane.can_undo())
-        self._redo_btn.setEnabled(bool(pane) and pane.can_redo())
+        name = getattr(getattr(pane, "_current_file", None), "name", "the file")
+        blocked = self._open_pane_unsaved()
+        for which, btn, verb, std in (
+            ("undo", self._undo_btn, "Undo", QKeySequence.StandardKey.Undo),
+            ("redo", self._redo_btn, "Redo", QKeySequence.StandardKey.Redo),
+        ):
+            mine = pane is not None and (
+                pane.has_unsaved_history() if which == "undo" else pane.has_unsaved_redo())
+            step = None if (mine or blocked) else self._dataset_step(which)
+            if mine:
+                tip = f"{verb} the last edit to {name} (not saved yet)"
+            elif step is not None:
+                tip = f"{verb}: {self._step_text(step)}"
+            elif blocked:
+                tip = f"Save or revert {name} first: its unsaved edits would be lost"
+            else:
+                tip = f"Nothing to {verb.lower()}"
+            btn.setEnabled(mine or step is not None)
+            more = "\nRight-click for the whole history." if step is not None else ""
+            btn.setToolTip(f"{tip} ({key(std)}){more}")
+
+    #: How many steps the history menu lists; older ones are summarised.
+    HISTORY_MENU_LIMIT = 30
+
+    @staticmethod
+    def _when(at: str) -> str:
+        """``2026-10-19T14:05:31`` as "14:05" today, else "19 Oct 14:05"."""
+        import datetime
+
+        try:
+            moment = datetime.datetime.fromisoformat(at)
+        except ValueError:
+            return ""
+        if moment.date() == datetime.date.today():
+            return moment.strftime("%H:%M")
+        return f"{moment.day} {moment.strftime('%b %H:%M')}"
+
+    def history_menu_actions(self, which: str, menu) -> list:
+        """Fill ``menu`` with the history Undo (or Redo) would walk; returns
+        the actions that act, newest first."""
+        verb = "undo" if which == "undo" else "redo"
+        root = self._history_root()
+        if root is None:
+            menu.addAction(f"Nothing to {verb} here").setEnabled(False)
+            return []
+        if self._open_pane_unsaved():
+            pane = self._center_stack.currentWidget()
+            name = getattr(getattr(pane, "_current_file", None), "name", "the open file")
+            menu.addAction(f"Save or revert {name} first").setEnabled(False)
+            return []
+        from ..project import operations as ops
+
+        steps = ops.history(root, which)
+        if not steps:
+            menu.addAction(f"Nothing to {verb}").setEnabled(False)
+            return []
+        acted = []
+        for i, step in enumerate(steps[:self.HISTORY_MENU_LIMIT]):
+            # A tab puts the time in the menu's right-hand column.
+            action = menu.addAction(f"{self._step_text(step)}\t{self._when(step.at)}")
+            action.triggered.connect(
+                lambda _c=False, n=i + 1: self._step_dataset_many(which, n))
+            acted.append(action)
+        if len(steps) > self.HISTORY_MENU_LIMIT:
+            menu.addAction(f"and {len(steps) - self.HISTORY_MENU_LIMIT} earlier"
+                           ).setEnabled(False)
+        return acted
+
+    def _show_history_menu(self, which: str, where) -> None:
+        from .viz.menus import popup_menu
+
+        menu = popup_menu(self)
+        menu.setToolTipsVisible(True)
+        self.history_menu_actions(which, menu)
+        menu.popup(where)
+        self._history_menu = menu
+
+    def _step_dataset_many(self, which: str, count: int) -> None:
+        """Undo (or redo) ``count`` steps at once, after one question."""
+        if count <= 1:
+            self._step_dataset(which)
+            return
+        root = self._history_root()
+        if root is None or self._open_pane_unsaved():
+            return
+        from ..project import operations as ops
+
+        steps = ops.history(root, which)[:count]
+        if len(steps) < count:
+            return
+        verb = "Undo" if which == "undo" else "Redo"
+        newest = ops.peek_undo(root, check=True) if which == "undo" else ops.peek_redo(root, check=True)
+        if not self._confirm_steps(which, steps, newest.changed_since if newest else ()):
+            return
+        from .fs_watch import watchers_released
+
+        step_fn = ops.undo_last if which == "undo" else ops.redo_last
+        done = 0
+        try:
+            with watchers_released():
+                for _ in range(count):
+                    step_fn(root)
+                    done += 1
+        except Exception as exc:  # noqa: BLE001 - each step is all or nothing
+            log.warning("%s stopped after %d step(s): %s", verb, done, exc)
+            QMessageBox.warning(self, verb, f"{verb} stopped after {done} of {count} "
+                                f"steps; the step that failed changed nothing.\n\n{exc}")
+        self._after_history_step(root)
+        window = self.window()
+        if done and hasattr(window, "statusBar"):
+            word = "Undone" if which == "undo" else "Redone"
+            window.statusBar().showMessage(f"{word}: {done} steps", 6000)
+
+    def _confirm_steps(self, which: str, steps, changed_since) -> bool:
+        verb = "Undo" if which == "undo" else "Redo"
+        files = len({f for step in steps for f in step.files})
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(verb)
+        box.setText(f"{verb} the last {len(steps)} steps?")
+        listed = "\n".join(f"  {self._step_text(s)}" for s in steps[:6])
+        more = f"\n  and {len(steps) - 6} more" if len(steps) > 6 else ""
+        text = f"{listed}{more}\n\n{files} file(s) in all, newest first."
+        if changed_since:
+            names = ", ".join(Path(p).name for p in changed_since[:3])
+            text += (f"\n\nSome of them changed after the newest step, by hand or "
+                     f"by another program ({names}). {verb} replaces those changes too.")
+        box.setInformativeText(text)
+        go = box.addButton(f"{verb} {len(steps)} steps", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel if changed_since else go)
+        box.exec()
+        return box.clickedButton() is go
 
     def _on_editor_undo(self) -> None:
         pane = self._active_history_pane()
-        if pane is not None:
+        if pane is not None and pane.has_unsaved_history():
             pane.undo()
+            return
+        self._step_dataset("undo")
 
     def _on_editor_redo(self) -> None:
         pane = self._active_history_pane()
-        if pane is not None:
+        if pane is not None and pane.has_unsaved_redo():
             pane.redo()
+            return
+        self._step_dataset("redo")
+
+    def _step_dataset(self, which: str) -> None:
+        """Undo or redo ONE step of the dataset's history: every file of it
+        together. A step of several files, or one whose files were changed
+        since, asks first."""
+        root = self._history_root()
+        if root is None or self._open_pane_unsaved():
+            return
+        from ..project import operations as ops
+
+        peek = ops.peek_undo if which == "undo" else ops.peek_redo
+        step = peek(root, check=True)
+        if step is None:
+            return
+        if (len(step.files) > 1 or step.changed_since) and not self._confirm_step(which, step):
+            return
+        from .fs_watch import watchers_released
+
+        verb = "Undo" if which == "undo" else "Redo"
+        try:
+            # Folders may move back (a subject renamed), and Windows cannot
+            # move a folder the tree is watching.
+            with watchers_released():
+                (ops.undo_last if which == "undo" else ops.redo_last)(root)
+        except Exception as exc:  # noqa: BLE001 - all or nothing: say so, change nothing
+            log.warning("%s failed: %s", verb, exc)
+            QMessageBox.warning(self, verb, f"{verb} could not be completed, so nothing "
+                                f"was changed.\n\n{exc}")
+            return
+        self._after_history_step(root)
+        done = "Undone" if which == "undo" else "Redone"
+        window = self.window()
+        if hasattr(window, "statusBar"):
+            window.statusBar().showMessage(f"{done}: {self._step_text(step)}", 6000)
+
+    def _confirm_step(self, which: str, step) -> bool:
+        verb = "Undo" if which == "undo" else "Redo"
+        n = len(step.files)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(verb)
+        box.setText(f'{verb} "{step.label}"?')
+        text = (f"This puts {n} files back as they were before it." if which == "undo"
+                else f"This makes the change to {n} files again.")
+        if step.changed_since:
+            k = len(step.changed_since)
+            names = ", ".join(Path(p).name for p in step.changed_since[:3])
+            more = f" and {k - 3} more" if k > 3 else ""
+            text += (f"\n\n{k} of them changed after it, by hand or by another "
+                     f"program ({names}{more}). {verb} replaces those changes too.")
+        box.setInformativeText(text)
+        go = box.addButton(verb, QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel if step.changed_since else go)
+        box.exec()
+        return box.clickedButton() is go
+
+    def _after_history_step(self, root: Path) -> None:
+        """The dataset changed under the panes: show it as it is now, the
+        open file included (again, if it still exists)."""
+        self._sidecar_form.set_file(None, None, None)
+        self._reload_open_image()
+        self._tree_pane.refresh()
+        opened = self._open_path
+        if opened is not None and opened.exists():
+            self._on_file_selected(opened)
+        if self._report is not None:
+            self.start_dataset_validation()
+        self._sync_undo_redo()
 
     def showEvent(self, event) -> None:  # noqa: N802
         """Refresh the tree when the Editor becomes visible.

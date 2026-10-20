@@ -4,17 +4,14 @@ Reached by clicking the warning / error / skipped chips in the
 Converter toolbar. Reads :class:`InventoryTableModel` directly so it
 always reflects the live state (post-edit, post-rebuild).
 
-The layout is a vertical scroll of **row cards** — one card per
-inventory row, with the row identifier as a clickable header and one
-wrap-text :class:`ValMessage` per scanner-detected issue underneath.
-Easier to read vertically when issue text is long; activating the
-header (Enter or click) selects the matching row in the inspection
-table so the user can jump straight to fixing it.
+One painted list (:class:`~bidsmgr.gui.widgets.findings_list.FindingsList`):
+the rows, their issues one line each, the selected one in full underneath.
+Opening a row (double click, Return) selects it in the inspection table so
+the user can jump straight to fixing it.
 """
 
 from __future__ import annotations
 
-from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -23,14 +20,14 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from .models import COLUMNS, InventoryTableModel
 from .delegates import ROW_STATE_ROLE
-from .widgets import ElidedPushButton, StatusBadge, ValMessage
+from .widgets import StatusBadge
+from .widgets.findings_list import Finding, FindingsList, Group
 
 
 # Human-readable titles per severity. Drives the dialog window title +
@@ -40,67 +37,6 @@ _SEVERITY_LABEL: dict[str, str] = {
     "warn": "Warnings",
     "skip": "Skipped",
 }
-
-
-class _RowCard(QFrame):
-    """One row's findings: identifier header + stacked ValMessages.
-
-    Clicking the header (or hitting Enter on the focused header button)
-    emits :pyattr:`activated` with the source DataFrame row index.
-    """
-
-    activated = pyqtSignal(int)
-
-    def __init__(
-        self,
-        row: int,
-        title: str,
-        issues: list[str],
-        severity: str,
-        parent: Optional[QWidget] = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setObjectName("issue-card")
-        self._row = row
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(10, 8, 10, 8)
-        v.setSpacing(5)
-
-        # Header row: clickable "jump →" link styled as a flat button.
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
-        head.setSpacing(6)
-
-        # Row identifier is a button so it gets focus + keyboard support
-        # for free. Styled by QSS to look like a link rather than a
-        # button (no border, accent color, hand cursor). Elided rather than
-        # Preferred: a long basename used to set the dialog's width floor,
-        # so the window opened wide and could not be narrowed.
-        self._title_btn = ElidedPushButton(title)
-        self._title_btn.setObjectName("issue-card-title")
-        self._title_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._title_btn.setFlat(True)
-        self._title_btn.clicked.connect(lambda: self.activated.emit(self._row))
-        head.addWidget(self._title_btn, 1)
-
-        jump = QLabel("jump →")
-        jump.setObjectName("issue-card-jump-hint")
-        head.addWidget(jump, 0)
-        v.addLayout(head)
-
-        # One ValMessage per issue. ``warn`` and ``skip`` use the amber
-        # badge; ``err`` uses red. Issue text wraps to the card width
-        # (ValMessage's body already sets ``setWordWrap(True)``).
-        sev_for_badge = "err" if severity == "err" else "warn"
-        if not issues:
-            issues = [
-                "(no issue text recorded)"
-                if severity != "skip"
-                else "Excluded from conversion."
-            ]
-        for text in issues:
-            v.addWidget(ValMessage(sev_for_badge, "", text, None))
 
 
 class IssuesDialog(QDialog):
@@ -159,24 +95,26 @@ class IssuesDialog(QDialog):
 
         outer.addWidget(header)
 
-        # ---------- scrollable list of cards ----------
-        scroll = QScrollArea()
-        scroll.setObjectName("issue-dialog-scroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
+        # ---------- one painted list ----------
+        # A card and a message widget per issue took 9 s for 3,000 rows;
+        # this is one view over one model (widgets/findings_list).
         body = QWidget()
         body.setObjectName("issue-dialog-body")
         bl = QVBoxLayout(body)
-        bl.setContentsMargins(10, 8, 10, 8)
+        bl.setContentsMargins(12, 10, 12, 10)
         bl.setSpacing(6)
-        self._cards_layout = bl
-
-        scroll.setWidget(body)
-        outer.addWidget(scroll, 1)
-
-        self._populate(model, severity)
+        self._list = FindingsList("Find a subject, a name or a word")
+        self._list.activated.connect(self._on_activated)
+        groups = self._groups(model, severity)
+        if not groups:
+            empty = QLabel("(no matching rows)")
+            empty.setObjectName("pane-hint")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            bl.addWidget(empty)
+            self._list.setVisible(False)
+        bl.addWidget(self._list, 1)
+        self._list.set_groups(groups)
+        outer.addWidget(body, 1)
 
         # ---------- footer ----------
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -221,53 +159,38 @@ class IssuesDialog(QDialog):
                 n += 1
         return n
 
-    def _populate(self, model: InventoryTableModel, severity: str) -> None:
-        """Build one ``_RowCard`` per matching row."""
+    def _groups(self, model: InventoryTableModel, severity: str) -> list[Group]:
+        """One group per matching row: its identifier and name, and one
+        finding per issue the scan recorded."""
         df = model.dataframe()
-        basename_col = next(
-            (c for c in COLUMNS if c.key == "basename"), None,
-        )
+        basename_col = next((c for c in COLUMNS if c.key == "basename"), None)
         id_col = next((c for c in COLUMNS if c.key == "id"), None)
-
-        any_matches = False
+        badge = "err" if severity == "err" else ("skip" if severity == "skip" else "warn")
+        groups = []
         for row in range(model.rowCount()):
             state = model.data(model.index(row, 0), ROW_STATE_ROLE) or ""
             if state != severity:
                 continue
-            any_matches = True
-
-            sub = ""
-            bn = ""
+            sub = bn = ""
             if id_col is not None:
-                sub = model.data(
-                    model.index(row, COLUMNS.index(id_col)),
-                    Qt.ItemDataRole.DisplayRole,
-                ) or ""
+                sub = model.data(model.index(row, COLUMNS.index(id_col)),
+                                 Qt.ItemDataRole.DisplayRole) or ""
             if basename_col is not None:
-                bn = model.data(
-                    model.index(row, COLUMNS.index(basename_col)),
-                    Qt.ItemDataRole.DisplayRole,
-                ) or ""
+                bn = model.data(model.index(row, COLUMNS.index(basename_col)),
+                                Qt.ItemDataRole.DisplayRole) or ""
             label = f"sub-{sub}" if sub else f"row {row + 1}"
             if bn and bn != "—":
                 label = f"{label}  ·  {bn}"
+            text = str(df.at[row, "issues"] or "").strip() if "issues" in df.columns else ""
+            parts = [p.strip() for p in text.split(" | ") if p.strip()]
+            if not parts:
+                parts = ["Excluded from conversion." if severity == "skip"
+                         else "(no issue text recorded)"]
+            groups.append(Group(label, row, "", [Finding(badge, p) for p in parts]))
+        return groups
 
-            issues_text = ""
-            if "issues" in df.columns:
-                issues_text = str(df.at[row, "issues"] or "").strip()
-            parts = [p.strip() for p in issues_text.split(" | ") if p.strip()]
-
-            card = _RowCard(row, label, parts, severity)
-            card.activated.connect(self.row_selected.emit)
-            self._cards_layout.addWidget(card)
-
-        if not any_matches:
-            empty = QLabel("(no matching rows)")
-            empty.setObjectName("pane-hint")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._cards_layout.addWidget(empty)
-
-        self._cards_layout.addStretch(1)
+    def _on_activated(self, row: int) -> None:
+        self.row_selected.emit(int(row))
 
 
 __all__ = ["IssuesDialog"]

@@ -233,7 +233,10 @@ class ShortcutsDialog(QDialog):
         self.columns.setSpacing(10)
         self.scroll.setWidget(self.body)
         lay.addWidget(self.scroll, 1)
-        self.cards = [_Card(t, rows) for t, rows in
+        # Built with their parent: a card shown with none is a window for a
+        # moment, takes the focus, and on macOS the main window then comes to
+        # the front over the viewer's own window (GUI_LOOK_AND_FEEL 4.26).
+        self.cards = [_Card(t, rows, parent=self.body) for t, rows in
                       shortcut_sections(manager, mousemap_overrides, kind, canvases)]
         for card in self.cards:
             card.set_filter("")
@@ -256,11 +259,12 @@ class ShortcutsDialog(QDialog):
         cols = [QVBoxLayout() for _ in range(n)]
         heights = [0] * n
         for card in self.cards:
-            card.setVisible(card.matches)
             if not card.matches:
+                card.setVisible(False)
                 continue
             i = heights.index(min(heights))
             cols[i].addWidget(card)
+            card.setVisible(True)      # placed first, then shown
             heights[i] += card.height() + 10
         for col in cols:
             col.setSpacing(10)

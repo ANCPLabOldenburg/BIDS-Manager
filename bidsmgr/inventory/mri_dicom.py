@@ -207,6 +207,19 @@ def acquisition_time(ds) -> str:
     return ""
 
 
+def _earlier(when: str, than: Optional[str]) -> bool:
+    """Is the DICOM time ``when`` before ``than`` (nothing yet: yes)?
+    Compared as clocks, so ``93359`` and ``093359.5`` order as times."""
+    if not than:
+        return True
+    from ._time import parse_time_seconds
+
+    a, b = parse_time_seconds(when), parse_time_seconds(than)
+    if a is None or b is None:
+        return when < than
+    return a < b
+
+
 # SOP Class UID the standard reserves for MR spectroscopy. The authoritative
 # marker: a series stored under it IS spectroscopy, whatever it is called.
 MR_SPECTROSCOPY_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.4.2"
@@ -591,7 +604,11 @@ def scan_dicoms_long(
         mods[subj_key][folder][key] = res["sequence_kind"]
         if key not in imgtypes[subj_key][folder]:
             imgtypes[subj_key][folder][key] = res["img3"]
-        if key not in acq_times[subj_key][folder] and res["acq_time"]:
+        # The EARLIEST of the series' files, as dcm2niix writes it: the file
+        # read first was 66 s late on a multi-volume DWI (2026-10-19), and
+        # this time orders runs and fieldmaps and fills the scans tables.
+        if res["acq_time"] and _earlier(res["acq_time"],
+                                        acq_times[subj_key][folder].get(key)):
             acq_times[subj_key][folder][key] = res["acq_time"]
         if key not in file_dirs[subj_key][folder]:
             file_dirs[subj_key][folder][key] = res["file_dir"]

@@ -87,12 +87,22 @@ def _fix_buttons(dialog) -> list:
     ]
 
 
+def _select(dialog, group: int, finding: int = 0) -> None:
+    """Select a finding: the list shows it in full, Fix button and all."""
+    view = dialog._list.view
+    model = view.findings_model()
+    view.setCurrentIndex(model.index(finding, 0, model.index(group, 0)))
+
+
 def test_the_button_is_drawn_when_the_finding_offers_one(
     qtbot, dataset: Path,
 ) -> None:
     dialog = EditorIssuesDialog(_report(dataset), "warn", dataset)
     qtbot.addWidget(dialog)
-    assert len(_fix_buttons(dialog)) == 2
+    assert not _fix_buttons(dialog), "nothing selected, nothing drawn"
+    for group in (0, 1):
+        _select(dialog, group)
+        assert len(_fix_buttons(dialog)) == 1
 
 
 def test_pressing_it_announces_the_file_and_the_field(
@@ -104,6 +114,7 @@ def test_pressing_it_announces_the_file_and_the_field(
     seen: list[tuple] = []
     dialog.fix_requested.connect(lambda p, f: seen.append((p, f)))
 
+    _select(dialog, 0)
     _fix_buttons(dialog)[0].click()
     assert seen, "the Fix button must emit something"
     path, field = seen[0]
@@ -118,8 +129,9 @@ def test_each_button_carries_its_own_file(qtbot, dataset: Path) -> None:
     seen: list[tuple] = []
     dialog.fix_requested.connect(lambda p, f: seen.append((Path(p).name, f)))
 
-    for button in _fix_buttons(dialog):
-        button.click()
+    for group in (0, 1):
+        _select(dialog, group)
+        _fix_buttons(dialog)[0].click()
     assert seen == [
         ("sub-01_T1w.json", "InstitutionName"),
         ("sub-02_T1w.json", "Manufacturer"),
@@ -161,6 +173,7 @@ def test_a_finding_with_no_fix_label_gets_no_button(
     )
     dialog = EditorIssuesDialog(report, "warn", dataset)
     qtbot.addWidget(dialog)
+    _select(dialog, 0)
     assert not _fix_buttons(dialog)
 
 
@@ -169,7 +182,9 @@ def test_every_drawn_button_has_a_receiver(qtbot, dataset: Path) -> None:
     nothing is worse than no button, because it reads as broken."""
     dialog = EditorIssuesDialog(_report(dataset), "warn", dataset)
     qtbot.addWidget(dialog)
-    for message in dialog.findChildren(ValMessage):
-        if not _fix_buttons(message):
-            continue
-        assert message.receivers(message.fix_requested) > 0
+    for group in (0, 1):
+        _select(dialog, group)
+        for message in dialog.findChildren(ValMessage):
+            if not _fix_buttons(message):
+                continue
+            assert message.receivers(message.fix_requested) > 0

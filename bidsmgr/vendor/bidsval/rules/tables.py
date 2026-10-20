@@ -36,11 +36,9 @@ def eval_columns(
     columns = context.get("columns")
     if not isinstance(columns, Mapping) or not columns:
         return []  # not a populated TSV; nothing to check
-    if str(context.get("extension", "")) == ".tsv.gz":
-        # Gzipped TSVs (physio, stim) are headerless: their column names come from
-        # the sidecar's "Columns" field, not a header row. Reading the first data
-        # row as a header would mis-name every column, so skip column checks here.
-        return []
+    # A gzipped TSV (physio, stim) is headerless; the context names its
+    # columns from the sidecar's "Columns" (VENDORED CHANGE), so it is checked
+    # like any other table. Unnamed, it arrives empty and is skipped above.
 
     location = str(context.get("path", "")).lstrip("/")
     object_columns = schema["objects"].get("columns", {})
@@ -147,7 +145,10 @@ def _value_types(
                     code="TSV_COLUMN_TYPE_REDEFINED",
                     sub_code=name,
                     severity=Severity.WARNING,
-                    location=location,
+                    # VENDORED CHANGE: on the .json that redefines the column,
+                    # which is the file to edit (as the reference does), not
+                    # the table.
+                    location=_sidecar_location(location),
                     message=f"the sidecar redefinition of column {name!r} is ignored: {redefine}",
                     suggestion="A sidecar may only refine a schema column (same base type, a "
                     "subset of any levels, within any bounds). Remove or correct the redefinition.",
@@ -306,3 +307,11 @@ def _level(requirement: Any) -> str:
     if isinstance(requirement, Mapping):
         return str(requirement.get("level", ""))
     return ""
+
+
+def _sidecar_location(location: str) -> str:
+    """The sidecar a table's columns are described in: the same name, ``.json``."""
+    for ext in (".tsv.gz", ".tsv"):
+        if location.endswith(ext):
+            return location[: -len(ext)] + ".json"
+    return location

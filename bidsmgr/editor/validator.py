@@ -114,14 +114,17 @@ def validate_file(
     schema: Optional[str] = None,
     max_rows: int = 1000,
     flag_todos: bool = True,
+    strict: bool = False,
 ) -> FileVerdict:
     """Validate a single file; the rest of the dataset is indexed for
     inheritance / existence checks. ``file_path`` must live under ``bids_root``
     (raises ``ValueError`` otherwise). The returned ``FileVerdict.path`` is
     relative to ``bids_root`` so it merges cleanly into a dataset-wide report.
 
-    Uses the fast structural pass (``read_headers=False``) since this runs live
-    as the user clicks around the Editor tree.
+    ``strict`` is the Editor's Deep checks: the NIfTI headers are read too
+    (repetition time, volume count, dimensions against the sidecar). It used
+    to be off here whatever the toggle said, so "Validate file" never saw a
+    header problem the dataset pass reported.
     """
     bids_root = Path(bids_root).resolve()
     file_path = Path(file_path).resolve()
@@ -131,7 +134,7 @@ def validate_file(
         bids_root,
         rel.as_posix(),
         schema=_version(schema),
-        read_headers=False,
+        read_headers=strict,
         max_rows=max_rows,
     )
     # bidsval indexes only files it recognises as BIDS data. If the user
@@ -155,6 +158,7 @@ def validate_folder(
     schema: Optional[str] = None,
     max_rows: int = 1000,
     flag_todos: bool = True,
+    strict: bool = False,
 ) -> list[FileVerdict]:
     """Validate every file under ``folder_path`` and return one verdict each.
 
@@ -172,7 +176,7 @@ def validate_folder(
     bv_report = bidsval.validate(
         bids_root,
         schema=_version(schema),
-        read_headers=False,
+        read_headers=strict,
         max_rows=max_rows,
     )
     out: list[FileVerdict] = []

@@ -59,12 +59,15 @@ def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
         "Quality check...",
 
         "CHECK AND REPAIR",
-        # All three answer "what is wrong with this dataset": coherence
-        # finds what disagrees, References finds what points at nothing,
-        # Fix ups fills what is missing.
+        # All four answer "what is wrong with this dataset": coherence
+        # finds what disagrees, the tables tool writes the scans and
+        # sessions tables a dataset lacks, References finds what points at
+        # nothing, Fix ups fills what is missing.
         "Check coherence...",
+        "Scans and sessions tables...",
         "References (IntendedFor, Sources...)...",
         "Fix ups...",
+        "Ignored files...",
 
         "NAMES AND STRUCTURE",
         "Rename entity...",
@@ -82,6 +85,9 @@ def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
         # to the thing they pressed.
         "Compare with the original...",
         "Put the face back...",
+        # Faces are one kind of identity in a dataset; the metadata is the
+        # other, so it sits with them.
+        "Anonymise metadata...",
 
         "REMOVE",
         "Delete...",

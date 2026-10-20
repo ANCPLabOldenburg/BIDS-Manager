@@ -284,25 +284,11 @@ def _schema_rows(path: Path, root: Optional[Path]) -> list[SidecarField]:
 
 
 def _find_verdict(report, root: Path, path: Path) -> Optional[FileVerdict]:
-    """Return the FileVerdict matching ``path`` (absolute)."""
-    try:
-        target_abs = str(path.resolve())
-    except OSError:
-        target_abs = str(path)
-    try:
-        root_resolved = root.resolve()
-    except OSError:
-        root_resolved = root
-    for fv in report.files:
-        fp = fv.path
-        candidate = fp if fp.is_absolute() else root_resolved / fp
-        try:
-            candidate_abs = str(candidate.resolve())
-        except OSError:
-            candidate_abs = str(candidate)
-        if candidate_abs == target_abs:
-            return fv
-    return None
+    """Return the FileVerdict matching ``path``: one lookup
+    (``editor.report_index``), not a walk of the report."""
+    from ...editor.report_index import find_verdict
+
+    return find_verdict(report, root, path)
 
 
 # --------------------------------------------------------------------------
@@ -928,7 +914,7 @@ class SidecarFormPane(QWidget):
         self._after_edit()
 
     # ----------------------------------------------------------------------
-    # Undo / redo (snapshot-based, in-memory; disk write still via Save)
+    # Undo / redo: unsaved edits in memory, saved ones in the dataset history
     # ----------------------------------------------------------------------
 
     def _on_autosave(self) -> None:
@@ -994,54 +980,77 @@ class SidecarFormPane(QWidget):
         self._refresh_dirty_ui()
         self.history_changed.emit()
 
-    def can_undo(self) -> bool:
+    def _saved_step(self, which: str) -> bool:
+        """True when the dataset's newest saved step to undo (or redo) is a
+        change to THIS file alone, which the pane may then take as its own.
+
+        Unsaved edits live in the pane; a save makes them one step of the
+        dataset's history (``project.operations``), where they survive moving
+        to another file and restarting the app. Several edits saved together
+        are one step, so they go back together."""
+        if (self._current_file is None or self._current_root is None
+                or self.is_dirty()):
+            return False
+        from ...project import operations as ops
+
+        peek = ops.peek_undo if which == "undo" else ops.peek_redo
+        try:
+            return ops.only_touches(peek(self._current_root), self._current_root,
+                                    self._current_file)
+        except OSError:
+            return False
+
+    def has_unsaved_history(self) -> bool:
+        """Edits not saved yet that Undo would take back, one at a time."""
         return self._json_cache is not None and self._history.can_undo
 
-    def can_redo(self) -> bool:
+    def has_unsaved_redo(self) -> bool:
+        """Unsaved edits just undone that Redo would bring back."""
         return self._json_cache is not None and self._history.can_redo
 
+    def can_undo(self) -> bool:
+        return self._json_cache is not None and (
+            self._history.can_undo or self._saved_step("undo"))
+
+    def can_redo(self) -> bool:
+        return self._json_cache is not None and (
+            self._history.can_redo or self._saved_step("redo"))
+
     def undo(self) -> None:
+        """Take back the last unsaved edit or, with none, the last saved change
+        to this file (the file goes back on disk)."""
         if self._json_cache is None:
             return
-        was_saved = not self.is_dirty()
-        snap = self._history.undo(self._snapshot())
-        if snap is not None:
-            self._restore(snap)
-            self._persist_if_it_was_saved(was_saved)
+        if self._history.can_undo:
+            snap = self._history.undo(self._snapshot())
+            if snap is not None:
+                self._restore(snap)
+            return
+        if self._saved_step("undo"):
+            from ...project.operations import undo_last
+
+            undo_last(self._current_root)
+            self.reload_from_disk()
 
     def redo(self) -> None:
         if self._json_cache is None:
             return
-        was_saved = not self.is_dirty()
-        snap = self._history.redo(self._snapshot())
-        if snap is not None:
-            self._restore(snap)
-            self._persist_if_it_was_saved(was_saved)
-
-    def _persist_if_it_was_saved(self, was_saved: bool) -> None:
-        """Write the file back when the step being undone had been saved.
-
-        Without this, undoing after a save changed only the in-memory cache:
-        the file kept the value that had been written, the pane went dirty
-        again, and the user saw a button that did nothing. Half an undo is
-        worse than none, because it leaves the screen and the disk disagreeing.
-
-        The rule is the one a user already holds: what you see is what is on
-        disk, unless you have unsaved changes. So an undo from a CLEAN state
-        writes, and an undo from a dirty one does not, because in that case
-        nothing had reached the disk to revert.
-        """
-        if not was_saved or self._current_file is None:
+        if self._history.can_redo:
+            snap = self._history.redo(self._snapshot())
+            if snap is not None:
+                self._restore(snap)
             return
-        try:
-            self._write_json_cache(self._current_file)
-        except OSError as exc:
-            log.warning("undo could not write %s: %s", self._current_file, exc)
-            self.save_failed.emit(self._current_file, str(exc))
+        if self._saved_step("redo"):
+            from ...project.operations import redo_last
+
+            redo_last(self._current_root)
+            self.reload_from_disk()
+
+    def reload_from_disk(self) -> None:
+        """Show the file as it is on disk now (after an undo or redo changed it)."""
+        if self._current_file is None:
             return
-        self._original_json = copy.deepcopy(self._json_cache)
-        self._refresh_dirty_ui()
-        self.file_saved.emit(self._current_file)
+        self.set_file(self._current_file, self._current_root, self._current_report)
 
     # ----------------------------------------------------------------------
     # View-mode toggle + tree handlers
@@ -1450,7 +1459,13 @@ class SidecarFormPane(QWidget):
         # Snapshot the new on-disk state so the next dirty check
         # compares against what we just wrote.
         self._original_json = copy.deepcopy(self._json_cache)
+        # What was saved is now one step of the dataset's history, undone
+        # there (``can_undo`` / ``undo`` reach it); the pane keeps only what
+        # is not saved yet.
+        self._history.clear()
+        self._pre_edit = self._snapshot()
         self._refresh_dirty_ui()
+        self.history_changed.emit()
         self.file_saved.emit(self._current_file)
         return True
 

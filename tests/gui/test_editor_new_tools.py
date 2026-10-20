@@ -349,8 +349,10 @@ class TestIndexWidthsDialog:
         assert not dlg._ok.isEnabled(), "nothing to change"
 
     def test_an_inconsistent_dataset_is_named(self, qtbot, dataset):
+        """Padded beside unpadded. (run-1, run-2, run-30 is numbering without
+        padding, one consistent choice, and is not named.)"""
         f = dataset / "sub-001/func/sub-001_task-x_run-3_bold.nii.gz"
-        f.rename(f.with_name("sub-001_task-x_run-30_bold.nii.gz"))
+        f.rename(f.with_name("sub-001_task-x_run-03_bold.nii.gz"))
         dlg = PadValuesDialog(dataset)
         qtbot.addWidget(dlg)
         assert "disagree with themselves" in dlg._warning.text()
@@ -423,6 +425,7 @@ class TestCoherenceDialog:
         coherence.apply(dataset, coherence.check(dataset))
         dlg = CoherenceDialog(dataset)
         qtbot.addWidget(dlg)
+        qtbot.waitUntil(lambda: not dlg.checking(), timeout=20_000)
         assert dlg._tree.topLevelItemCount() == 0
         assert "Everything agrees" in dlg._status.text()
         assert not dlg._ok.isEnabled()
@@ -437,6 +440,7 @@ class TestCoherenceDialog:
 
         dlg = CoherenceDialog(dataset)
         qtbot.addWidget(dlg)
+        qtbot.waitUntil(lambda: not dlg.checking(), timeout=20_000)
         for item in dlg._leaves():
             finding = item.data(0, Qt.ItemDataRole.UserRole)
             if finding and finding.kind.name == "TASK_NAME_MISMATCH":
@@ -459,9 +463,10 @@ class TestCoherenceDialog:
         )
         dlg = CoherenceDialog(dataset)
         qtbot.addWidget(dlg)
+        qtbot.waitUntil(lambda: not dlg.checking(), timeout=20_000)
         heads = [dlg._tree.topLevelItem(i).text(0)
                  for i in range(dlg._tree.topLevelItemCount())]
-        assert any("participants row" in h for h in heads)
+        assert any("participants row" in h.lower() for h in heads)
 
     def test_repairing_settles_it(self, qtbot, dataset, monkeypatch):
         from PyQt6.QtWidgets import QMessageBox
@@ -475,16 +480,54 @@ class TestCoherenceDialog:
         )
         dlg = CoherenceDialog(dataset)
         qtbot.addWidget(dlg)
+        qtbot.waitUntil(lambda: not dlg.checking(), timeout=20_000)
+        # Dropping a participant's row loses what it says about the person:
+        # never ticked for you, ticked here by hand.
+        assert not dlg._checked()
+        dlg._select("all")
         assert dlg._checked()
         dlg._on_apply()
         assert dlg.applied_count() >= 1
         assert "sub-999" not in (dataset / "participants.tsv").read_text()
+        qtbot.waitUntil(lambda: not dlg.checking(), timeout=20_000)
         assert "Everything agrees" in dlg._status.text()
+
+    def test_the_check_runs_off_the_window(self, qtbot, dataset, monkeypatch):
+        """On a 10,000-file dataset the check froze the window for 8 s."""
+        import threading
+
+        from bidsmgr.editor import coherence
+
+        seen = {}
+        real = coherence.check
+
+        def spy(root, **kwargs):
+            seen["thread"] = threading.current_thread()
+            seen["tables"] = kwargs.get("tables")
+            return real(root, **kwargs)
+
+        monkeypatch.setattr(coherence, "check", spy)
+        dlg = CoherenceDialog(dataset)
+        qtbot.addWidget(dlg)
+        assert dlg.checking() and "Checking" in dlg._status.text()
+        qtbot.waitUntil(lambda: not dlg.checking(), timeout=20_000)
+        assert seen["thread"] is not threading.main_thread()
+        assert seen["tables"] is True, "Settings > Convert writes tables by default"
+
+    def test_only_safe_repairs_come_ticked(self, qtbot, dataset):
+        (dataset / "participants.tsv").write_text("participant_id\nsub-999\n")
+        dlg = CoherenceDialog(dataset)
+        qtbot.addWidget(dlg)
+        qtbot.waitUntil(lambda: not dlg.checking(), timeout=20_000)
+        ticked = {f.kind.name for f in dlg._checked()}
+        assert "PARTICIPANT_MISSING" in ticked, "adding sub-001's row loses nothing"
+        assert "PARTICIPANT_ORPHAN" not in ticked
 
     def test_nothing_is_written_by_opening_it(self, qtbot, dataset):
         before = {p: p.read_bytes() for p in dataset.rglob("*") if p.is_file()}
         dlg = CoherenceDialog(dataset)
         qtbot.addWidget(dlg)
+        qtbot.waitUntil(lambda: not dlg.checking(), timeout=20_000)
         after = {p: p.read_bytes() for p in dataset.rglob("*") if p.is_file()}
         assert before == after
 

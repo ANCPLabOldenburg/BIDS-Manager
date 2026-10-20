@@ -240,7 +240,7 @@ def plan_padding(root: Path, entity: str, width: int) -> list[Repad]:
             raise RenameError(
                 f"{entity}-{value} and {entity}-{seen_new[new]} would both "
                 f"become {entity}-{new}. Settle them by hand first: merging "
-                "two runs is not something this should decide."
+                f"two {entity} values is not something this should decide."
             )
         # Registered BEFORE the no-op check, or a value that already has the
         # width is not there to collide with: ``01`` was skipped and then
@@ -259,11 +259,14 @@ class WidthSplit:
     widths: tuple[int, ...]          # every width in use, narrowest first
     examples: tuple[str, ...]        # one value per width
     files: int
+    padded: int = 0                  # the widest padded value's width
 
     @property
     def suggested(self) -> int:
-        """The widest in use. Padding up never loses a digit."""
-        return max(self.widths)
+        """The width the padded values use: padding the rest up to it never
+        loses a digit, and a longer value (``run-100`` beside ``run-01``)
+        already has it."""
+        return self.padded or max(self.widths)
 
 
 def inconsistent_widths(root: Path) -> list[WidthSplit]:
@@ -276,17 +279,25 @@ def inconsistent_widths(root: Path) -> list[WidthSplit]:
 
     Only NUMERIC values count toward a width. A ``run`` whose value is not a
     number is a different problem and saying so here would bury this one.
+
+    Numbering without padding is not a split: ``run-1`` to ``run-10`` is one
+    consistent choice, its widths differ only because ten has two digits.
+    A split needs a padded value (a leading zero) beside one shorter than it,
+    ``run-01`` beside ``run-2``: that is the dataset written two ways.
     """
     out: list[WidthSplit] = []
     for entity in schema_mod.entity_keys():
         if not is_index(entity):
             continue
         by_width: dict[int, list[tuple[str, int]]] = {}
+        padded = 0
         for value, n in counts(Path(root), entity):
             if not value.isdigit():
                 continue
             by_width.setdefault(len(value), []).append((value, n))
-        if len(by_width) < 2:
+            if len(value) > 1 and value.startswith("0"):
+                padded = max(padded, len(value))
+        if len(by_width) < 2 or not padded or min(by_width) >= padded:
             continue
         widths = tuple(sorted(by_width))
         out.append(WidthSplit(
@@ -296,6 +307,7 @@ def inconsistent_widths(root: Path) -> list[WidthSplit]:
                 f"{entity}-{by_width[w][0][0]}" for w in widths
             ),
             files=sum(n for group in by_width.values() for _, n in group),
+            padded=padded,
         ))
     return out
 

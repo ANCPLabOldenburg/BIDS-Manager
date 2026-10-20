@@ -53,6 +53,7 @@ class FileReportWorker(QThread):
         schema: str | None = None,
         max_rows: int = 1000,
         flag_todos: bool = True,
+        strict: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -61,6 +62,7 @@ class FileReportWorker(QThread):
         self._schema = schema or None
         self._max_rows = max_rows
         self._flag_todos = flag_todos
+        self._strict = strict
 
     def run(self) -> None:
         from ..editor.validator import validate_file
@@ -79,7 +81,7 @@ class FileReportWorker(QThread):
             verdict = validate_file(
                 self._bids_root, self._file_path,
                 schema=self._schema, max_rows=self._max_rows,
-                flag_todos=self._flag_todos,
+                flag_todos=self._flag_todos, strict=self._strict,
             )
             self.progress.emit(
                 f"Validation done — severity {verdict.severity.value}"
@@ -109,6 +111,7 @@ class FolderReportWorker(QThread):
         schema: str | None = None,
         max_rows: int = 1000,
         flag_todos: bool = True,
+        strict: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -117,6 +120,7 @@ class FolderReportWorker(QThread):
         self._schema = schema or None
         self._max_rows = max_rows
         self._flag_todos = flag_todos
+        self._strict = strict
 
     def run(self) -> None:
         from ..editor.validator import validate_folder
@@ -136,7 +140,7 @@ class FolderReportWorker(QThread):
             verdicts = validate_folder(
                 self._bids_root, self._folder_path,
                 schema=self._schema, max_rows=self._max_rows,
-                flag_todos=self._flag_todos,
+                flag_todos=self._flag_todos, strict=self._strict,
             )
             self.progress.emit(
                 f"Folder validation done — {len(verdicts)} files checked"

@@ -752,6 +752,7 @@ class ConverterPanel(QWidget):
         user_hints=None,
         exclusions=None,
         index_widths=None,
+        drop_entities=None,
     ) -> ScanWorker:
         """Kick off a background scan.
 
@@ -795,6 +796,7 @@ class ConverterPanel(QWidget):
             user_hints=user_hints,
             exclusions=exclusions,
             index_widths=index_widths,
+            drop_entities=drop_entities,
             classifier_config=AppSettings.load().classifier(),
             parent=self,
         )
@@ -1180,6 +1182,7 @@ class ConverterPanel(QWidget):
             fill_scope=s.placeholder_scope(),
             companions=bool(s.post_fixup_companions),
             citation=bool(s.post_fixup_citation),
+            tables=bool(s.post_metadata_tables),
             intended_for=s.convert_intended_for,
             b0_field=bool(s.convert_b0_field),
             deface=bool(s.convert_deface),
@@ -1807,6 +1810,7 @@ class ConverterPanel(QWidget):
             user_hints=s.to_user_hints(),
             exclusions=s.to_exclusions(),
             index_widths=s.scan_index_widths,
+            drop_entities=s.scan_drop_entities,
         )
 
     def _on_tsv_filename_edited(self) -> None:
@@ -2363,6 +2367,8 @@ class ConverterPanel(QWidget):
             fill_scope=s.placeholder_scope(),
             generate_companions=s.post_fixup_companions,
             write_citation_file=s.post_fixup_citation,
+            tables=s.post_metadata_tables,
+            anonymise=s.post_anonymise,
             parent=self,
         )
         worker.progress.connect(self._on_progress)
@@ -2538,6 +2544,7 @@ class ConverterPanel(QWidget):
         """
         before = self._app_settings.scan_exclusions
         before_classifier = self._app_settings.classifier_config
+        before_left_out = set(self._app_settings.scan_drop_entities)
         self._app_settings = AppSettings.load()
         self._sync_confidence_bands()
         # The BIDS preview follows the settings that change what is written.
@@ -2546,6 +2553,9 @@ class ConverterPanel(QWidget):
             self._offer_exclusions()
         if self._model is not None and self._app_settings.classifier_config != before_classifier:
             self.offer_reclassify()
+        added = [k for k in self._app_settings.scan_drop_entities if k not in before_left_out]
+        if self._model is not None and added:
+            self.offer_leave_out(added)
 
     def _sync_confidence_bands(self) -> None:
         from .delegates.inspection_cells import set_confidence_bands
@@ -2599,6 +2609,36 @@ class ConverterPanel(QWidget):
             self.log_message.emit(f"Named again from the acquisition parameters: {done} "
                                   "series")
         return done
+
+    def offer_leave_out(self, keys, *, ask: bool = True) -> int:
+        """Entities newly chosen to leave out of names, offered to the table
+        already open: what it would change, asked first, as one Undo.
+        Returns the rows changed. (An entity no longer left out cannot be
+        given back here: the table does not remember its value. A new scan
+        does.)"""
+        from ..inventory.leave_out import plan_leave_out
+
+        plan = plan_leave_out(self._model.dataframe(), keys)
+        if not plan:
+            return 0
+        if ask:
+            listed = ", ".join(f"{k}-" for k in plan.entities)
+            answer = QMessageBox.question(
+                self, "Leave entities out of the open table?",
+                f"You chose to leave {listed} out of proposed names. In the scan "
+                f"table open now, {len(plan.changes)} recording(s) would be renamed.\n\n"
+                + plan.summary()
+                + "\n\nApply it now? One Undo takes it back. Otherwise it applies "
+                  "from the next scan.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return 0
+        changed = self._model.apply_leave_out(plan)
+        if changed:
+            self.log_message.emit(f"Left out of the open table's names: {plan.summary()}")
+        return changed
 
     def _offer_exclusions(self) -> None:
         """Saved scan rules act on the table already open, not only on the

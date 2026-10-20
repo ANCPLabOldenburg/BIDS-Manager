@@ -96,7 +96,9 @@ def group_report(
                     fix_action=issue.fix_action,
                 )
                 groups[key] = grp
-            grp.files.append(Path(verdict.path))
+            # The verdict's own Path, not a new one per finding: wrapping
+            # 287,000 of them was most of the grouping's second.
+            grp.files.append(verdict.path)
             grp.issues.append(issue)
 
     def _rank(g: FindingGroup) -> tuple:

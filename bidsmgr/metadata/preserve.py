@@ -204,8 +204,11 @@ def _read_json(path: Path) -> Optional[dict]:
 
 
 def _read_tsv(path: Path):
+    # ``utf-8-sig``: MNE-BIDS starts its tables with a byte-order mark, and
+    # read as plain UTF-8 the first column is "\ufefffilename", so a
+    # re-conversion found no ``filename`` column and merged nothing.
     try:
-        with Path(path).open("r", encoding="utf-8", newline="") as fh:
+        with Path(path).open("r", encoding="utf-8-sig", newline="") as fh:
             reader = csv.DictReader(fh, delimiter="\t")
             return list(reader.fieldnames or []), list(reader)
     except (OSError, ValueError, UnicodeDecodeError) as exc:

@@ -95,7 +95,7 @@ def show_dialog(parent: QWidget) -> "WhatsNewDialog":
 # ---------------------------------------------------------------------------
 
 
-def _logo_targets(n: int, rng: np.random.Generator) -> np.ndarray:
+def logo_points(n: int, rng: np.random.Generator) -> np.ndarray:
     """``n`` points along the edges of the logo (the folder and the brain's
     folds), centred, the longer side 1."""
     img = QImage(str(_LOGO))
@@ -176,7 +176,8 @@ def _trace(kind: int, base: np.ndarray, t: float) -> np.ndarray:
     return np.stack([x, y], axis=1)
 
 
-def _ease(s: np.ndarray) -> np.ndarray:
+def ease(s: np.ndarray) -> np.ndarray:
+    """Ease in and out (cubic), clipped to 0..1."""
     s = np.clip(s, 0.0, 1.0)
     return np.where(s < 0.5, 4 * s ** 3, 1 - (-2 * s + 2) ** 3 / 2)
 
@@ -204,7 +205,7 @@ class Particles:
         # Each kind takes the part of the logo that faces it, so the streams
         # are short and the logo ends up in seven bands of colour.
         # The gathered logo is drawn larger than the ring the figures stand on.
-        targets = 1.5 * _logo_targets(self.n, rng)
+        targets = 1.5 * logo_points(self.n, rng)
         order = np.argsort(np.arctan2(targets[:, 1], targets[:, 0]))
         start = np.argmin(np.mod(np.arctan2(targets[order, 1], targets[order, 0]) - angle[0],
                                  2 * np.pi))
@@ -227,7 +228,7 @@ class Particles:
         start = self.figure_points(min(t, GATHER_AT))
         if t <= GATHER_AT:
             return start
-        s = _ease((t - GATHER_AT - self.delay) / GATHER)[:, None]
+        s = ease((t - GATHER_AT - self.delay) / GATHER)[:, None]
         mid = (start + self.target) / 2
         bend = np.stack([-(self.target - start)[:, 1], (self.target - start)[:, 0]], axis=1)
         ctrl = mid + 0.18 * bend
@@ -463,6 +464,10 @@ class WhatsNewDialog(QDialog):
         notes = QPushButton("Release notes", footer)
         notes.setAutoDefault(False)
         notes.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(NOTES_URL)))
+        star = QPushButton("Give us a star", footer)
+        star.setAutoDefault(False)
+        star.setToolTip("Why a star on GitHub helps, and how to give one")
+        star.clicked.connect(self._show_star_request)
         docs = QPushButton("Open the documentation", footer)
         docs.setAutoDefault(False)
         docs.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(DOCS_URL)))
@@ -470,12 +475,19 @@ class WhatsNewDialog(QDialog):
         start.setDefault(True)
         start.clicked.connect(self.accept)
         row.addWidget(notes)
+        row.addWidget(star)
         row.addStretch(1)
         row.addWidget(docs)
         row.addWidget(start)
         outer.addWidget(footer)
-        self._buttons = {"notes": notes, "docs": docs, "continue": start}
+        self._buttons = {"notes": notes, "star": star, "docs": docs, "continue": start}
         start.setFocus()
+
+    def _show_star_request(self) -> None:
+        """The request for a GitHub star (``gui/star_request.py``), over this."""
+        from .star_request import show_dialog
+
+        show_dialog(self)
 
     def _credit_row(self) -> QHBoxLayout:
         """The MRI naming is an early implementation, and part of its idea
@@ -497,4 +509,5 @@ class WhatsNewDialog(QDialog):
 
 
 __all__ = ["DOCS_URL", "KINDS", "NEWS_FOR", "NOTES_URL", "Particles", "GatherCanvas",
-           "WhatsNewDialog", "maybe_show", "seven_colours", "should_show", "show_dialog"]
+           "WhatsNewDialog", "ease", "logo_points", "maybe_show", "seven_colours", "should_show",
+           "show_dialog"]

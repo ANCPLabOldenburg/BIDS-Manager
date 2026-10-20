@@ -768,16 +768,47 @@ class TsvViewerPane(QWidget):
             self.save_failed.emit(self._current_file, msg)
             return False
         try:
-            self._write_model_to_disk(self._current_file)
+            self._save_reversibly(self._current_file)
         except OSError as exc:
             log.warning("save failed for %s: %s", self._current_file, exc)
             self.save_failed.emit(self._current_file, str(exc))
             return False
         self._snapshot_current_model()
         self._dirty = False
+        # What was saved is now one step of the dataset's history, undone
+        # there (``can_undo`` / ``undo`` reach it); the pane keeps only what
+        # is not saved yet.
+        self._history.clear()
+        self._pre_edit = self._snapshot()
         self._refresh_dirty_ui()
+        self.history_changed.emit()
         self.file_saved.emit(self._current_file)
         return True
+
+    def _save_reversibly(self, path: Path) -> None:
+        """Write the table through the dataset's history, so the save is one
+        step that Undo can take back, as a sidecar's is. It used to be
+        written straight to disk: an edited table could never be undone once
+        saved. Written to a temporary file first (plain or gzip, like the
+        original) and swapped in. Outside a dataset, a plain write."""
+        root = self._current_root
+        if root is not None:
+            import tempfile
+
+            from ...project.operations import begin_operation
+
+            try:
+                with tempfile.TemporaryDirectory(prefix="bidsmgr-tsv-") as tmp:
+                    staged = Path(tmp) / path.name
+                    self._write_model_to_disk(staged)
+                    with begin_operation(root, f"Edit {path.name}") as op:
+                        op.replace_from(path, staged)
+                return
+            except OSError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - fall back, never block a save
+                log.debug("operation log unavailable for %s: %s", path, exc)
+        self._write_model_to_disk(path)
 
     def revert(self) -> None:
         """Reload the bound file from disk, dropping unsaved edits."""
@@ -893,7 +924,7 @@ class TsvViewerPane(QWidget):
         self.history_changed.emit()
 
     # ----------------------------------------------------------------------
-    # Undo / redo (snapshot-based, in-memory; disk write still via Save)
+    # Undo / redo: unsaved edits in memory, saved ones in the dataset history
     # ----------------------------------------------------------------------
 
     def _snapshot(self) -> tuple[list[str], list[list[str]]]:
@@ -911,25 +942,71 @@ class TsvViewerPane(QWidget):
         self._refresh_dirty_ui()
         self.history_changed.emit()
 
-    def can_undo(self) -> bool:
+    def _saved_step(self, which: str) -> bool:
+        """True when the dataset's newest saved step to undo (or redo) is a
+        change to THIS table alone, which the pane may take as its own."""
+        if self._current_file is None or self._current_root is None or self._dirty:
+            return False
+        from ...project import operations as ops
+
+        peek = ops.peek_undo if which == "undo" else ops.peek_redo
+        try:
+            return ops.only_touches(peek(self._current_root), self._current_root,
+                                    self._current_file)
+        except OSError:
+            return False
+
+    def has_unsaved_history(self) -> bool:
+        """Edits not saved yet that Undo would take back, one at a time."""
         return self._current_file is not None and self._history.can_undo
 
-    def can_redo(self) -> bool:
+    def has_unsaved_redo(self) -> bool:
+        """Unsaved edits just undone that Redo would bring back."""
         return self._current_file is not None and self._history.can_redo
 
+    def can_undo(self) -> bool:
+        return self._current_file is not None and (
+            self._history.can_undo or self._saved_step("undo"))
+
+    def can_redo(self) -> bool:
+        return self._current_file is not None and (
+            self._history.can_redo or self._saved_step("redo"))
+
     def undo(self) -> None:
+        """Take back the last unsaved edit or, with none, the last saved change
+        to this table (the file goes back on disk)."""
         if self._current_file is None:
             return
-        snap = self._history.undo(self._snapshot())
-        if snap is not None:
-            self._restore(snap)
+        if self._history.can_undo:
+            snap = self._history.undo(self._snapshot())
+            if snap is not None:
+                self._restore(snap)
+            return
+        if self._saved_step("undo"):
+            from ...project.operations import undo_last
+
+            undo_last(self._current_root)
+            self.reload_from_disk()
 
     def redo(self) -> None:
         if self._current_file is None:
             return
-        snap = self._history.redo(self._snapshot())
-        if snap is not None:
-            self._restore(snap)
+        if self._history.can_redo:
+            snap = self._history.redo(self._snapshot())
+            if snap is not None:
+                self._restore(snap)
+            return
+        if self._saved_step("redo"):
+            from ...project.operations import redo_last
+
+            redo_last(self._current_root)
+            self.reload_from_disk()
+
+    def reload_from_disk(self) -> None:
+        """Show the table as it is on disk now (after an undo or redo)."""
+        if self._current_file is None:
+            return
+        self.set_file(self._current_file, self._current_root)
 
     #: A folder open for viewing: the table is shown, never edited.
     _read_only = False

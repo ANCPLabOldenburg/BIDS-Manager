@@ -227,7 +227,6 @@ def deface_dataset(
                 if keep_original_in_sourcedata:
                     mirror = sourcedata_mirror(root, cand.path)
                     if mirror is not None and not mirror.exists():
-                        mirror.parent.mkdir(parents=True, exist_ok=True)
                         op.replace_from(mirror, cand.path)
 
                 op.replace_from(cand.path, result.output)

@@ -353,19 +353,20 @@ class QualityPanel(QWidget):
         self.result = None
         self._clear()
         self._set_more(False)
-        row = QHBoxLayout()
-        spinner = BusySpinner()
-        spinner.set_busy(True, message="")
+        # Placed, then shown: a spinner shown before it had a parent was a
+        # window for a moment and took the focus from the preview on macOS.
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        spinner = BusySpinner(holder)
         row.addWidget(spinner)
-        self.busy_label = QLabel(message)
+        self.busy_label = QLabel(message, holder)
         self.busy_label.setObjectName("viz-track-readout")
         self.busy_label.setWordWrap(True)
         row.addWidget(self.busy_label, 1)
-        holder = QWidget()
-        row.setContentsMargins(0, 0, 0, 0)
-        holder.setLayout(row)
         self.body_layout.addWidget(holder)
         self.body_layout.addStretch(1)
+        spinner.set_busy(True, message="")
 
     def set_progress(self, message: str) -> None:
         label = getattr(self, "busy_label", None)

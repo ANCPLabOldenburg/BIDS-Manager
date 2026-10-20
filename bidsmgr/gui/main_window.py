@@ -419,14 +419,14 @@ class _TopHeader(QFrame):
 
         Two artworks ship with the wheel:
 
-        * ``"default"``: ``assets/logo.png`` — a monochrome mark drawn
+        * ``"app_icon"`` (the default): the full-colour BIDS Manager
+          application icon from ``assets/macos/``, rendered as-is on
+          both themes (no inversion).
+        * ``"mark"``: ``assets/logo.png``, a monochrome mark drawn
           dark-on-transparent for a light background. On a dark theme
           we invert the RGB channels (alpha preserved) so the same
           artwork reads as light-on-transparent against the dark
           surface.
-        * ``"app_icon"``: ``assets/macos/AppIcon128.png`` — the
-          full-color BIDS-Manager application icon. Rendered as-is on
-          both themes (no inversion).
 
         Falls back to a gradient ``B`` if neither file is readable so
         the GUI stays usable in a partial source tree.

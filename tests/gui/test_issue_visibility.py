@@ -148,28 +148,26 @@ def test_chip_clicked_signal_only_fires_when_set_clickable(qtbot) -> None:
 
 
 def test_issues_dialog_lists_only_rows_of_requested_severity(qtbot) -> None:
-    from bidsmgr.gui.issues_dialog import _RowCard
     df = make_df([_func_row(), _warn_row(), _err_row(), _skip_row()])
     model = InventoryTableModel(df)
     dlg = IssuesDialog(model, severity="warn")
     qtbot.addWidget(dlg)
 
-    # One card per matching row; read each card's title button.
-    cards = dlg.findChildren(_RowCard)
-    titles = [c._title_btn.text() for c in cards]
+    # One entry per matching row.
+    listed = dlg._list.view.findings_model()
+    titles = [listed.index(i, 0).data() for i in range(listed.rowCount())]
     assert any("sub-002" in t for t in titles)
     assert not any("sub-003" in t for t in titles)  # err
     assert not any("sub-004" in t for t in titles)  # skip
 
 
 def test_issues_dialog_shows_none_when_no_matches(qtbot) -> None:
-    from bidsmgr.gui.issues_dialog import _RowCard
     from PyQt6.QtWidgets import QLabel
     df = make_df([_func_row()])
     model = InventoryTableModel(df)
     dlg = IssuesDialog(model, severity="err")
     qtbot.addWidget(dlg)
-    assert dlg.findChildren(_RowCard) == []
+    assert dlg._list.view.findings_model().rowCount() == 0
     # The "(no matching rows)" hint label is present.
     hints = [
         lbl for lbl in dlg.findChildren(QLabel)
@@ -179,7 +177,9 @@ def test_issues_dialog_shows_none_when_no_matches(qtbot) -> None:
 
 
 def test_issues_dialog_emits_row_selected_on_activation(qtbot) -> None:
-    from bidsmgr.gui.issues_dialog import _RowCard
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+
     df = make_df([_func_row(), _warn_row()])
     model = InventoryTableModel(df)
     dlg = IssuesDialog(model, severity="warn")
@@ -187,25 +187,27 @@ def test_issues_dialog_emits_row_selected_on_activation(qtbot) -> None:
 
     captured: list[int] = []
     dlg.row_selected.connect(captured.append)
-    cards = dlg.findChildren(_RowCard)
-    assert len(cards) == 1
-    # Activating the card's title button fires the signal.
-    cards[0]._title_btn.click()
+    view = dlg._list.view
+    assert view.findings_model().rowCount() == 1
+    # Opening the row (Return, or a double click) fires the signal.
+    view.setCurrentIndex(view.findings_model().index(0, 0))
+    QTest.keyClick(view, Qt.Key.Key_Return)
     assert captured == [1]  # row 1 is the warn row (row 0 is the ok one)
 
 
-def test_issues_dialog_renders_one_valmessage_per_pipe_separated_issue(qtbot) -> None:
-    from bidsmgr.gui.issues_dialog import _RowCard
+def test_issues_dialog_lists_one_line_per_pipe_separated_issue(qtbot) -> None:
     df = make_df([_warn_row(
         issues="rerouted to fmap/epi: foo | fmap multi-output: bar",
     )])
     model = InventoryTableModel(df)
     dlg = IssuesDialog(model, severity="warn")
     qtbot.addWidget(dlg)
-    cards = dlg.findChildren(_RowCard)
-    assert len(cards) == 1
-    # Each issue is its own ValMessage inside the card.
-    assert len(cards[0].findChildren(ValMessage)) == 2
+    listed = dlg._list.view.findings_model()
+    assert listed.rowCount() == 1
+    # Each issue is its own line under the row.
+    group = listed.index(0, 0)
+    assert [listed.index(i, 0, group).data() for i in range(listed.rowCount(group))] == [
+        "rerouted to fmap/epi: foo", "fmap multi-output: bar"]
 
 
 # ---------------------------------------------------------------------------
@@ -312,20 +314,14 @@ def test_mixed_study_note_reads_as_warn_in_model(qtbot) -> None:
 
 def test_mixed_study_row_lists_in_warn_issues_dialog(qtbot) -> None:
     from bidsmgr.cli.scan import MIXED_STUDY_ISSUE_TOKEN
-    from bidsmgr.gui.issues_dialog import _RowCard
-    from PyQt6.QtWidgets import QLabel
 
     df = make_df([_func_row(issues=_mixed_study_note())])
     model = InventoryTableModel(df)
     dlg = IssuesDialog(model, severity="warn")
     qtbot.addWidget(dlg)
 
-    cards = dlg.findChildren(_RowCard)
-    assert len(cards) == 1
-    bodies = [
-        lbl.text()
-        for card in cards
-        for vm in card.findChildren(ValMessage)
-        for lbl in vm.findChildren(QLabel)
-    ]
+    listed = dlg._list.view.findings_model()
+    assert listed.rowCount() == 1
+    group = listed.index(0, 0)
+    bodies = [listed.index(i, 0, group).data() for i in range(listed.rowCount(group))]
     assert any(MIXED_STUDY_ISSUE_TOKEN in t for t in bodies)

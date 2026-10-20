@@ -20,6 +20,8 @@ the click, and the window system left it behind the main window.
 
 from __future__ import annotations
 
+import sys
+
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -45,7 +47,13 @@ _AS_IS = ("The recording as it is in the source folder; the conversion copies it
 class PreviewDialog(QDialog):
     def __init__(self, title: str, work_dir: Optional[Path],
                  parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
+        # On macOS a dialog is a panel, which can never be the app's main
+        # window: whenever something inside it closed (a menu, the shortcuts
+        # list), macOS handed the focus to the main window and brought it to
+        # the front over the preview. A normal window keeps it. Windows and
+        # Linux already behaved, so they keep the dialog they had.
+        super().__init__(parent, Qt.WindowType.Window if sys.platform == "darwin"
+                         else Qt.WindowType.Dialog)
         from .widgets import BusySpinner
 
         self.setWindowTitle(f"Preview: {title}")
@@ -83,9 +91,12 @@ class PreviewDialog(QDialog):
         pending.setObjectName("pane")
         pl = QVBoxLayout(pending)
         pl.addStretch(1)
+        # Into the layout before it spins: started with no parent it is a
+        # window for a moment and takes the focus, and on macOS the main
+        # window then comes to the front over this one (GUI_LOOK_AND_FEEL 4.26).
         self.spinner = BusySpinner()
-        self.spinner.set_busy(True, message="Converting for a look...")
         pl.addWidget(self.spinner, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.spinner.set_busy(True, message="Converting for a look...")
         self.status = QLabel("")
         self.status.setObjectName("pane-hint")
         self.status.setWordWrap(True)
@@ -96,6 +107,23 @@ class PreviewDialog(QDialog):
         self._pending = pending
         self._stack.addWidget(pending)
         v.addWidget(self._stack, 1)
+
+        # OpenGL-ready before it is shown. The window opens at once, pending
+        # (4.22), and only gets its viewer when the image arrives; the
+        # viewer's 3-D view is OpenGL, and adding the first OpenGL view to a
+        # window already on screen makes Qt rebuild that window: it hid and
+        # showed again, and on macOS the main window came to the front in
+        # between, so the preview ended up behind it. A hidden, empty OpenGL
+        # view made here, under the same GPU check the viewer uses, makes the
+        # window OpenGL from the start. It never draws.
+        from .viz.canvases.render import gpu_available
+
+        if gpu_available():
+            from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+
+            self._gl_ready = QOpenGLWidget(self)
+            self._gl_ready.setFixedSize(0, 0)
+            self._gl_ready.hide()
 
     @property
     def viewer(self) -> Optional[Viewer]:

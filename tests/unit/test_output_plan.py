@@ -117,7 +117,11 @@ def test_eye_tracking_writes_two_files_per_eye() -> None:
     assert "sub-01/beh/sub-01_task-rest_recording-eye1_physio.tsv.gz" in sure
     assert "sub-01/beh/sub-01_task-rest_recording-eye1_physioevents.json" in sure
     assert "sub-01/beh/sub-01_task-rest_recording-eye2_physio.tsv.gz" in maybe
-    assert not any(p.endswith("_scans.tsv") for p in sure)
+    # Eye tracking with nothing else recorded IS the subject's data, so the
+    # metadata step lists it, and the preview says so (the second eye only
+    # when it exists).
+    scans = approximate(pd.DataFrame(rows), plan.find("sub-01/sub-01_scans.tsv"))
+    assert [r[0] for r in scans.rows] == ["beh/sub-01_task-rest_recording-eye1_physio.tsv.gz"]
 
 
 def _dicom(path, number: int, description: str) -> str:
@@ -273,9 +277,8 @@ def test_the_scans_table() -> None:
     plan = plan_output(df)
     scans = approximate(df, plan.find("sub-01/sub-01_scans.tsv"))
     assert scans.header == ("filename", "acq_time")
+    # One row per recording: the gradient tables belong to the image's row.
     assert scans.rows == (("anat/sub-01_T1w.nii.gz", "2023-09-14T10:25:20.255000"),
-                          ("dwi/sub-01_dwi.bval", "2023-09-14T10:38:42"),
-                          ("dwi/sub-01_dwi.bvec", "2023-09-14T10:38:42"),
                           ("dwi/sub-01_dwi.nii.gz", "2023-09-14T10:38:42"))
 
 

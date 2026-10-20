@@ -60,7 +60,10 @@ def update_scans_tsv(
     n_rewritten = 0
     for scans_tsv in subject_staging_dir.rglob("*_scans.tsv"):
         try:
-            with open(scans_tsv, newline="", encoding="utf-8") as fh:
+            # ``utf-8-sig``: the tables mne-bids writes start with a
+            # byte-order mark, which plain UTF-8 reads into the first column's
+            # name, so ``filename`` was never found and no row followed.
+            with open(scans_tsv, newline="", encoding="utf-8-sig") as fh:
                 reader = csv.DictReader(fh, delimiter="\t")
                 fieldnames = reader.fieldnames or []
                 rows = list(reader)

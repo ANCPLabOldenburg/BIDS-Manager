@@ -1413,10 +1413,12 @@ class PropertiesPanel(QWidget):
             btn.clicked.connect(lambda _=False, r=row: self.compute_psd(r))
         h.addWidget(btn)
 
+        # Into the row before it spins: a spinner started with no parent is a
+        # window for a moment and takes the focus (GUI_LOOK_AND_FEEL 4.26).
         spinner = BusySpinner()
+        h.addWidget(spinner)
         if is_computing:
             spinner.set_busy(True, message="")
-        h.addWidget(spinner)
         h.addStretch(1)
         return row_w
 
@@ -1821,10 +1823,12 @@ class PropertiesPanel(QWidget):
             btn.clicked.connect(lambda _=False, r=row: self.preview(r))
         self.preview_button = btn
         h.addWidget(btn)
+        # Into the row before it spins: a spinner started with no parent is a
+        # window for a moment and takes the focus (GUI_LOOK_AND_FEEL 4.26).
         spinner = BusySpinner()
+        h.addWidget(spinner)
         if busy:
             spinner.set_busy(True, message="")
-        h.addWidget(spinner)
         h.addStretch(1)
         return row_w
 

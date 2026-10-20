@@ -33,10 +33,15 @@ from .tables import eval_columns
 from .values import validate_value
 
 # Rule groups whose rules this engine evaluates: content checks, sidecar-field
-# requirements, and dataset_description.json field requirements. Other groups
-# (files, directories, modalities, ...) describe structure and are handled
-# elsewhere.
-_EVALUATED_GROUPS = ("checks", "sidecars", "dataset_metadata", "tabular_data")
+# requirements, dataset_description.json field requirements, and the fields of
+# JSON files that are files of their own (``rules.json``: every
+# ``coordsystem.json`` rule). Other groups (files, directories, modalities,
+# ...) describe structure and are handled elsewhere.
+#
+# VENDORED CHANGE: ``json`` was missing, so no coordsystem.json was ever
+# checked: an MEG one without MEGCoordinateSystem passed, which the reference
+# validator reports as JSON_KEY_REQUIRED.
+_EVALUATED_GROUPS = ("checks", "sidecars", "dataset_metadata", "tabular_data", "json")
 
 # Context fields/aggregates not yet populated with real data. A rule that
 # depends on one of these cannot be determined, so it is skipped rather than
@@ -68,12 +73,42 @@ _ADDENDUM_RE = re.compile(r"(required|recommended) if `(\w+)` is `(\w+)`")
 def apply_rules(schema: Namespace, context: Mapping[str, Any]) -> list[Issue]:
     """Evaluate the schema's checks and sidecar-field rules for one file."""
     issues: list[Issue] = []
-    rules = schema["rules"]
-    for group in _EVALUATED_GROUPS:
-        if group in rules:
-            _descend(schema, rules[group], context, issues, f"rules.{group}")
+    for path, rule in _flat_rules(schema):
+        if _selectors_pass(rule.get("selectors", []), context):
+            _apply_rule(schema, rule, context, issues, path)
     issues.extend(_validate_present_values(schema, context))
     return _dedupe(issues)
+
+
+# VENDORED CHANGE (speed): the rules are flattened ONCE per schema, into plain
+# dicts, with the rules that cannot be evaluated already left out. The walk
+# through the schema's namespace used to run for every file (4 million lookups
+# on a 1,500-file folder), with a regex per rule per file on top.
+_FLAT: dict[int, list[tuple[str, dict]]] = {}
+
+
+def _flat_rules(schema: Namespace) -> list[tuple[str, dict]]:
+    found = _FLAT.get(id(schema))
+    if found is None:
+        found = []
+        rules = schema["rules"]
+        for group in _EVALUATED_GROUPS:
+            if group in rules:
+                _collect_rules(rules[group], f"rules.{group}", found)
+        _FLAT[id(schema)] = found
+    return found
+
+
+def _collect_rules(node: Any, path: str, out: list[tuple[str, dict]]) -> None:
+    if not isinstance(node, Mapping):
+        return
+    if "selectors" in node:
+        rule = node.to_dict() if hasattr(node, "to_dict") else dict(node)
+        if _is_evaluable(rule):
+            out.append((path, rule))
+        return
+    for key, child in node.items():
+        _collect_rules(child, f"{path}.{key}", out)
 
 
 def _validate_present_values(schema: Namespace, context: Mapping[str, Any]) -> list[Issue]:
@@ -94,13 +129,14 @@ def _validate_present_values(schema: Namespace, context: Mapping[str, Any]) -> l
     if not isinstance(data, Mapping):
         return []
     by_name = introspect.metadata_by_name(schema)
+    formats = _formats(schema)
     location = _location(context)
     issues: list[Issue] = []
     for field_name, value in data.items():
         definitions = by_name.get(field_name)
         if not definitions:
             continue
-        problems = [validate_value(value, definition) for definition in definitions]
+        problems = [validate_value(value, definition, formats) for definition in definitions]
         if all(problems):  # the value fails every definition for this name
             issues.append(
                 Issue(
@@ -116,6 +152,20 @@ def _validate_present_values(schema: Namespace, context: Mapping[str, Any]) -> l
     return issues
 
 
+_FORMATS_MEMO: dict[int, dict[str, str]] = {}
+
+
+def _formats(schema: Namespace) -> dict[str, str]:
+    """The schema's format patterns, once per schema (VENDORED CHANGE: see
+    ``rules/values.py``)."""
+    found = _FORMATS_MEMO.get(id(schema))
+    if found is None:
+        from .values import format_patterns
+
+        found = _FORMATS_MEMO[id(schema)] = format_patterns(schema)
+    return found
+
+
 def _dedupe(issues: list[Issue]) -> list[Issue]:
     """Drop duplicate findings (the same field can be named by several rules)."""
     seen: set[tuple] = set()
@@ -129,33 +179,14 @@ def _dedupe(issues: list[Issue]) -> list[Issue]:
     return out
 
 
-def _descend(
-    schema: Namespace,
-    node: Any,
-    context: Mapping[str, Any],
-    issues: list[Issue],
-    path: str,
-) -> None:
-    if not isinstance(node, Mapping):
-        return
-    if "selectors" in node:
-        _eval_rule(schema, node, context, issues, path)
-        return
-    for key, child in node.items():
-        _descend(schema, child, context, issues, f"{path}.{key}")
-
-
-def _eval_rule(
+def _apply_rule(
     schema: Namespace,
     rule: Mapping[str, Any],
     context: Mapping[str, Any],
     issues: list[Issue],
     path: str,
 ) -> None:
-    if not _is_evaluable(rule):
-        return
-    if not _selectors_pass(rule.get("selectors", []), context):
-        return
+    """A rule whose selectors passed: its checks, fields and columns."""
     if "checks" in rule:
         _eval_checks(rule, context, issues, path)
     if "fields" in rule:
@@ -183,6 +214,19 @@ def _selectors_pass(selectors: list[str], context: Mapping[str, Any]) -> bool:
     return True
 
 
+# VENDORED CHANGE: rules where a check that evaluates to null IS the failure.
+# Elsewhere null means "the context cannot say" and is skipped, which keeps a
+# partial context from inventing findings. Here the null is the answer: an
+# eye tracker looking at a screen with no events sidecar describing the
+# screen (StimulusPresentation) is exactly the incomplete recording the rule
+# exists for, and the reference validator reports it as an error. Listed by
+# rule, not made the general behaviour, because the general behaviour copies
+# the reference's cascades too.
+_NULL_IS_FAILURE = frozenset({
+    "rules.checks.eyetrack.EyetrackingStimulusPresentation",
+})
+
+
 def _eval_checks(
     rule: Mapping[str, Any],
     context: Mapping[str, Any],
@@ -194,6 +238,9 @@ def _eval_checks(
             result = evaluate_string(check, context)
         except EvaluationError:
             continue  # unsupported construct: skip this check, do not report
+        if result is None and path in _NULL_IS_FAILURE:
+            issues.append(_issue_from_rule(rule, context, path, check))
+            return
         if result is None:
             continue  # not determinable from the available context
         if not truthy(result):
@@ -246,6 +293,15 @@ def _eval_fields(
     data = context.get("sidecar") if is_sidecar_rule else context.get("json")
     if not isinstance(data, Mapping):
         return
+    # VENDORED CHANGE: on a derivative dataset, a sidecar rule written for raw
+    # data is not enforced; only one whose selectors name derivatives is. This
+    # is what the reference validator (3.0.2) does, and the comment here used
+    # to claim the opposite: about 4,400 missing-field findings on the
+    # bids-examples derivatives came from it.
+    if is_sidecar_rule and _dataset_type(context) == "derivative" and not any(
+            "DatasetType" in str(sel) or "derivative" in str(sel)
+            for sel in rule.get("selectors", [])):
+        return
 
     metadata = schema["objects"].get("metadata", {})
 
@@ -258,15 +314,20 @@ def _eval_fields(
         severity = _field_severity(requirement, context)
         if severity is Severity.IGNORE:
             continue
-        # Required and recommended sidecar/dataset fields are reported on derivative
-        # datasets too: the reference validator applies these field rules regardless
-        # of DatasetType, so to stay aligned with it bidsval does not suppress them.
 
         issues.append(
             _missing_field_issue(
                 schema, requirement, field_name, severity, context, path, is_sidecar_rule
             )
         )
+
+
+def _dataset_type(context: Mapping[str, Any]) -> str:
+    dataset = context.get("dataset") or {}
+    description = dataset.get("dataset_description") if isinstance(dataset, Mapping) else None
+    if isinstance(description, Mapping):
+        return str(description.get("DatasetType", "raw"))
+    return "raw"
 
 
 def level_of(requirement: Any, context: Mapping[str, Any] | None = None) -> str:

@@ -922,7 +922,8 @@ def _is_real_answer(value) -> bool:
     return True
 
 
-def _finish_unified_frame(merged, exclusions, index_widths=None) -> None:
+def _finish_unified_frame(merged, exclusions, index_widths=None,
+                          drop_entities=None) -> None:
     """The last passes over the finished inventory, whatever it holds.
 
     Extracted because there are two write paths, one for a tree with MRI in it
@@ -932,11 +933,22 @@ def _finish_unified_frame(merged, exclusions, index_widths=None) -> None:
     one name per subject, and nothing said so.
 
     Order matters. Exclusions first, because an excluded row is never written
-    and so cannot collide. Names next. The mixed-study heads-up last, so it only
-    ever appends to ``issues`` and never downgrades a more severe row
-    state.
+    and so cannot collide. Names next: the entities the user leaves out, then
+    index widths, then runs for what still collides. The mixed-study heads-up
+    last, so it only ever appends to ``issues`` and never downgrades a more
+    severe row state.
     """
     _apply_user_exclusions(merged, exclusions)
+
+    # Entities the user does not want in names, left out where the standard
+    # does not require them and they do not tell two recordings apart.
+    if drop_entities:
+        from ..inventory.leave_out import apply_leave_out, plan_leave_out
+
+        plan = plan_leave_out(merged, drop_entities)
+        apply_leave_out(merged, plan)
+        if plan.summary():
+            print(plan.summary())
 
     # Index widths, before collisions are counted: two rows that differ only
     # by padding are the same name once padded, and the collision pass is
@@ -1984,6 +1996,7 @@ def _apply_index_widths(df: "pd.DataFrame", widths: dict[str, int]) -> int:
      "probe conversion": a["probe_convert"],
      "scan rules": f"{len(a['user_hints'] or [])} hint(s), "
                    f"{len(a['exclusions'] or [])} exclusion(s)",
+     "entities left out": ", ".join(a["drop_entities"] or ()) or "none",
      "acquisition parameters": (a["classifier_config"].general.mode
                                 if a["classifier_config"] is not None else "applied")}))
 def run_scan(
@@ -2002,6 +2015,7 @@ def run_scan(
     exclusions: Optional[list[ExclusionRule]] = None,
     index_widths: Optional[dict[str, int]] = None,
     classifier_config=None,
+    drop_entities: Optional[list[str]] = None,
 ) -> pd.DataFrame:
     """Run the full scan pipeline and return the DataFrame written to TSV.
 
@@ -2036,6 +2050,10 @@ def run_scan(
         ``.tmp/`` scratch tree is **always wiped** when ``run_scan``
         returns — including on error — so the user is left with the
         inventory TSV and nothing else. MRI rows only.
+    drop_entities
+        Short entity keys (``acq``, ``run``) to leave out of the proposed
+        names, wherever the standard does not require them and they do not
+        tell two recordings apart (``inventory.leave_out``).
     """
 
     dataset_slug = dataset if dataset else _default_dataset_slug(dicom_root)
@@ -2097,7 +2115,7 @@ def run_scan(
             if col not in df_eeg.columns:
                 _init_object_column(df_eeg, col)
         merged = _finalize_unified_dataframe(df_eeg)
-        _finish_unified_frame(merged, exclusions, index_widths)
+        _finish_unified_frame(merged, exclusions, index_widths, drop_entities)
         merged.to_csv(output_tsv, sep="\t", index=False, columns=_unified_column_order(merged))
         print(f"Inventory written to: {output_tsv}")
         scaffold_path = _write_recording_meta_scaffold(merged, Path(output_tsv))
@@ -2194,7 +2212,7 @@ def run_scan(
     # Exclusions, name collisions and the mixed-study heads-up, on the unified
     # frame so they cover MRI and EEG/MEG alike. Shared with the EEG-only path
     # above, which is what stopped them drifting apart again.
-    _finish_unified_frame(merged, exclusions, index_widths)
+    _finish_unified_frame(merged, exclusions, index_widths, drop_entities)
 
     merged.to_csv(
         output_tsv, sep="\t", index=False,
@@ -2324,6 +2342,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--drop-entity", action="append", default=[], metavar="ENTITY",
+        help=(
+            "Leave ENTITY (a short key such as acq or run) out of the proposed "
+            "names. Kept where the standard requires it, and where it is what "
+            "tells two recordings apart, so no name is lost. Repeat it, or "
+            "give several separated by commas: --drop-entity acq,rec."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0,
         help="Increase log verbosity (-v INFO, -vv DEBUG)",
     )
@@ -2386,6 +2413,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 
+    from ..inventory.leave_out import offered
+
+    drop_entities = [k.strip() for v in args.drop_entity for k in v.split(",") if k.strip()]
+    unknown = [k for k in drop_entities if k not in offered()]
+    if unknown:
+        parser.error(
+            f"--drop-entity cannot leave out {', '.join(unknown)}. Choose from: "
+            + ", ".join(offered()) + " (sub, ses and task name the recording).")
+
     user_hints: Optional[list[UserHint]] = None
     exclusions: Optional[list[ExclusionRule]] = None
     if args.rules_file:
@@ -2433,6 +2469,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             line_freq=args.line_freq, montage=args.montage,
             user_hints=user_hints, exclusions=exclusions,
             classifier_config=classifier_config,
+            drop_entities=drop_entities,
             **log_keywords(args),
         )
         version = import_scan_as_version(
@@ -2459,7 +2496,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         user_hints=user_hints,
         exclusions=exclusions,
         classifier_config=classifier_config,
-            **log_keywords(args),
+        drop_entities=drop_entities,
+        **log_keywords(args),
     )
     return 0
 

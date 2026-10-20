@@ -37,6 +37,10 @@ def load_json_checked(bids_file: BIDSFile) -> tuple[dict[str, Any], str | None]:
         raw = bids_file.read_bytes()
     except OSError:
         return {}, "FILE_READ"
+    # VENDORED CHANGE: a byte-order mark is its own finding, named as the
+    # reference validator names it, not "not valid JSON".
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return {}, "INVALID_JSON_ENCODING"
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -50,12 +54,17 @@ def load_json_checked(bids_file: BIDSFile) -> tuple[dict[str, Any], str | None]:
     return data, None
 
 
-def load_columns(bids_file: BIDSFile, max_rows: int = 1000) -> dict[str, list[str]]:
+def load_columns(bids_file: BIDSFile, max_rows: int = 1000,
+                 names: list[str] | None = None) -> dict[str, list[str]]:
     """Read a TSV file as ``{column: [values]}`` of strings.
 
     Values are read as text (BIDS tabular data is text; numeric coercion happens
     in the expression functions). Returns ``{}`` if pandas is unavailable or the
     file cannot be read.
+
+    ``names`` reads a HEADERLESS table under those names: a ``.tsv.gz`` (physio,
+    stim, eye tracking) has no header row and its sidecar's ``Columns`` names
+    them. VENDORED CHANGE: those tables were never column-checked at all.
     """
     try:
         import pandas as pd
@@ -63,12 +72,14 @@ def load_columns(bids_file: BIDSFile, max_rows: int = 1000) -> dict[str, list[st
         return {}
     try:
         nrows = None if max_rows < 0 else max_rows
+        headerless = {"header": None, "names": list(names), "index_col": False} if names else {}
         frame = pd.read_csv(
             bids_file.abspath,
             sep="\t",
             dtype=str,
             keep_default_na=False,
             nrows=nrows,
+            **headerless,
         )
     except Exception:
         return {}

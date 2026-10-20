@@ -681,11 +681,43 @@ class TestTheLineDialog:
         assert list(dlg._swatches) == ["mag", "grad"], "deduped, order kept"
         assert dlg._reset_btn is not None
 
-    def test_a_single_channel_view_is_not_asked_about_types(self, qtbot):
-        dlg = self._dialog(qtbot, 2, "#58a6ff", allow_by_type=False, channel_types=())
+    def test_a_view_without_types_offers_the_theme_colour(self, qtbot):
+        dlg = self._dialog(qtbot, 2, "#58a6ff", channel_types=())
         assert dlg._swatches == {}
         assert dlg._reset_btn is None
-        assert not dlg._by_type.isEnabled()
+        assert dlg._by_type.text() == "Theme colour" and dlg._by_type.isEnabled()
+        assert dlg._one_colour.isChecked()
+        dlg._by_type.setChecked(True)
+        assert SettingsHub.instance().settings.traces.line_color == "", "back to the theme"
+
+    def test_one_channel_type_can_go_back_to_colour_by_type(self, qtbot, one_channel,
+                                                            tmp_path, monkeypatch):
+        """With one channel type the default was greyed out, so a colour once
+        picked could not be undone (2026-10-19)."""
+        from bidsmgr.gui.viz.panels.line_style import LineStyleDialog
+
+        monkeypatch.setattr(LineStyleDialog, "exec", lambda self: 0)
+        viewer = _visualize(qtbot, _pane(qtbot), one_channel, tmp_path)
+        canvas = _traces(viewer)
+        kind = viewer.source().ch_types[0]
+        by_type = canvas.colour_for(kind)
+        viewer.trigger("traces.line")
+        dlg = viewer.presenter.line_dialog
+        qtbot.addWidget(dlg)
+        assert dlg._by_type.text() == "Colour by channel type"
+        assert dlg._by_type.isEnabled() and dlg._by_type.isChecked()
+        dlg._one_colour.setChecked(True)
+        picked = SettingsHub.instance().settings.traces.line_color
+        assert picked and canvas.colour_for(kind) == picked
+        dlg._by_type.setChecked(True)
+        assert SettingsHub.instance().settings.traces.line_color == ""
+        assert canvas.colour_for(kind) == by_type
+
+        dlg.close()
+        viewer.trigger("traces.line")
+        again = viewer.presenter.line_dialog
+        qtbot.addWidget(again)
+        assert again._by_type.isChecked(), "reopened on what is in force"
 
     def test_a_type_colour_is_stored_and_reset_deletes_it(self, qtbot):
         dlg = self._dialog(qtbot, 0, None, channel_types=["mag", "grad"])

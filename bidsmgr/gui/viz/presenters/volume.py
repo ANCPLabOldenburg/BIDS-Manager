@@ -295,9 +295,13 @@ class VolumePresenter:
         row.setSpacing(0)
         row.addWidget(self.qouter, 1)
         self.side_tab = SideTab("Advanced controls", "controls")
-        self.side_tab.setVisible(bool(getattr(self.viewer, "panels", True)))
         self.side_tab.clicked.connect(lambda: self.set_inspector(not self.inspector_open()))
+        # Into the row BEFORE it is made visible: shown with no parent it is
+        # a window for a moment, takes the focus, and on macOS the main
+        # window then comes to the front over a preview window that had just
+        # opened (GUI_LOOK_AND_FEEL 4.26).
         row.addWidget(self.side_tab)
+        self.side_tab.setVisible(bool(getattr(self.viewer, "panels", True)))
         self._tab_row = row
         #: A host showing the column outside these images (two viewers driven
         #: as one keep ONE column, beside both), else None.

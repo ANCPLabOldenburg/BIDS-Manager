@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 
-from PyQt6.QtCore import Qt, QSize, QTimer, QPointF
+from PyQt6.QtCore import QEvent, Qt, QSize, QTimer, QPointF
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import QHBoxLayout, QWidget
 
@@ -134,6 +134,11 @@ class BusySpinner(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(_TICK_MS)
         self._timer.timeout.connect(self._tick)
+        # Shows a spinner made busy before it was placed, once it is.
+        self._placed = QTimer(self)
+        self._placed.setSingleShot(True)
+        self._placed.setInterval(0)
+        self._placed.timeout.connect(self._show_if_still_busy)
 
         # Start hidden — the layout reserves no space when not busy.
         self.setVisible(False)
@@ -154,13 +159,35 @@ class BusySpinner(QWidget):
         if busy:
             self._message.setText(message)
             self._glyph.reset()
-            self.setVisible(True)
+            self._show_placed()
             if not self._timer.isActive():
                 self._timer.start()
         else:
             self._timer.stop()
             self.setVisible(False)
             self._message.setText("")
+
+    def _show_placed(self) -> None:
+        """Shown only once it has a parent. A widget shown without one is a
+        window: for a moment it takes the focus, and on macOS the focus then
+        goes to the main window, over the preview it was meant for. A spinner
+        made busy before it is placed shows when it is placed."""
+        if self.parentWidget() is not None:
+            self.setVisible(True)
+
+    def changeEvent(self, ev) -> None:  # noqa: N802 - Qt signature
+        # changeEvent, not event(): an event() override puts every event
+        # through Python, and a LayoutRequest reaching a spinner already
+        # being destroyed raised "wrapped C/C++ object has been deleted".
+        super().changeEvent(ev)
+        timer = getattr(self, "_timer", None)        # None while constructing
+        if (ev.type() == QEvent.Type.ParentChange and timer is not None
+                and timer.isActive() and self.parentWidget() is not None):
+            self._placed.start()          # its own timer: dies with it
+
+    def _show_if_still_busy(self) -> None:
+        if self._timer.isActive() and self.parentWidget() is not None:
+            self.setVisible(True)
 
     def set_message(self, message: str) -> None:
         """Update only the trailing message without restarting the timer."""

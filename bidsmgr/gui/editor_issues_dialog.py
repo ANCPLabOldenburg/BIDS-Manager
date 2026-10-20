@@ -6,9 +6,10 @@ inventory-row-shaped, for the Converter). This one walks a
 whose severity matches the clicked toolbar chip — plus dataset-level
 findings for the ``ok`` chip when there are none.
 
-Each entry is a card: file path button (the "jump") + a
-:class:`ValMessage` per finding. Activating the button emits
-:pyattr:`file_selected` with the absolute path; the host panel wires
+One painted list (:class:`~bidsmgr.gui.widgets.findings_list.FindingsList`):
+the files, their findings one line each, the selected finding in full
+underneath with its Fix button. Opening a file (double click, Return)
+emits :pyattr:`file_selected` with the absolute path; the host panel wires
 that to the BIDS tree's selection so the user lands on the file in
 question and the three panes update in concert.
 
@@ -19,7 +20,6 @@ Converter's issues dialog, so the global stylesheet handles dark↔light.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -28,13 +28,13 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from ..editor.types import FileVerdict, Severity, ValidationReport
-from .widgets import ElidedPushButton, StatusBadge, ValMessage
+from .widgets import StatusBadge
+from .widgets.findings_list import Finding, FindingsList, Group
 
 
 _SEVERITY_LABEL: dict[str, str] = {
@@ -42,92 +42,6 @@ _SEVERITY_LABEL: dict[str, str] = {
     "warn": "Warnings",
     "ok":   "Files OK",
 }
-
-
-class _FileCard(QFrame):
-    """One file's findings: path button header + stacked ValMessages."""
-
-    activated = pyqtSignal(Path)
-    # A Fix button inside one of this card's messages. Carries the file as
-    # well as the field, because the dialog lists many files and the button
-    # alone cannot say which one it belongs to.
-    #
-    # This was the defect: the button was drawn whenever the finding had a
-    # fix label, and connected to nothing, so it did nothing at all.
-    fix_requested = pyqtSignal(Path, str)
-
-    def __init__(
-        self,
-        path: Path,
-        issues: list,
-        severity: str,
-        datatype: Optional[str] = None,
-        suffix: Optional[str] = None,
-        parent: Optional[QWidget] = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setObjectName("issue-card")
-        self._path = path
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(10, 8, 10, 8)
-        v.setSpacing(5)
-
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
-        head.setSpacing(6)
-
-        # A long path must not force the dialog wide. This button elides to
-        # the room it is given (full path stays in the tooltip), rather than
-        # clipping a word in half the way a plain QPushButton does.
-        title_text = str(path)
-        self._title_btn = ElidedPushButton(title_text)
-        self._title_btn.setObjectName("issue-card-title")
-        self._title_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._title_btn.setFlat(True)
-        self._title_btn.clicked.connect(
-            lambda: self.activated.emit(self._path)
-        )
-        head.addWidget(self._title_btn, 1)
-
-        if datatype or suffix:
-            typed = "/".join(filter(None, [datatype, suffix]))
-            typed_lbl = QLabel(typed)
-            typed_lbl.setObjectName("issue-card-jump-hint")
-            head.addWidget(typed_lbl)
-
-        jump = QLabel("jump →")
-        jump.setObjectName("issue-card-jump-hint")
-        head.addWidget(jump)
-        v.addLayout(head)
-
-        if not issues:
-            v.addWidget(ValMessage(
-                "ok" if severity == "ok" else severity,
-                "",
-                "(no issue text — file passed validation)",
-                None,
-            ))
-        else:
-            for issue in issues:
-                sev_str = (
-                    issue.severity.value
-                    if isinstance(issue.severity, Severity)
-                    else str(issue.severity)
-                )
-                message = ValMessage(
-                    severity=sev_str,
-                    rule=issue.rule_id,
-                    body_html=issue.message,
-                    fix_label=issue.fix_label,
-                    field=issue.field,
-                    schema_rule=issue.schema_rule,
-                )
-                message.fix_requested.connect(
-                    lambda field, p=self._path:
-                        self.fix_requested.emit(p, field)
-                )
-                v.addWidget(message)
 
 
 class EditorIssuesDialog(QDialog):
@@ -196,19 +110,17 @@ class EditorIssuesDialog(QDialog):
         h.addLayout(title_block, 1)
         outer.addWidget(header)
 
-        # Scrollable list of cards.
-        scroll = QScrollArea()
-        scroll.setObjectName("issue-dialog-scroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        # One painted list, not a card and a dozen widgets per finding: the
+        # warnings of 300 files took 59 s to open that way, the whole report
+        # more than 45 minutes (widgets/findings_list).
         body = QWidget()
         body.setObjectName("issue-dialog-body")
         bl = QVBoxLayout(body)
-        bl.setContentsMargins(10, 8, 10, 8)
+        bl.setContentsMargins(12, 10, 12, 10)
         bl.setSpacing(6)
+        self._list = FindingsList("Find a file, a rule, a field or a word")
+        self._list.activated.connect(self._on_card_activated)
+        self._list.fix_requested.connect(self._on_fix_requested)
         if not matched:
             empty = QLabel(
                 f"No files with severity ‘{severity}’ in this report."
@@ -217,30 +129,10 @@ class EditorIssuesDialog(QDialog):
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty.setWordWrap(True)
             bl.addWidget(empty)
-        else:
-            for f in matched:
-                abs_path = self._absolute(f.path)
-                # Show only the issues matching the clicked chip's severity
-                # (an "err" file also carries warnings - don't list those under
-                # the error chip). Skip mirrors so a finding isn't shown twice.
-                shown = [
-                    i for i in f.issues
-                    if (i.severity.value if isinstance(i.severity, Severity)
-                        else str(i.severity)) == severity
-                    and not getattr(i, "mirrored", False)
-                ]
-                card = _FileCard(
-                    path=abs_path,
-                    issues=shown,
-                    severity=severity,
-                    datatype=f.datatype,
-                    suffix=f.suffix,
-                )
-                card.activated.connect(self._on_card_activated)
-                card.fix_requested.connect(self._on_fix_requested)
-                bl.addWidget(card)
-        scroll.setWidget(body)
-        outer.addWidget(scroll, 1)
+            self._list.setVisible(False)
+        bl.addWidget(self._list, 1)
+        self._list.set_groups(self._groups(matched, severity))
+        outer.addWidget(body, 1)
 
         # Footer with a single Close button.
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -287,11 +179,37 @@ class EditorIssuesDialog(QDialog):
         out.sort(key=lambda f: (str(f.path.parent), f.path.name))
         return out
 
+    def _groups(self, matched: list[FileVerdict], severity: str) -> list[Group]:
+        """One group per file: the findings of the clicked chip's severity
+        (an error file also carries warnings, which belong to the other chip),
+        mirrors left out so a finding is not shown twice.
+
+        One pass, the severity compared by identity and the path joined
+        rather than resolved: on a 287,000-finding report this loop WAS the
+        time the dialog took to open, once the widgets were gone."""
+        try:
+            wanted = Severity(severity)
+        except ValueError:
+            wanted = None
+        root = self._bids_root
+        groups = []
+        for f in matched:
+            findings = [
+                Finding(severity, i.message, i.rule_id, i.field, i.fix_label, i.schema_rule)
+                for i in f.issues
+                if (i.severity is wanted or i.severity == severity) and not i.mirrored
+            ]
+            hint = f"{f.datatype}/{f.suffix}" if f.datatype and f.suffix else (
+                f.datatype or f.suffix or "")
+            key = f.path if f.path.is_absolute() else root / f.path
+            groups.append(Group(f.path.as_posix(), key, hint, findings))
+        return groups
+
     @staticmethod
     def _header_text(severity: str) -> str:
         if severity == "err":
             return (
-                "Files that failed validation. Click a row to jump to "
+                "Files that failed validation. Double-click a file to open "
                 "it in the BIDS tree and start fixing."
             )
         if severity == "warn":
@@ -301,7 +219,7 @@ class EditorIssuesDialog(QDialog):
             )
         if severity == "ok":
             return (
-                "Files that passed validation. Click any to inspect "
+                "Files that passed validation. Double-click any to open "
                 "its full schema audit."
             )
         return ""
