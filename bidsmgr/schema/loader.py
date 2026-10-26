@@ -66,11 +66,11 @@ def available_versions() -> list[str]:
 
 @lru_cache(maxsize=8)
 def _load(version: Optional[str]) -> Namespace:
-    return bidsval_schema.resolve(version)
+    return bidsval_schema.resolve(version or None)
 
 
 def get_schema(version: Optional[str] = None) -> Namespace:
-    """The BIDS schema namespace, at ``version`` or the active one."""
+    """Schema at ``version``; ``None`` uses the active one, ``""`` the default."""
     return _load(version if version is not None else _active_version)
 
 
