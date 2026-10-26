@@ -67,10 +67,15 @@ def test_the_derivative_mirrors_the_subject_path(tmp_path):
     )
 
 
-def test_there_is_no_derivative_of_a_derivative(tmp_path):
-    """Which pipeline would it belong to? Nobody can answer that for the user."""
+def test_a_derivative_of_a_derivative_goes_to_our_pipeline_never_into_theirs(tmp_path):
+    """Another pipeline's image strips into bidsmgr-skullstrip, named after
+    its source; our own output and anything that is not subject data has no
+    derivative at all."""
     root = tmp_path / "ds"
-    assert derivative_path(root, root / "derivatives" / "x" / "sub-01" / "a.nii.gz") is None
+    got = derivative_path(root, root / "derivatives" / "x" / "sub-01" / "anat" / "a_T1w.nii.gz")
+    assert got == root / "derivatives" / PIPELINE / "sub-01" / "anat" / "a_desc-xbrain_T1w.nii.gz"
+    assert derivative_path(root, root / "derivatives" / PIPELINE / "sub-01" / "a.nii.gz") is None
+    assert derivative_path(root, root / "derivatives" / "x" / "figures" / "a.nii.gz") is None
     assert derivative_path(root, root / "dataset_description.json") is None
     assert derivative_path(root, Path("/elsewhere/a.nii.gz")) is None
 

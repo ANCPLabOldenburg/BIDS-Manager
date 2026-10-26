@@ -8,12 +8,10 @@ us exercise success/failure/multi-output paths without real DICOMs.
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 from typing import Callable
 
-import pytest
 
 from bidsmgr.converter.backends import dcm2niix_direct as backend_mod
 from bidsmgr.converter.backends.dcm2niix_direct import (
@@ -21,7 +19,6 @@ from bidsmgr.converter.backends.dcm2niix_direct import (
     _collect_outputs,
     _missing_expected,
     _safe_dicoms_dirname,
-    _stage_dicoms,
 )
 from bidsmgr.converter.types import ConvertTask
 
@@ -318,69 +315,6 @@ class TestConvertFailures:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
-
-
-class TestStageDicoms:
-    def test_stages_every_file(self, tmp_path: Path) -> None:
-        """Every input reaches staging under a short sequential name, and its
-        bytes are the source's.
-
-        NOT "every entry is a symlink". Creating one on Windows needs
-        SeCreateSymbolicLinkPrivilege, which an ordinary account does not
-        have, so ``_stage_dicoms`` copies instead. That fallback is correct
-        and deliberate; asserting the mechanism made this a test that could
-        only pass on POSIX, and it was the mechanism rather than the outcome
-        that mattered to it.
-
-        What the caller actually needs is that dcm2niix finds four readable
-        DICOMs at short paths, which is what is asserted now. A symlink is one
-        way to arrange that and a copy is another.
-        """
-        files = _make_dicoms(tmp_path, n=4)
-        staging = tmp_path / "stage"
-
-        n = _stage_dicoms(files, staging)
-        assert n == 4
-        # Staging renames each input to a zero-padded sequential name so
-        # deep Windows paths stay under MAX_PATH; dcm2niix orders frames
-        # by DICOM tags, not by filename, so this is safe.
-        staged = sorted(staging.iterdir(), key=lambda q: q.name)
-        assert [q.name for q in staged] == [
-            "000000.dcm", "000001.dcm", "000002.dcm", "000003.dcm",
-        ]
-        # Same bytes, however they got there.
-        source_bytes = sorted(q.read_bytes() for q in files)
-        assert sorted(q.read_bytes() for q in staged) == source_bytes
-
-    @pytest.mark.skipif(
-        os.name == "nt",
-        reason=(
-            "creating a symlink needs SeCreateSymbolicLinkPrivilege, which an "
-            "ordinary Windows account lacks, so _stage_dicoms copies instead"
-        ),
-    )
-    def test_it_prefers_a_symlink_where_it_can(self, tmp_path: Path) -> None:
-        """On POSIX the staging is links, not copies, which is what keeps it
-        cheap for a series of several hundred DICOMs."""
-        files = _make_dicoms(tmp_path, n=4)
-        staging = tmp_path / "stage"
-        _stage_dicoms(files, staging)
-        for q in staging.iterdir():
-            assert q.is_symlink()
-
-    def test_skips_missing_files(self, tmp_path: Path) -> None:
-        files = list(_make_dicoms(tmp_path, n=2))
-        files.append(tmp_path / "ghost.dcm")  # does not exist
-        n = _stage_dicoms(tuple(files), tmp_path / "stage")
-        assert n == 2
-
-    def test_idempotent_rerun(self, tmp_path: Path) -> None:
-        files = _make_dicoms(tmp_path, n=2)
-        staging = tmp_path / "stage"
-        _stage_dicoms(files, staging)
-        # Running again should rebuild the staging dir cleanly.
-        n = _stage_dicoms(files, staging)
-        assert n == 2
 
 
 class TestCollectOutputs:

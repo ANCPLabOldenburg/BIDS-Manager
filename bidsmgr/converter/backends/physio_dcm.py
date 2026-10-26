@@ -1,12 +1,13 @@
-"""Siemens CMRR physio backend — wraps ``bidsphysio.dcm2bidsphysio``.
+"""Siemens CMRR physio backend.
 
-CMRR sequences emit a single ``_PhysioLog.dcm`` file alongside the
-imaging series. ``bidsphysio.dcm2bidsphysio.dcm2bids`` parses that
-DICOM and returns a ``PhysioData`` object whose ``save_to_bids``
-method writes BIDS-spec ``_physio.tsv.gz`` + ``_physio.json`` pairs
-(one pair per distinct sampling rate — the BIDS spec requires the
-JSON's ``SamplingFrequency`` be single-valued, so multi-rate
-recordings split into ``_recording-<rate>_physio.tsv.gz`` siblings).
+CMRR sequences emit a single ``_PhysioLog.dcm`` alongside the imaging
+series, holding every physiological log of the run. It is read by
+:mod:`bidsmgr.converter.physio_cmrr` (each channel on its own grid, every
+ECG lead its own column, the volume onsets from the acquisition log) and
+written as BIDS tables with a ``trigger`` column last: one table per
+sampling rate, or one for the run (``ConvertTask.physio_layout``), cropped to
+the run when asked (``physio_align``), starting at the first volume kept
+(``drop_volumes``).
 
 This backend's :meth:`can_handle` is intentionally narrow: it claims
 only rows whose ``suffix == "physio"``. Other physio formats
@@ -19,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import time
-import warnings
 from pathlib import Path
 
 from ..types import ConvertResult, ConvertTask
@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 
 class PhysioDcmBackend:
-    """Convert Siemens CMRR physio DICOMs via ``bidsphysio``.
+    """Convert Siemens CMRR physio DICOMs (``converter.physio_cmrr``).
 
     Stateless; safe to instantiate once per ``run_convert`` and reuse
     across tasks.
@@ -72,90 +72,66 @@ class PhysioDcmBackend:
     def _convert_inner(
         self, task: ConvertTask, staging_dir: Path, t0: float,
     ) -> ConvertResult:
-        # bidsphysio is vendored at ``bidsmgr.vendor.bidsphysio`` so we
-        # no longer need the transitive ``setuptools<81`` cap. The
-        # warnings filter stays as a guard in case a future numpy /
-        # pydicom emits a deprecation we want to swallow during the
-        # short physio conversion.
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=".*pkg_resources.*",
+        from ..physio_cmrr import read_cmrr, write_tables
+
+        source_paths = [p for p in task.source_files if p.exists()]
+        if not source_paths:
+            return ConvertResult(
+                task=task, success=False,
+                error="empty staging: no source physio DICOMs were accessible",
+                duration_s=time.monotonic() - t0,
             )
-            try:
-                from bidsmgr.vendor.bidsphysio.dcm2bids.dcm2bidsphysio import (
-                    dcm2bids as _bp_dcm2bids,
-                )
-            except ImportError as exc:
-                return ConvertResult(
-                    task=task, success=False,
-                    error=(
-                        "vendored bidsphysio failed to import; cannot "
-                        f"convert physio row {task.basename!r}: {exc}"
-                    ),
-                    duration_s=time.monotonic() - t0,
-                )
+        try:
+            physio = read_cmrr(source_paths)
+        except Exception as exc:
+            return ConvertResult(
+                task=task, success=False,
+                error=f"the physiological log could not be read: {type(exc).__name__}: {exc}",
+                duration_s=time.monotonic() - t0,
+            )
 
-            # bidsphysio expects a list of file paths (or a single path).
-            source_paths = [str(p) for p in task.source_files if p.exists()]
-            if not source_paths:
-                return ConvertResult(
-                    task=task, success=False,
-                    error="empty staging: no source physio DICOMs were accessible",
-                    duration_s=time.monotonic() - t0,
-                )
-
-            try:
-                physio = _bp_dcm2bids(source_paths)
-            except Exception as exc:
-                return ConvertResult(
-                    task=task, success=False,
-                    error=f"bidsphysio.dcm2bids failed: {type(exc).__name__}: {exc}",
-                    duration_s=time.monotonic() - t0,
-                )
-
-            output_dir = staging_dir / task.datatype
-            output_dir.mkdir(parents=True, exist_ok=True)
-            bids_prefix = output_dir / task.basename
-
-            try:
-                # save_to_bids writes one (.tsv.gz, .json) pair per
-                # sampling rate; bidsphysio appends ``_recording-<rate>``
-                # automatically when there's more than one rate.
-                physio.save_to_bids(str(bids_prefix))
-            except Exception as exc:
-                return ConvertResult(
-                    task=task, success=False,
-                    error=f"PhysioData.save_to_bids failed: {type(exc).__name__}: {exc}",
-                    duration_s=time.monotonic() - t0,
-                )
-
-        # bidsphysio inserts a ``_recording-<label>`` infix *before* the
-        # ``_physio`` suffix when a recording carries multiple sampling
-        # rates, so the emitted names are
-        # ``<stem>_recording-<label>_physio.{tsv.gz,json}`` rather than the
-        # exact ``<basename>`` (= ``<stem>_physio``). Glob on the stem so we
-        # detect both the single-rate (``<stem>_physio.*``) and multi-rate
-        # forms; ``*_physio.`` keeps us from picking up a sibling imaging
-        # file (e.g. the accompanying ``_bold.nii.gz``) in the same dir.
+        output_dir = staging_dir / task.datatype
+        output_dir.mkdir(parents=True, exist_ok=True)
         stem = (
             task.basename[: -len("_physio")]
             if task.basename.endswith("_physio")
             else task.basename
         )
-        staged = sorted(
-            set(output_dir.glob(f"{stem}*_physio.tsv.gz"))
-            | set(output_dir.glob(f"{stem}*_physio.json"))
-        )
+        try:
+            staged = write_tables(
+                physio, output_dir / stem, layout=task.physio_layout,
+                align=task.physio_align, drop_volumes=task.drop_volumes,
+            )
+        except Exception as exc:
+            return ConvertResult(
+                task=task, success=False,
+                error=f"the physiological tables could not be written: "
+                      f"{type(exc).__name__}: {exc}",
+                duration_s=time.monotonic() - t0,
+            )
         if not staged:
             return ConvertResult(
                 task=task, success=False,
-                error="bidsphysio produced no output files",
+                error="the physiological log produced no table",
                 duration_s=time.monotonic() - t0,
             )
-
+        if physio.unfinished:
+            log.info("physio %s: the run was stopped during its last volume, which the image "
+                     "does not hold; the trigger leaves it out", task.basename)
+        if not physio.channels:
+            log.info("physio %s: no signal in the log, only the timing of its %d volume(s): "
+                     "the trigger alone", task.basename, len(physio.volumes))
+        else:
+            log.info(
+                "physio %s: %d channel(s) (%s), %d volume(s) in the log, %s",
+                task.basename, len(physio.channels),
+                ", ".join(ch.label for ch in physio.channels), len(physio.volumes),
+                {"one_interpolated": "one table, interpolated",
+                 "one_as_recorded": "one table, as recorded"}.get(task.physio_layout,
+                                                                  "one table per rate"),
+            )
         return ConvertResult(
-            task=task, staged_files=tuple(staged), success=True,
+            task=task, staged_files=tuple(sorted(staged)), success=True,
             duration_s=time.monotonic() - t0,
         )
 

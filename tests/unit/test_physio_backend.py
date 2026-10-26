@@ -1,19 +1,18 @@
 """Unit tests for ``PhysioDcmBackend`` and the registry dispatch.
 
-bidsphysio's ``dcm2bidsphysio.dcm2bids`` is mocked; we don't read real
-DICOM physio files in unit tests. Real-data coverage lives in the
-gated ``tests/real_data`` suite.
+The conversion reads a synthetic CMRR physio DICOM laid out as the scanner
+writes it (``tests/fixtures/cmrr_physio.py``); the reader and writer have their
+own tests (``test_physio_cmrr.py``).
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Sequence
 
-import pytest
 
 from bidsmgr.converter import default_backends, dispatch
-from bidsmgr.converter.backends import physio_dcm as physio_mod
 from bidsmgr.converter.backends.dcm2niix_direct import Dcm2niixDirect
 from bidsmgr.converter.backends.physio_dcm import PhysioDcmBackend
 from bidsmgr.converter.types import ConvertTask
@@ -55,62 +54,6 @@ def _make_task(
         entities={"sub": "001"},
         basename=basename,
         expected_outputs=(".tsv.gz", ".json"),
-    )
-
-
-class _FakePhysioData:
-    """Mimics bidsphysio.base.bidsphysio.PhysioData.save_to_bids."""
-
-    def __init__(self, write_files: Sequence[str]) -> None:
-        self._write_files = list(write_files)
-
-    def save_to_bids(self, bids_prefix: str) -> None:
-        prefix = Path(bids_prefix)
-        prefix.parent.mkdir(parents=True, exist_ok=True)
-        for suffix in self._write_files:
-            target = prefix.parent / f"{prefix.name}{suffix}"
-            if suffix.endswith(".json"):
-                target.write_text("{}")
-            elif suffix.endswith(".tsv.gz"):
-                target.write_bytes(b"\x1f\x8b")  # gzip magic
-            else:
-                target.write_bytes(b"")
-
-
-def _patch_dcm2bids(monkeypatch, factory_or_exc) -> None:
-    """Patch the lazy import of the vendored ``dcm2bids`` callable.
-
-    ``bidsmgr.converter.backends.physio_dcm`` imports
-    ``bidsmgr.vendor.bidsphysio.dcm2bids.dcm2bidsphysio.dcm2bids``
-    lazily inside ``_convert_inner``. To intercept the call we
-    install fake module objects under that exact dotted path in
-    ``sys.modules`` so the ``from ... import ...`` statement returns
-    our stub instead of the real (vendored) function.
-
-    ``factory_or_exc`` can be:
-    * a callable taking ``source_paths`` and returning ``_FakePhysioData``
-    * an Exception instance to raise from the call
-    """
-    import sys
-
-    pkg_path = "bidsmgr.vendor.bidsphysio"
-
-    def _runner(source_paths):
-        if isinstance(factory_or_exc, BaseException):
-            raise factory_or_exc
-        return factory_or_exc(source_paths)
-
-    fake_module = type(sys.modules["bidsmgr"])(f"{pkg_path}.dcm2bids.dcm2bidsphysio")
-    fake_module.dcm2bids = _runner
-
-    parent_pkg = type(sys.modules["bidsmgr"])(f"{pkg_path}.dcm2bids")
-    parent_pkg.dcm2bidsphysio = fake_module
-
-    monkeypatch.setitem(
-        sys.modules, f"{pkg_path}.dcm2bids.dcm2bidsphysio", fake_module,
-    )
-    monkeypatch.setitem(
-        sys.modules, f"{pkg_path}.dcm2bids", parent_pkg,
     )
 
 
@@ -192,107 +135,89 @@ class TestRegistryDispatch:
 
 
 class TestConvertSuccess:
-    def test_writes_tsvgz_and_json_pair(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        b = PhysioDcmBackend()
-        task = _make_task(tmp_path)
-        _patch_dcm2bids(
-            monkeypatch,
-            lambda paths: _FakePhysioData([".tsv.gz", ".json"]),
-        )
+    """Real reading: a synthetic CMRR physio DICOM (four ECG leads, pulse,
+    respiration, the acquisition log), as the scanner lays it out."""
 
+    def _dicom_task(self, tmp_path: Path, **update) -> ConvertTask:
+        from tests.fixtures.cmrr_physio import physio_dicom
+
+        dcm = physio_dicom(tmp_path / "src" / "ses-pre_task-mb_bold_PhysioLog.dcm")
+        return _make_task(tmp_path, files=(dcm,)).model_copy(update=update)
+
+    def test_one_table_per_rate_with_the_trigger_last(self, tmp_path: Path) -> None:
+        task = self._dicom_task(tmp_path)
         staging = tmp_path / "staging"
         staging.mkdir()
-        result = b.convert(task, staging)
+        result = PhysioDcmBackend().convert(task, staging)
 
         assert result.success is True, result.error
         names = sorted(p.name for p in result.staged_files)
         assert names == [
-            "sub-001_task-mb_physio.json",
-            "sub-001_task-mb_physio.tsv.gz",
+            "sub-001_task-mb_recording-cardiac_physio.json",
+            "sub-001_task-mb_recording-cardiac_physio.tsv.gz",
+            "sub-001_task-mb_recording-ecg_physio.json",
+            "sub-001_task-mb_recording-ecg_physio.tsv.gz",
+            "sub-001_task-mb_recording-respiratory_physio.json",
+            "sub-001_task-mb_recording-respiratory_physio.tsv.gz",
         ]
-        # Files land under <staging>/<datatype>/.
-        for p in result.staged_files:
-            assert p.parent == staging / "func"
+        for path in result.staged_files:
+            assert path.parent == staging / "func"
+            if path.suffix == ".json":
+                assert json.loads(path.read_text())["Columns"][-1] == "trigger"
 
-    def test_multi_sampling_rate_writes_recording_pairs(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        """When the recording has multiple sampling rates, bidsphysio
-        writes ``_recording-<rate>_physio.tsv.gz`` siblings."""
-        b = PhysioDcmBackend()
-        task = _make_task(tmp_path)
-        # Simulate ECG@400Hz + RESP@50Hz — bidsphysio appends recording entity.
-        _patch_dcm2bids(
-            monkeypatch,
-            lambda paths: _FakePhysioData([
-                "_recording-400Hz_physio.tsv.gz",
-                "_recording-400Hz_physio.json",
-                "_recording-50Hz_physio.tsv.gz",
-                "_recording-50Hz_physio.json",
-            ]),
-        )
+    def test_the_task_chooses_one_table_aligned_to_the_run(self, tmp_path: Path) -> None:
+        task = self._dicom_task(tmp_path, physio_layout="one_interpolated", physio_align=True,
+                                drop_volumes=2)
         staging = tmp_path / "staging"
         staging.mkdir()
-        # Adjust task basename so save_to_bids uses ``sub-001_task-mb`` as
-        # the prefix (bidsphysio chooses to append _physio itself in that
-        # mode). We test the file collection logic accepts whatever the
-        # save_to_bids call produced.
-        task = task.model_copy(update={"basename": "sub-001_task-mb"})
-        result = b.convert(task, staging)
+        result = PhysioDcmBackend().convert(task, staging)
 
-        assert result.success is True
-        names = sorted(p.name for p in result.staged_files)
-        assert names == [
-            "sub-001_task-mb_recording-400Hz_physio.json",
-            "sub-001_task-mb_recording-400Hz_physio.tsv.gz",
-            "sub-001_task-mb_recording-50Hz_physio.json",
-            "sub-001_task-mb_recording-50Hz_physio.tsv.gz",
-        ]
+        assert result.success is True, result.error
+        assert sorted(p.name for p in result.staged_files) == [
+            "sub-001_task-mb_physio.json", "sub-001_task-mb_physio.tsv.gz"]
+        side = json.loads((staging / "func/sub-001_task-mb_physio.json").read_text())
+        assert 0 <= side["StartTime"] < 1 / side["SamplingFrequency"] + 1e-9
+        assert "2 volumes removed" in side["trigger"]["Description"]
 
 
 class TestConvertFailure:
-    def test_empty_staging_is_failure(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
+    def test_empty_staging_is_failure(self, tmp_path: Path) -> None:
         b = PhysioDcmBackend()
         # All source files non-existent.
         task = _make_task(tmp_path).model_copy(
             update={"source_files": (tmp_path / "nope.dcm",)},
         )
-        _patch_dcm2bids(
-            monkeypatch,
-            lambda paths: _FakePhysioData([".tsv.gz", ".json"]),
-        )
         result = b.convert(task, tmp_path / "staging")
         assert result.success is False
         assert "empty staging" in (result.error or "")
 
-    def test_dcm2bids_exception_is_recorded(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
+    def test_an_unreadable_log_is_recorded(self, tmp_path: Path) -> None:
+        # The fixture's "DICM" stub is not a DICOM: the reason is reported.
         b = PhysioDcmBackend()
         task = _make_task(tmp_path)
-        _patch_dcm2bids(monkeypatch, RuntimeError("malformed PMU log"))
         staging = tmp_path / "staging"
         staging.mkdir()
         result = b.convert(task, staging)
         assert result.success is False
-        assert "bidsphysio.dcm2bids failed" in (result.error or "")
-        assert "malformed PMU log" in (result.error or "")
+        assert "the physiological log could not be read" in (result.error or "")
 
-    def test_no_outputs_produced_is_failure(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        b = PhysioDcmBackend()
-        task = _make_task(tmp_path)
-        _patch_dcm2bids(
-            monkeypatch,
-            lambda paths: _FakePhysioData([]),  # save_to_bids writes nothing
-        )
+    def test_a_log_with_only_volume_timings_writes_the_trigger_alone(
+            self, tmp_path: Path) -> None:
+        # Logging on, no sensor attached: the volume timings are what the
+        # log holds, and they are written (1.5.2 first wrote nothing).
+        from tests.fixtures.cmrr_physio import info_log
+
+        log = tmp_path / "src" / "Physio_Info.log"
+        log.parent.mkdir(parents=True)
+        log.write_text(info_log(5))
+        task = _make_task(tmp_path, files=(log,))
         staging = tmp_path / "staging"
         staging.mkdir()
-        result = b.convert(task, staging)
-        assert result.success is False
-        assert "produced no output files" in (result.error or "")
+        result = PhysioDcmBackend().convert(task, staging)
+        assert result.success is True, result.error
+        names = sorted(Path(p).name for p in result.staged_files)
+        assert len(names) == 2 and all(n.endswith(("_physio.json", "_physio.tsv.gz"))
+                                       for n in names)
+        sidecar = next(Path(p) for p in result.staged_files if str(p).endswith(".json"))
+        meta = json.loads(sidecar.read_text())
+        assert meta["Columns"] == ["trigger"] and meta["SamplingFrequency"] == 400.0

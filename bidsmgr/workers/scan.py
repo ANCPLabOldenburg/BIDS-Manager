@@ -97,6 +97,8 @@ class ScanWorker(QThread):
         index_widths=None,
         classifier_config=None,
         drop_entities=None,
+        subject_from: str = "number",
+        name_entities=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -116,6 +118,8 @@ class ScanWorker(QThread):
         self._index_widths = index_widths
         self._classifier_config = classifier_config
         self._drop_entities = drop_entities
+        self._subject_from = subject_from
+        self._name_entities = name_entities
         # Cooperative stop flag. ``run_scan`` polls ``_stop.is_set`` at
         # DICOM-read boundaries and raises ``OperationCancelled`` when set.
         self._stop = threading.Event()
@@ -187,6 +191,8 @@ class ScanWorker(QThread):
                 index_widths=self._index_widths,
                 classifier_config=self._classifier_config,
                 drop_entities=self._drop_entities,
+                subject_from=self._subject_from,
+                name_entities=self._name_entities,
             )
             # Warm the schema for the types this scan actually produced,
             # HERE, on the worker thread. Binding the table asks "which

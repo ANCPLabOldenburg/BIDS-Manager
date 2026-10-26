@@ -237,11 +237,20 @@ entirely.
 | `events`       | Event-base classes shared by `edf2bids`                     | none                   |
 | `session`      | Session-level (multi-recording) orchestration               | none                   |
 
-bidsmgr's `bidsmgr.converter.backends.physio_dcm` currently uses
-only `bidsmgr.vendor.bidsphysio.dcm2bids.dcm2bidsphysio.dcm2bids`.
-The other sub-packages are vendored proactively so future bidsmgr
-backends (BioPac, PMU, EDF) can wire up without re-doing the
-vendoring exercise.
+Since 2026-10-22 the conversion no longer uses `dcm2bids` for Siemens CMRR
+physiology. Its log parser merged the four ECG leads into one channel (it keys
+samples by channel kind, so `ECG1`..`ECG4` overwrote each other), and its
+trigger column came out constant (missing samples are NaN, and NaN cast to
+bool is True, so every sample was a trigger). `bidsmgr/converter/physio_cmrr`
+reads the logs itself (every lead its own column, samples placed by their
+sequence across the scanner's one-tick clock correction, a trigger only at
+each volume's start, one table per rate or one resampled table, optionally
+cropped to the run). It still uses `base.bidsphysio.unique_bids_labels`, so
+the `recording-<label>` names stay what this copy writes. Nothing else in
+bidsmgr imports this tree; the other sub-packages are vendored proactively so
+future backends (BioPac, PMU, EDF) can wire up without re-doing the vendoring
+exercise. The `dcm2bids` sub-package is kept unchanged with the rest, as the
+record of what upstream does.
 
 `bioread` and `pyedfread` stay out of bidsmgr's `[project.dependencies]`
 because most users do not have BioPac or EDF physio data. If you

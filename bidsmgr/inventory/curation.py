@@ -1,5 +1,5 @@
 """The inventory columns that hold curation decisions, appended last so every
-earlier column keeps its index (the unified TSV is 66 columns).
+earlier column keeps its index (the unified TSV is 67 columns).
 
 * ``fieldmap_targets``: for a fieldmap row, the runs the user chose for it
   to correct (a JSON list of row ids; empty = the linking rule decides,
@@ -8,6 +8,9 @@ earlier column keeps its index (the unified TSV is 66 columns).
   ``classification_evidence``: what the acquisition-parameter classifier
   concluded for the row, how sure it is, the next candidates and the
   strongest evidence (``classifier.acquisition``).
+* ``drop_volumes``: for a functional run, how many volumes to remove from its
+  start at conversion (dummy scans); empty = the default in Settings > Convert
+  (``bidsmgr-convert --drop-volumes``), 0 = none (``fixups.dummy_volumes``).
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ CURATION_COLUMNS: tuple[str, ...] = (
     "classification_confidence",
     "classification_alternatives",
     "classification_evidence",
+    "drop_volumes",
 )
 
 __all__ = ["CURATION_COLUMNS"]

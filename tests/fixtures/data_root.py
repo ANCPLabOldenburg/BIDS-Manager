@@ -35,6 +35,13 @@ from typing import Optional
 
 ENV_VAR = "BIDSMGR_TEST_DATA"
 
+#: The two Siemens samples the documentation publishes, by the names their
+#: folders have under ``MRI/`` now. Tests named them ``neuroimaging_unit_new``
+#: and ``neuroimging_old`` after the folders were renamed, so every test that
+#: needed them errored or skipped, unseen.
+MRI_WALKTHROUGH = ("MRI", "MRI_sample_data_neuroimging_unit_oldenburg_2")
+MRI_ADVANCED = ("MRI", "MRI_sample_data_neuroimging_unit_oldenburg_1")
+
 
 def data_root() -> Optional[Path]:
     """The lab's raw-data root, or ``None`` when this machine has none."""
@@ -77,4 +84,5 @@ def why_missing(*parts: str) -> str:
     return f"{'/'.join(parts)} is not under {data_root()}"
 
 
-__all__ = ["ENV_VAR", "data_root", "dataset", "have", "why_missing"]
+__all__ = ["ENV_VAR", "MRI_ADVANCED", "MRI_WALKTHROUGH", "data_root", "dataset", "have",
+           "why_missing"]

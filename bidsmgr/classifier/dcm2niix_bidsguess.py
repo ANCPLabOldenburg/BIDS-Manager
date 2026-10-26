@@ -28,7 +28,8 @@ from typing import Iterable, Optional, Sequence
 
 from .. import schema
 from ..inventory.types import InventoryRow
-from ..util.paths import long_path, long_path_for_tree
+from ..util.paths import is_network_path, long_path, long_path_for_tree
+from ..util.staging import stage_files
 from .types import Classification
 
 log = logging.getLogger(__name__)
@@ -497,6 +498,65 @@ def _exit_hint(returncode: int) -> str:
     return windows.get(returncode & 0xFFFFFFFF, "")
 
 
+def _sidecars_or_problem(dicom_dir: Path, out_dir: Path, binary: Path):
+    """Run the sidecar pass; the finished process, or the error that stopped it.
+
+    A timeout or an error reading the folder is one folder's problem, not the
+    scan's: a share that dropped, a slow share that ran past the timeout, a
+    dcm2niix that the system refused to start. Whatever dcm2niix wrote before
+    it stopped is still collected by the caller.
+    """
+    try:
+        return _run_dcm2niix_sidecars(dicom_dir, out_dir, dcm2niix_bin=binary)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return exc
+
+
+def _files_under(folder: Path, depth: int = _DCM2NIIX_DEPTH) -> list[str]:
+    """Every file dcm2niix would look at walking ``folder`` (``-d 5``)."""
+    found: list[str] = []
+    stack = [(os.fspath(folder), 0)]
+    while stack:
+        here, level = stack.pop()
+        try:
+            with os.scandir(long_path(here)) as entries:
+                for entry in entries:
+                    full = os.path.join(here, entry.name)
+                    try:
+                        if entry.is_dir():
+                            if level < depth:
+                                stack.append((full, level + 1))
+                        elif entry.is_file():
+                            found.append(full)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return sorted(found)
+
+
+def _sidecars_from_local_copy(dicom_dir: Path, out_dir: Path, binary: Path):
+    """The sidecar pass again, on a local copy of a folder on a network share.
+
+    Reached only when reading the share directly gave nothing (Windows). A
+    copy gives dcm2niix short local paths to files it can certainly open,
+    whatever the share, its links or its path lengths do; it costs one read
+    of the folder, which is why it is the second attempt and not the first.
+    """
+    log.warning(
+        "dcm2niix produced no sidecars reading %s on a network share; "
+        "trying again from a local copy of the folder", dicom_dir,
+    )
+    local = Path(tempfile.mkdtemp(prefix="bidsmgr-dicoms-"))
+    try:
+        stage_files(_files_under(dicom_dir), local)
+        return _sidecars_or_problem(local, out_dir, binary)
+    except OSError as exc:
+        return exc
+    finally:
+        shutil.rmtree(long_path(local), ignore_errors=True)
+
+
 def classify_dicom_folder(
     dicom_dir: Path,
     rows: Iterable[InventoryRow],
@@ -540,16 +600,28 @@ def classify_dicom_folder(
         out_dir = Path(workdir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Found first, outside the per-folder handling below: a missing dcm2niix
+    # is one problem for the whole scan, and the caller says so once.
+    binary = Path(dcm2niix_bin or find_dcm2niix())
     try:
-        proc = _run_dcm2niix_sidecars(dicom_dir, out_dir, dcm2niix_bin=dcm2niix_bin)
+        proc = _sidecars_or_problem(dicom_dir, out_dir, binary)
         sidecars = _collect_sidecars(out_dir)
+        if rows and not sidecars and is_network_path(dicom_dir):
+            proc = _sidecars_from_local_copy(dicom_dir, out_dir, binary)
+            sidecars = _collect_sidecars(out_dir)
         # SAY SO when this produces nothing. The whole classifier chain reads
         # an empty result as "this classifier has no opinion", so a dcm2niix
         # that died leaves a scan that reports success with every MRI row
         # unclassified, and the user sees a feature that stopped working with
         # no error anywhere. That is the shape of every Windows defect in
         # CROSS_PLATFORM_RULES, and it is the reason this branch is loud.
-        if rows and not sidecars:
+        if isinstance(proc, BaseException):
+            log.warning(
+                "dcm2niix could not classify %s: %s. %d sidecar(s) were written "
+                "before it stopped; the other series are named by the next "
+                "classifier.", dicom_dir, proc, len(sidecars),
+            )
+        elif rows and not sidecars:
             log.warning(
                 "dcm2niix produced NO sidecars for %s, so none of its %d "
                 "series could be classified. returncode=%s%s stderr=%r",

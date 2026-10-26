@@ -437,9 +437,9 @@ def test_the_sample_datasets_section_link_is_the_documentation_page():
     """Alongside the direct downloads, one link to the section that says what
     each dataset demonstrates, for somebody who does not know which they
     want."""
-    from bidsmgr.gui.welcome_panel import _SAMPLE_DATASETS_URL
+    from bidsmgr.samples import SAMPLE_DATA_PAGE
 
-    assert _SAMPLE_DATASETS_URL == (
+    assert SAMPLE_DATA_PAGE == (
         "https://ancplaboldenburg.github.io/bids_manager_documentation/"
         "start/sample-data/"
     )
@@ -448,18 +448,21 @@ def test_the_sample_datasets_section_link_is_the_documentation_page():
 def test_every_dataset_the_documentation_offers_is_downloadable_from_the_gui():
     """The list here and the documentation's Sample data page drifted twice
     already: the panel had four while the documentation offered six, and in
-    October 2026 every share was reissued, which left all six links here dead.
-    Six distinct downloads, each a share link, is the shape that has to hold."""
-    from bidsmgr.gui.welcome_panel import _SAMPLE_DATASETS
+    October 2026 every share was reissued, which left all six links here dead
+    (and the tests' own copy of them, which nobody updated). Seven distinct
+    downloads, each a share link, is the shape that has to hold."""
+    from bidsmgr.samples import SAMPLES, find
 
-    assert len(_SAMPLE_DATASETS) == 6
-    urls = [url for _label, url in _SAMPLE_DATASETS]
-    assert len(set(urls)) == 6, "a duplicated link means one dataset is unreachable"
+    assert len(SAMPLES) == 7
+    urls = [s.url for s in SAMPLES]
+    assert len(set(urls)) == 7, "a duplicated link means one dataset is unreachable"
     assert all(u.startswith("https://cloud.uol.de/s/") for u in urls)
     assert all(u.endswith("/download") for u in urls)
-    labels = [label for label, _url in _SAMPLE_DATASETS]
-    assert len(set(labels)) == 6
+    assert len({s.key for s in SAMPLES}) == 7 and len({s.label for s in SAMPLES}) == 7
+    assert all(s.megabytes > 0 and s.version for s in SAMPLES)
     # Every modality the tool converts should be reachable from the Home tab.
-    joined = " ".join(labels).lower()
+    joined = " ".join(s.label for s in SAMPLES).lower()
     for modality in ("mri", "pet", "eeg", "meg", "multimodal"):
         assert modality in joined, modality
+    assert find("multimodal").token == "e9oZzrJbfBtiaTQ" and find("multimodal").version == "3"
+    assert find("multimodal2").token == "YaYyq5RzmoY7WXJ"

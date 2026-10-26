@@ -57,15 +57,47 @@ def derivative_name(name: str, *, desc: str = DESC) -> str:
     return "_".join([*entities, f"desc-{desc}", suffix]) + ext
 
 
+def _label(text: str) -> str:
+    """A BIDS label: letters and digits only."""
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def derivative_desc(root: Path, image: Path) -> str:
+    """The ``desc`` the stripped version of ``image`` carries.
+
+    ``brain`` for raw data. For an image that is itself a derivative, the
+    source's own description with ``brain`` after it (``desc-preproc`` gives
+    ``desc-preprocbrain``), or the pipeline's name when it has none, so the
+    stripped version of a preprocessed T1w never takes the name of the
+    stripped raw T1w beside it in ``bidsmgr-skullstrip/``.
+    """
+    try:
+        parts = Path(image).relative_to(root).parts
+    except ValueError:
+        return DESC
+    if len(parts) < 2 or parts[0] != "derivatives":
+        return DESC
+    stem, _ext = _split_ext(Path(image).name)
+    source_desc = next((p[len("desc-"):] for p in stem.split("_")
+                        if p.startswith("desc-")), "")
+    base = _label(source_desc) or _label(parts[1])
+    return f"{base}{DESC}" if base else DESC
+
+
 def derivative_path(
-    root: Path, image: Path, *, desc: str = DESC,
+    root: Path, image: Path, *, desc: Optional[str] = None,
     pipeline: str = PIPELINE,
 ) -> Optional[Path]:
     """Where the stripped version of ``image`` belongs.
 
-    ``None`` when the image is not raw subject data, which is the one case
-    where there is no sensible answer: a derivative of a derivative would need
-    the user to say which pipeline it belongs to.
+    Raw subject data: ``derivatives/bidsmgr-skullstrip/`` at the same place,
+    with ``desc-brain``. An image of another pipeline
+    (``derivatives/fmriprep/sub-01/anat/...``): the same place in
+    ``bidsmgr-skullstrip/``, never inside the other pipeline's folder, whose
+    ``dataset_description.json`` says another tool made what is in it.
+
+    ``None`` when there is no sensible answer: not subject data, or an image
+    this pipeline wrote itself.
     """
     root = Path(root)
     try:
@@ -73,13 +105,19 @@ def derivative_path(
     except ValueError:
         return None
     parts = rel.parts
+    if parts and parts[0] == "derivatives":
+        if len(parts) < 4 or parts[1] == pipeline or not parts[2].startswith("sub-"):
+            return None
+        rel = Path(*parts[2:])
+        parts = rel.parts
+    elif "derivatives" in parts:
+        return None
     if not parts or not parts[0].startswith("sub-"):
         return None
-    if "derivatives" in parts:
-        return None
+    chosen = desc if desc is not None else derivative_desc(root, image)
     return (
         root / "derivatives" / pipeline / rel.parent
-        / derivative_name(rel.name, desc=desc)
+        / derivative_name(rel.name, desc=chosen)
     )
 
 
@@ -150,6 +188,7 @@ __all__ = [
     "DESC",
     "PIPELINE",
     "dataset_description",
+    "derivative_desc",
     "derivative_name",
     "derivative_path",
     "description_path",

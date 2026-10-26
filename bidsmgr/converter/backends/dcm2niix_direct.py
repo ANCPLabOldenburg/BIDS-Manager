@@ -8,7 +8,7 @@ dcm2niix invocation and reports back what landed on disk.
 Layout written by ``convert``::
 
     <staging_dir>/
-      _dicoms_<series_uid>/      (symlinks to the source DICOMs)
+      _dicoms_<series_uid>/      (the series' DICOMs, linked or copied: util.staging)
       <datatype>/
         <basename>.nii.gz
         <basename>.json
@@ -33,7 +33,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -44,6 +43,7 @@ from typing import Optional
 from ... import schema
 from ...classifier.dcm2niix_bidsguess import find_dcm2niix, run_dcm2niix
 from ...util.paths import long_path
+from ...util.staging import stage_files, staging_folder
 from ..types import ConvertResult, ConvertTask
 
 log = logging.getLogger(__name__)
@@ -71,8 +71,8 @@ class Dcm2niixDirect:
 
     def can_handle(self, task: ConvertTask) -> bool:
         if task.suffix == "physio":
-            # Physio rows route to ``PhysioDcmBackend`` (bidsphysio
-            # wrapper). dcm2niix can't produce ``_physio.tsv.gz``.
+            # Physio rows route to ``PhysioDcmBackend``
+            # (converter.physio_cmrr). dcm2niix can't produce ``_physio.tsv.gz``.
             return False
         if task.datatype in {"eeg", "meg", "ieeg", "nirs"}:
             # EEG/MEG/iEEG/NIRS rows route to ``MneBidsBackend``.
@@ -131,27 +131,30 @@ class Dcm2niixDirect:
         # The basename identifies a row that has no UID; by this point it is
         # already known to be unique, because conversion refuses to start
         # otherwise.
-        dicoms_dir = staging_dir / _safe_dicoms_dirname(
+        # On Windows, a staging tree on a network share stages the DICOMs in a
+        # local temporary folder instead (util.staging explains why).
+        dicoms_dir = staging_folder(staging_dir / _safe_dicoms_dirname(
             task.series_uid, task.basename,
-        )
-        n_staged = _stage_dicoms(task.source_files, dicoms_dir)
-        if n_staged == 0:
-            return ConvertResult(
-                task=task, success=False,
-                error="empty staging: no source DICOMs were accessible",
-                duration_s=time.monotonic() - t0,
+        ))
+        try:
+            n_staged = stage_files(task.source_files, dicoms_dir)
+            if n_staged == 0:
+                return ConvertResult(
+                    task=task, success=False,
+                    error="empty staging: no source DICOMs were accessible",
+                    duration_s=time.monotonic() - t0,
+                )
+
+            output_dir = staging_dir / task.datatype
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            proc = _run_dcm2niix(
+                self._bin, dicoms_dir, output_dir, task.basename,
             )
-
-        output_dir = staging_dir / task.datatype
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        proc = _run_dcm2niix(
-            self._bin, dicoms_dir, output_dir, task.basename,
-        )
+        finally:
+            # Best-effort cleanup of the per-series staging; not fatal.
+            shutil.rmtree(long_path(dicoms_dir), ignore_errors=True)
         stderr_tail = (proc.stderr or "")[-_STDERR_TAIL_BYTES:]
-
-        # Best-effort cleanup of the per-series symlink dir; not fatal.
-        shutil.rmtree(dicoms_dir, ignore_errors=True)
 
         if proc.returncode != 0:
             return ConvertResult(
@@ -230,63 +233,6 @@ def _safe_dicoms_dirname(series_uid: str, fallback: str = "") -> str:
         (series_uid or fallback or "").encode("utf-8")
     ).hexdigest()[:12]
     return f"_dicoms_{digest}"
-
-
-def _stage_dicoms(source_files, staging_dir: Path) -> int:
-    """Symlink (or copy on Windows w/o symlink-priv) the source DICOMs.
-
-    Returns the number of files actually staged. The destination path
-    is funnelled through :func:`long_path` so that deep Windows BIDS
-    trees do not hit the 260-char ``MAX_PATH`` limit at the symlink
-    syscall — pathlib's ``Path`` machinery sometimes still routes
-    through narrow-string APIs on older interpreters.
-
-    On Windows, creating a symbolic link requires either the
-    ``SeCreateSymbolicLinkPrivilege`` (granted in Developer Mode) or
-    an Administrator process. When ``os.symlink`` raises
-    ``OSError(WinError 1314)`` we fall back to a plain file copy so
-    end users without those privileges still get a working batch.
-    """
-    if staging_dir.exists():
-        shutil.rmtree(long_path(staging_dir), ignore_errors=False)
-    staging_dir.mkdir(parents=True)
-    n = 0
-    use_copy_fallback = False
-    for idx, fp in enumerate(source_files):
-        src = Path(fp)
-        if not src.exists():
-            continue
-        # Short sequential names: vendor DICOM filenames are commonly
-        # ~80 chars (full SeriesInstanceUID + instance suffix), which
-        # pushes the full Win32 path past MAX_PATH inside deep staging
-        # trees and makes dcm2niix exit ``rc=2`` without a useful error.
-        # dcm2niix orders frames by DICOM tags (InstanceNumber etc.),
-        # not by filename, so renaming on stage is safe. The zero-padded
-        # counter also makes collision handling unnecessary.
-        link_name = f"{idx:06d}{src.suffix or '.dcm'}"
-        link = staging_dir / link_name
-        src_resolved = src.resolve()
-        if use_copy_fallback:
-            shutil.copyfile(long_path(src_resolved), long_path(link))
-            n += 1
-            continue
-        try:
-            os.symlink(long_path(src_resolved), long_path(link))
-        except FileExistsError:
-            os.unlink(long_path(link))
-            os.symlink(long_path(src_resolved), long_path(link))
-        except OSError as exc:
-            # Windows error 1314: "A required privilege is not held by
-            # the client." (SeCreateSymbolicLinkPrivilege missing.)
-            # Switch this series to copy-mode and stage this file via
-            # plain copy. Other OSErrors propagate so we see them.
-            if getattr(exc, "winerror", None) == 1314:
-                use_copy_fallback = True
-                shutil.copyfile(long_path(src_resolved), long_path(link))
-            else:
-                raise
-        n += 1
-    return n
 
 
 def _run_dcm2niix(

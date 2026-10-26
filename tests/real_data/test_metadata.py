@@ -18,10 +18,9 @@ import pytest
 from bidsmgr.cli.convert import run_convert
 from bidsmgr.cli.scan import run_scan
 from bidsmgr.metadata import DatasetMetadata, run_metadata
-from tests.fixtures.data_root import dataset
+from tests.fixtures.data_root import MRI_WALKTHROUGH, dataset, have, why_missing
 
 
-REAL_MRI_ROOT = dataset("MRI")
 
 
 pytestmark = [
@@ -30,10 +29,7 @@ pytestmark = [
         not os.environ.get("BIDS_MANAGER_REAL_MRI_DATA"),
         reason="BIDS_MANAGER_REAL_MRI_DATA not set",
     ),
-    pytest.mark.skipif(
-        not REAL_MRI_ROOT.exists(),
-        reason=f"real MRI dataset root missing at {REAL_MRI_ROOT}",
-    ),
+    pytest.mark.skipif(not have(*MRI_WALKTHROUGH), reason=why_missing(*MRI_WALKTHROUGH)),
 ]
 
 
@@ -44,7 +40,7 @@ def metadata_artifacts(tmp_path_factory) -> tuple[Path, Path, "MetadataReport"]:
     tsv = work / "inventory.tsv"
     bids_parent = work / "out"
 
-    run_scan(REAL_MRI_ROOT / "neuroimaging_unit_new", tsv, n_jobs=4)
+    run_scan(dataset(*MRI_WALKTHROUGH), tsv, n_jobs=4, dataset="neuroimaging_unit_new")
     rc = run_convert(tsv, bids_parent, n_jobs=4)
     assert rc == 0
     bids_root = bids_parent / "neuroimaging_unit_new"

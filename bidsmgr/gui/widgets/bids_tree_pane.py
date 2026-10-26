@@ -183,6 +183,40 @@ def _in_session(path: Path) -> bool:
     return any(part.startswith("ses-") for part in path.parts)
 
 
+def _sidecar_entry(root: Path, scope: list) -> Optional[tuple[str, bool]]:
+    """The right-click entry that writes sidecars from the recordings, and
+    whether it adds to existing ones; ``None`` where there is nothing to
+    write a sidecar for. Any file BIDS Manager can read counts, BIDS name or
+    not: its sidecar is written beside it."""
+    from ...editor.sidecars import is_candidate, recording_for, sidecar_path
+
+    def has_one(path: Path) -> Optional[bool]:
+        """True: a recording with a sidecar (or its sidecar); False: one
+        without; None: neither."""
+        if path.name.endswith(".json"):
+            return True if recording_for(path, root) is not None else None
+        if is_candidate(root, path):
+            return sidecar_path(path).exists()
+        return None
+
+    if len(scope) > 1:
+        states = [has_one(Path(p)) for p in scope]
+        if all(s is True for s in states):
+            return f"Complete the sidecars of these {len(scope)} from the recordings...", True
+        return f"Write the sidecars of these {len(scope)} items from the recordings...", False
+    path = Path(scope[0])
+    state = has_one(path)
+    if state is None:
+        if path.is_dir():
+            return "Write missing sidecars here from the recordings...", False
+        return None
+    if path.name.endswith(".json"):
+        return "Complete this sidecar from its recording...", True
+    if state:
+        return "Complete its sidecar from the recording...", True
+    return "Write its sidecar from the recording...", False
+
+
 def _can_restructure(path: Path) -> bool:
     """Is it meaningful to change the entities of what was clicked?
 
@@ -427,6 +461,9 @@ class BidsTreePane(QWidget):
     deface_revert_requested = pyqtSignal(list)
     #: Keep only the brain in the clicked images. ``list[Path]``.
     strip_requested = pyqtSignal(list)
+    #: Write or complete sidecars from the clicked recordings: ``(paths,
+    #: whether to add to sidecars that are there)``.
+    sidecars_requested = pyqtSignal(list, bool)
     #: Put the clicked images side by side. ``list[Path]``, one or two.
     compare_requested = pyqtSignal(list)
     #: Open the references tool on the clicked file. ``list[Path]``, one file.
@@ -1399,6 +1436,42 @@ class BidsTreePane(QWidget):
                     lambda _c=False, p=clicked_path:
                         self.links_requested.emit([p])
                 )
+
+        # A sidecar written from the recording: on any file BIDS Manager can
+        # read (a BIDS name or not), on a sidecar, or on a folder. In a folder
+        # open view only it is shown greyed, saying why: nothing is written
+        # into such a folder, and an entry that simply is not there reads as
+        # "this file cannot have a sidecar".
+        if self._root is not None and _can_delete(clicked_path, self._root):
+            picked = self.selected_paths()
+            sidecar_scope = (picked if clicked_path in picked and len(picked) > 1
+                             else [clicked_path])
+            entry = _sidecar_entry(self._root, sidecar_scope)
+            if entry is not None:
+                text, complete = entry
+                if not any(a.text() == "CHECK AND REPAIR" for a in menu.actions()):
+                    menu_section(menu, "Check and repair")
+                sidecars = menu.addAction(text)
+                if self.read_only:
+                    sidecars.setEnabled(False)
+                    sidecars.setToolTip(
+                        "This folder is open view only, so nothing is written into "
+                        "it. Open it as a project (the path bar above) to write "
+                        "sidecars here."
+                    )
+                else:
+                    sidecars.setToolTip(
+                        "From the data it was converted from, its own header, your "
+                        "answers and the sidecars that link to it, in the format of "
+                        "the BIDS version chosen in Settings. A file that is not "
+                        "named the BIDS way gets its sidecar beside it. A value "
+                        "already there is never changed; every field is shown with "
+                        "where it was read before anything is written. One Undo."
+                    )
+                    sidecars.triggered.connect(
+                        lambda _c=False, s=sidecar_scope, c=complete:
+                            self.sidecars_requested.emit(s, c)
+                    )
 
         # What validation reads: anything under the root but the tool's own
         # folders. A right-click inside the selection covers the selection.

@@ -104,11 +104,12 @@ def converted(tmp_path_factory) -> dict:
 
 
 def test_the_scan_finds_every_modality(converted) -> None:
-    """Four modalities in one folder is the shape that broke scans.tsv.
+    """Several modalities in one folder is the shape that broke scans.tsv.
 
-    Asserted on ``datatype``, not on ``modality``: that column holds
-    the SERIES KIND (T1w, bold, fmap, scout, report, eeg, meg), which is a
-    finer thing than the family and does not contain the word "mri" at all.
+    Asserted on ``datatype``, the folder each recording lands in; ``modality``
+    says how it was acquired (``mri``, ``eeg``, ``meg``, ``pet``) and
+    ``sequence_kind`` what the classifier recognised (T1w, bold, scout,
+    report).
     """
     frame = pd.read_csv(converted["inventory"], sep="\t", dtype=str)
     datatypes = {
@@ -127,9 +128,12 @@ def test_the_phoenix_report_is_excluded(converted) -> None:
     frame = pd.read_csv(converted["inventory"], sep="\t", dtype=str)
     # The scan reports it as a "report" series with no proposed datatype,
     # which is the observable outcome: nothing downstream can convert it.
-    kinds = {str(v).lower() for v in frame.get("modality", [])}
+    # ``sequence_kind`` since the 2026-09-23 rename: ``modality`` holds how a
+    # recording was acquired (``mri``), and this test, reading it, failed
+    # wherever it ran and was skipped everywhere else.
+    kinds = {str(v).lower() for v in frame.get("sequence_kind", [])}
     assert "report" in kinds, sorted(kinds)
-    reports = frame[frame["modality"].str.lower() == "report"]
+    reports = frame[frame["sequence_kind"].str.lower() == "report"]
     assert reports["datatype"].fillna("").eq("").all(), (
         "the PhoenixZIPReport was given a datatype to convert into"
     )
@@ -214,25 +218,39 @@ def _errors(root) -> list[tuple[str, str, str]]:
     ]
 
 
-def test_everything_but_pet_validates_clean(converted) -> None:
-    """MRI, EEG and MEG convert with no errors. PET is excluded here and
-    covered by the xfail below, so a regression in the other three is not
-    hidden behind a known PET gap."""
-    errors = [e for e in _errors(converted["root"]) if "/pet/" not in e[0]]
+def _known_gap(error: tuple[str, str, str]) -> bool:
+    """The two gaps this sample has, each pinned by its own test below: PET
+    fields the scanner does not record, and the eye tracker's screen geometry,
+    which an EyeLink file does not record either (the user writes
+    ``StimulusPresentation``, as the tutorial does)."""
+    path, rule, _field = error
+    return "/pet/" in path or ("recording-eye" in path
+                               and rule == "INCOMPLETE_STIMULUS_PRESENTATION")
+
+
+def test_everything_but_the_known_gaps_validates_clean(converted) -> None:
+    """MRI, spectroscopy, EEG, MEG and the physiology convert with no errors.
+    The two gaps are excluded here and pinned below, so a regression anywhere
+    else is not hidden behind them."""
+    errors = [e for e in _errors(converted["root"]) if not _known_gap(e)]
     assert not errors, errors
+
+
+def test_the_eye_tracking_gap_is_the_screen_geometry(converted) -> None:
+    eye = [e for e in _errors(converted["root"]) if "recording-eye" in e[0]]
+    assert {rule for _path, rule, _field in eye} <= {"INCOMPLETE_STIMULUS_PRESENTATION"}, eye
 
 
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "the published dose_sheet.csv is LONG (field,value,units,...) and "
-        "read_pet_spreadsheet expects WIDE (one row per scan, an identifying "
-        "column). The file is rejected with 'no identifying column', so the "
-        "nine fields it carries never reach the sidecar and the validator "
-        "reports exactly those nine as missing. Found 2026-09-14. Either the "
-        "reader learns the long form or the published sheet is regenerated; "
-        "until then the multimodal tutorial's closing 'Validate: 0 errors' "
-        "is not reproducible by following it."
+        "two gaps the sample's own files cannot close. PET: the long-form "
+        "dose_sheet.csv is read (seven of its nine fields reach the sidecar), "
+        "but its ReconMethodParameterLabels and ReconMethodParameterUnits, "
+        "'none', are not written, so the validator reports them missing; the "
+        "tutorial sets them with Fix. Eye tracking: StimulusPresentation, the "
+        "screen geometry an EyeLink file does not record; the tutorial writes "
+        "it by hand. Re-checked 2026-10-26 on the published sample."
     ),
 )
 def test_the_result_validates_with_no_errors(converted) -> None:

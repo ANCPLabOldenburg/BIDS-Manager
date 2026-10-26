@@ -104,6 +104,20 @@ _COLUMN_DATATYPES: dict[str, frozenset[str]] = {
     "montage": frozenset({"eeg", "ieeg"}),
 }
 
+
+def _drop_volumes_applies(datatype: str, suffix: str) -> bool:
+    from ...fixups.dummy_volumes import applies
+
+    return applies(datatype, suffix)
+
+
+# Columns whose scope is finer than a datatype: a rule on (datatype, suffix).
+# Dummy volumes mean something for a functional time series only, not for the
+# SBRef or the physiology beside it in func/.
+_COLUMN_RULES = {
+    "drop_volumes": _drop_volumes_applies,
+}
+
 # Per-row recording-acquisition fields that live in the recording-metadata
 # scaffold's ``overrides[row_id]`` block rather than a TSV column (the convert
 # step's ``resolve_effective`` already layers them over the dataset defaults and
@@ -301,6 +315,8 @@ COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("probe_n_vols", "probe_vols",  "mono",  False, 70,  df_column="probe_n_volumes", default_visible=False),
     ColumnSpec("repetition_type","repetition","plain", False, 110, df_column="repetition_type", default_visible=False),
     ColumnSpec("issues","issues",    "plain", False, 240, df_column="issues", default_visible=False),
+    ColumnSpec("drop_volumes", "drop volumes", "mono", True, 90, df_column="drop_volumes",
+               default_visible=False),
 )
 
 # Columns the user cannot hide (lose them and rows become unidentifiable).
@@ -323,6 +339,7 @@ COLUMN_DESCRIPTIONS: dict[str, str] = {
     "task":      "Task entity (task-XXX) for func / eeg / meg rows.",
     "run":       "Run index (run-N) when a series was repeated.",
     "conf":      "How sure the classifier is about the datatype and suffix, from 0 to 1.",
+    "drop_volumes": "Functional runs: how many volumes to remove from the start at conversion (dummy scans). Empty: the default in Settings > Convert; 0: none.",
     "source_folder": "Where the row came from: the folder inside the raw tree that holds its files.",
     "format":    "What the row was read from: DICOM, ECAT, FIF, EDF, BrainVision, EEGLAB, CTF.",
     "sequence":  "Scanner sequence name used for classification. Empty for formats that do not name one.",
@@ -593,6 +610,9 @@ class InventoryTableModel(QAbstractTableModel):
         either map apply everywhere, which keeps the identity and provenance
         columns untouched.
         """
+        rule = _COLUMN_RULES.get(df_col)
+        if rule is not None:
+            return rule(*self.effective_datatype_suffix(row))
         datatypes = _COLUMN_DATATYPES.get(df_col)
         fields = _COLUMN_BIDS_FIELDS.get(df_col)
         if datatypes is None and fields is None:
@@ -1288,6 +1308,12 @@ class InventoryTableModel(QAbstractTableModel):
         if not self.column_applies(row, df_col):
             return False
         new_str = "" if value is None else str(value)
+        if df_col == "drop_volumes":
+            new_str = new_str.strip()
+            if new_str and not (new_str.isdigit() and int(new_str) <= 100):
+                # A count of volumes, or empty for the default: anything else
+                # would be refused at conversion, silently.
+                return False
         # Inheritance fields: writing a value equal to the dataset default
         # clears the cell back to "inherited" instead of storing a redundant
         # per-row override (the convert/display layers re-resolve the default).
@@ -2178,6 +2204,28 @@ class InventoryTableModel(QAbstractTableModel):
                    if cell(r, "datatype") == "fmap"
                    and (cell(r, "participant_id"), cell(r, "session")) == who]
         return next((sorted(g) for g in acquisitions(session) if row in g), [row])
+
+    def set_drop_volumes(self, row: int, count: Optional[int]) -> None:
+        """Volumes to remove from the start of this functional run at
+        conversion, or ``None`` for the default in Settings. One Undo."""
+        if not self.column_applies(row, "drop_volumes"):
+            return
+        value = "" if count is None else str(max(0, min(100, int(count))))
+        with self.edit_group():
+            self._set_cell(row, "drop_volumes", value)
+        self.refresh_row(row)
+
+    def drop_volumes(self, row: int) -> Optional[int]:
+        """The row's own number of volumes to remove, ``None`` for the default."""
+        if "drop_volumes" not in self._df.columns:
+            return None
+        cell = self._df.at[row, "drop_volumes"]
+        text = "" if cell is None or (isinstance(cell, float) and pd.isna(cell)) else str(cell)
+        text = text.strip()
+        try:
+            return int(float(text)) if text else None
+        except ValueError:
+            return None
 
     def set_fieldmap_targets(self, row: int, row_ids) -> None:
         """The user's own choice of the runs a fieldmap corrects (a list of

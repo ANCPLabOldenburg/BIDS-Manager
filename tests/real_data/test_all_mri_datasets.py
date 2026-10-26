@@ -27,7 +27,7 @@ import pytest
 from bidsmgr import schema as bids_schema
 from bidsmgr.cli.scan import BIDS_GUESS_COLUMNS, run_scan
 from bidsmgr.inventory.mri_dicom import TSV_COLUMNS
-from tests.fixtures.data_root import dataset
+from tests.fixtures.data_root import MRI_ADVANCED, MRI_WALKTHROUGH, dataset, have, why_missing
 
 REAL_MRI_ROOT = dataset("MRI")
 
@@ -38,15 +38,12 @@ pytestmark = [
         not os.environ.get("BIDS_MANAGER_REAL_MRI_DATA"),
         reason="BIDS_MANAGER_REAL_MRI_DATA not set",
     ),
-    pytest.mark.skipif(
-        not REAL_MRI_ROOT.exists(),
-        reason=f"real MRI dataset root missing at {REAL_MRI_ROOT}",
-    ),
+    pytest.mark.skipif(not have("MRI"), reason=why_missing("MRI")),
 ]
 
 
 def _dataset_dirs() -> list[Path]:
-    if not REAL_MRI_ROOT.exists():
+    if not have("MRI"):
         return []
     # ``vendor_test_data`` is a collection of 52 sets, each tested on its own
     # in test_vendor_test_data.py; scanning it as one dataset tests nothing.
@@ -106,19 +103,17 @@ def test_scan_produces_valid_tsv(dataset: Path, tmp_path: Path):
     )
 
 
-def test_ppmi_longitudinal_sessions_split():
+def test_ppmi_longitudinal_sessions_split(tmp_path: Path):
     """PPMI patients have multiple visits identified by ``StudyInstanceUID +
     StudyDate``. The scanner must merge them into one ``sub-NNN`` (same
     ``PatientID + PatientName``) and split into ``ses-1`` / ``ses-2`` /…
     in chronological order.
     """
-    if not REAL_MRI_ROOT.exists():
-        pytest.skip("real MRI dataset root missing")
     ppmi = REAL_MRI_ROOT / "PPMI"
     if not ppmi.exists():
         pytest.skip("PPMI dataset missing")
 
-    out = REAL_MRI_ROOT.parent / "_pytest_ppmi_longitudinal.tsv"
+    out = tmp_path / "ppmi_longitudinal.tsv"
     try:
         run_scan(ppmi, out, n_jobs=4)
         df = pd.read_csv(out, sep="\t", keep_default_na=False, dtype=str)
@@ -150,19 +145,17 @@ def test_ppmi_longitudinal_sessions_split():
     )
 
 
-def test_rep_column_chronological_within_groups():
+def test_rep_column_chronological_within_groups(tmp_path: Path):
     """Rep column must be the chronological position within each
     ``(participant_id, session, sequence, image_type)`` group of size > 1.
 
     PPMI ses-1 has 5 ``2D GRE-MT`` acquisitions of the same image_type
     in time order — they must be numbered ``1, 2, 3, 4, 5``.
     """
-    if not REAL_MRI_ROOT.exists():
-        pytest.skip("real MRI dataset root missing")
     ppmi = REAL_MRI_ROOT / "PPMI"
     if not ppmi.exists():
         pytest.skip("PPMI dataset missing")
-    out = REAL_MRI_ROOT.parent / "_pytest_rep_chronological.tsv"
+    out = tmp_path / "rep_chronological.tsv"
     try:
         run_scan(ppmi, out, n_jobs=4)
         df = pd.read_csv(out, sep="\t", keep_default_na=False, dtype=str)
@@ -185,7 +178,7 @@ def test_rep_column_chronological_within_groups():
     )
 
 
-def test_neuroimging_old_dwi_scanner_derivatives_classified_correctly():
+def test_neuroimging_old_dwi_scanner_derivatives_classified_correctly(tmp_path: Path):
     """neuroimging_old has explicit ``..._FA``, ``..._TRACEW``, ``..._ColFA``,
     and ``..._TENSOR`` series. The classifier must emit BIDS scanner-
     derivative suffixes (FA/colFA/trace) for the first three and route
@@ -195,12 +188,10 @@ def test_neuroimging_old_dwi_scanner_derivatives_classified_correctly():
     file ``acq-15`` peer; the cross-row B0 detector must reroute it to
     ``fmap/epi``.
     """
-    if not REAL_MRI_ROOT.exists():
-        pytest.skip("real MRI dataset root missing")
-    src = REAL_MRI_ROOT / "neuroimging_old"
-    if not src.exists():
-        pytest.skip("neuroimging_old missing")
-    out = REAL_MRI_ROOT.parent / "_pytest_neuroimging_old.tsv"
+    if not have(*MRI_ADVANCED):
+        pytest.skip(why_missing(*MRI_ADVANCED))
+    src = dataset(*MRI_ADVANCED)
+    out = tmp_path / "advanced.tsv"
     try:
         run_scan(src, out, n_jobs=4)
         df = pd.read_csv(out, sep="\t", keep_default_na=False, dtype=str)
@@ -237,17 +228,20 @@ def test_neuroimging_old_dwi_scanner_derivatives_classified_correctly():
         r = b0_row.iloc[0]
         assert r["bids_guess_datatype"] == "fmap"
         assert r["bids_guess_suffix"] == "epi"
-        assert "rerouted to fmap/epi" in r["issues"]
+        # Since the parameter classifier (fb8181b) the series is named from
+        # its own parameters, so the cross-row reroute, and its note, only
+        # step in when the parameters do not decide. Either way the row says
+        # why it got its name.
+        assert ("rerouted to fmap/epi" in r["issues"]
+                or str(r.get("classification_evidence", "")).strip()), dict(r)
 
 
-def test_repetition_type_column_present():
+def test_repetition_type_column_present(tmp_path: Path):
     """Every dataset's TSV must have the new ``repetition_type`` column."""
-    if not REAL_MRI_ROOT.exists():
-        pytest.skip("real MRI dataset root missing")
-    sample = REAL_MRI_ROOT / "neuroimaging_unit_new"
-    if not sample.exists():
-        pytest.skip("sample dataset missing")
-    out = REAL_MRI_ROOT.parent / "_pytest_reptype.tsv"
+    if not have(*MRI_WALKTHROUGH):
+        pytest.skip(why_missing(*MRI_WALKTHROUGH))
+    sample = dataset(*MRI_WALKTHROUGH)
+    out = tmp_path / "reptype.tsv"
     try:
         run_scan(sample, out, n_jobs=4)
         df = pd.read_csv(out, sep="\t", keep_default_na=False, dtype=str)

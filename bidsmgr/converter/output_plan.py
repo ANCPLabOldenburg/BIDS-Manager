@@ -87,6 +87,12 @@ class PlanOptions:
     sourcedata: str = "none"             # "none" | "copy" | "archive"
     sourcedata_modalities: tuple[str, ...] = ()
     force_edf: bool = False
+    #: Physiology: "by_rate" (a table per sampling rate), "one_interpolated"
+    #: or "one_as_recorded" (one table for the run); ``converter.physio_cmrr``.
+    physio_layout: str = "by_rate"
+    #: Volumes removed from the start of a functional run whose
+    #: ``drop_volumes`` cell is empty (``fixups.dummy_volumes``).
+    drop_volumes: int = 0
     bids_version: str = ""
     version: str = ""                    # BIDS Manager's
     dcm2niix_version: str = ""
@@ -206,9 +212,11 @@ def _row_id(df, i) -> str:
 # ---------------------------------------------------------------------------
 
 
-#: The signals a Siemens physio log can hold; bidsphysio writes one pair of
-#: files per signal (``recording-<signal>``) when they were sampled apart.
-_PHYSIO_SIGNALS = ("cardiac", "ecg", "respiratory", "trigger")
+#: The signals a Siemens physio log can hold, by the name of their table when
+#: they are written one table per sampling rate (``converter.physio_cmrr``):
+#: pulse, the ECG leads together, respiration, external inputs. The scanner
+#: trigger is a column of each, never a table of its own.
+_PHYSIO_SIGNALS = ("cardiac", "ecg", "respiratory", "externalTrigger")
 
 
 #: Suffixes whose echoes are the point of the series (a fieldmap's two
@@ -254,7 +262,8 @@ def _renamed_reason(name: str, written: str) -> str:
 
 
 def _files_for_row(df, i, two_echoes: bool, force_edf: bool,
-                   diffusion: bool = False, echoes: int = 1) -> list[PlannedFile]:
+                   diffusion: bool = False, echoes: int = 1,
+                   physio_layout: str = "by_rate") -> list[PlannedFile]:
     name = _cell(df, i, "bids_name")
     datatype = _cell(df, i, "datatype")
     subject = _cell(df, i, "participant_id") or f"sub-{_split_name(name).get('sub', '')}"
@@ -288,12 +297,17 @@ def _files_for_row(df, i, two_echoes: bool, force_edf: bool,
     if uid:                                              # a DICOM series
         if suffix == "physio":
             stem = base[: -len("_physio")]
-            add(f"{base}.tsv.gz", "bidsphysio", conditional="when the log holds a single signal")
-            add(f"{base}.json", "bidsphysio", "sidecar", "when the log holds a single signal")
+            origin = "BIDS Manager (physiology)"
+            if physio_layout in ("one_interpolated", "one_as_recorded"):
+                add(f"{base}.tsv.gz", origin)
+                add(f"{base}.json", origin, "sidecar")
+                return out
+            add(f"{base}.tsv.gz", origin, conditional="when the log holds a single sampling rate")
+            add(f"{base}.json", origin, "sidecar", "when the log holds a single sampling rate")
             for signal in _PHYSIO_SIGNALS:
-                cond = f"when the log holds a {signal} signal (one file per signal)"
-                add(f"{stem}_recording-{signal}_physio.tsv.gz", "bidsphysio", conditional=cond)
-                add(f"{stem}_recording-{signal}_physio.json", "bidsphysio", "sidecar", cond)
+                cond = f"when the log holds a {signal} signal at a rate of its own"
+                add(f"{stem}_recording-{signal}_physio.tsv.gz", origin, conditional=cond)
+                add(f"{stem}_recording-{signal}_physio.json", origin, "sidecar", cond)
             return out
         origin = "dcm2niix"
         if echoes >= 2 and suffix not in _ECHO_SUFFIXES:
@@ -478,7 +492,8 @@ def plan_output(df, included: Optional[Sequence[bool]] = None,
             continue
         uid = _cell(df, i, "series_uid")
         files = _files_for_row(df, i, _two_echoes(features or {}, uid), options.force_edf,
-                               _diffusion(features or {}, uid), _echoes(features or {}, uid))
+                               _diffusion(features or {}, uid), _echoes(features or {}, uid),
+                               options.physio_layout)
         for f in files + _attached(df, i, files):
             put(f)
         subject = _cell(df, i, "participant_id")
@@ -950,13 +965,43 @@ def _iso_time(df, i) -> str:
     return UNKNOWN
 
 
+def _volumes_removed(df, i, suffix: str, options: PlanOptions) -> int:
+    """Volumes the conversion removes from the start of this row
+    (``fixups.dummy_volumes.volumes_to_remove``), 0 for a cell that is not
+    a number (the conversion reports it and uses the default)."""
+    from ..fixups.dummy_volumes import volumes_to_remove
+
+    datatype = _cell(df, i, "datatype")
+    try:
+        return volumes_to_remove(_cell(df, i, "drop_volumes"), datatype, suffix,
+                                 options.drop_volumes)
+    except ValueError:
+        return volumes_to_remove("", datatype, suffix, options.drop_volumes)
+
+
+def _first_kept_time(df, i, name: str, features, options: PlanOptions) -> str:
+    """The recording's time in the scans table: the scan's, moved to the
+    first volume kept when volumes are removed from the start of the run
+    (``n x RepetitionTime``, as ``fixups.dummy_volumes`` moves it)."""
+    stamp = _iso_time(df, i)
+    suffix = name.split(".", 1)[0].rsplit("_", 1)[-1]
+    removed = _volumes_removed(df, i, suffix, options)
+    tr = getattr(_features_of(features, _cell(df, i, "series_uid")), "repetition_time", None)
+    if not removed or stamp == UNKNOWN or not isinstance(tr, (int, float)) or tr <= 0:
+        return stamp
+    from ..fixups.dummy_volumes import later_datetime
+
+    return later_datetime(stamp, removed * float(tr)) or stamp
+
+
 def _scans_tsv(df, planned: PlannedFile, features, options: PlanOptions) -> FilePreview:
     """``filename`` relative to the session folder, and the time."""
     by_row = {}
     for i in planned.rows:
         uid = _cell(df, i, "series_uid")
         by_row[i] = _files_for_row(df, i, _two_echoes(features or {}, uid), options.force_edf,
-                                   _diffusion(features or {}, uid), _echoes(features or {}, uid))
+                                   _diffusion(features or {}, uid), _echoes(features or {}, uid),
+                                   options.physio_layout)
     # As the metadata step lists them, by its own rule: the recordings, not
     # their sidecars, gradient tables or side files.
     listed = _listed([f for files in by_row.values() for f in files])
@@ -965,7 +1010,9 @@ def _scans_tsv(df, planned: PlannedFile, features, options: PlanOptions) -> File
         datatype = _cell(df, i, "datatype")
         for f in files:
             if f.path in listed:
-                rows.append((f"{datatype}/{f.path.rsplit('/', 1)[-1]}", _iso_time(df, i)))
+                name = f.path.rsplit("/", 1)[-1]
+                rows.append((f"{datatype}/{name}",
+                             _first_kept_time(df, i, name, features, options)))
     rows.sort()
     return FilePreview("tsv", header=("filename", "acq_time"), rows=tuple(rows),
                        note="One row per recording of the session, its time from the scan. "
@@ -1496,8 +1543,9 @@ def _sidecar(df, row, planned: PlannedFile, options: PlanOptions, features, spec
             out.put("SamplingFrequency", UNKNOWN, "converter")
             out.put("StartTime", UNKNOWN, "converter")
             out.put("Columns", UNKNOWN, "converter")
-            notes.append("One pair of files per signal (recording-<signal>) when they were "
-                         "sampled at different rates.")
+            notes.append("One table per sampling rate (recording-<signal>), or one for the "
+                         "run when Settings > Convert asks for it; every ECG lead is a column "
+                         "and the scanner trigger is the last column of every table.")
         # The physio fixup names the task the recording belongs to.
         task = _split_name(name).get("task", "")
         if task:
@@ -1526,6 +1574,9 @@ def _sidecar(df, row, planned: PlannedFile, options: PlanOptions, features, spec
         if datatype in ("fmap", "func", "dwi", "perf"):
             for key, value, source in _links(df, row, options, features):
                 out.put(key, value, source)
+        removed = _volumes_removed(df, row, suffix, options)
+        if removed:
+            out.put("NumberOfVolumesDiscardedByUser", removed, "settings")
 
     if suffix not in ("channels", "events", "coordsystem", "electrodes", "physio", "physioevents"):
         note = _deface(df, row, datatype, suffix, options, features, out)

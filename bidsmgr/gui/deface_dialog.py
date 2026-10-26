@@ -41,7 +41,12 @@ from PyQt6.QtWidgets import (
 
 from ..deface import derivatives, engines
 from ..deface.run import unavailable_reason
-from ..deface.select import Selection, walk
+from ..deface.select import (
+    Selection,
+    derivative_pipelines,
+    targets_in_derivatives,
+    walk,
+)
 from .dialog_chrome import build_footer_with, build_header, card, hint
 from .fs_watch import watchers_released
 from .widgets.scope_bar import ScopeBar
@@ -179,6 +184,42 @@ class DefaceDialog(QDialog):
         self._targets = self._scope_bar.targets()
         self._scope_bar.changed.connect(self._on_scope_changed)
         sl.addWidget(self._scope_bar)
+
+        # Derivatives: a preprocessed T1w carries the face of the scan it came
+        # from, so a dataset shared with its derivatives needs them done too.
+        # Off unless what was right-clicked is a derivative, because acting on
+        # another pipeline's files is a choice the user makes knowingly.
+        pipelines = [p.name for p in derivative_pipelines(self._root)]
+        deriv_row = QHBoxLayout()
+        deriv_row.setSpacing(10)
+        self._derivatives = QCheckBox("Include derivatives")
+        self._derivatives.setEnabled(bool(pipelines))
+        self._derivatives.setChecked(
+            bool(pipelines) and targets_in_derivatives(self._root, self._targets)
+        )
+        if pipelines:
+            where = (
+                "derivatives/bidsmgr-skullstrip/, with the source's description "
+                "and brain in the name (desc-preproc becomes desc-preprocbrain)"
+                if kind == engines.KIND_STRIP else "in place"
+            )
+            self._derivatives.setToolTip(
+                "Also the anatomical and PET images of the derivative pipelines "
+                f"({', '.join(pipelines)}), at the same subjects and sessions. "
+                f"They are done {where}. Masks, segmentations and maps are not "
+                "images of the head and are left alone."
+            )
+        else:
+            self._derivatives.setToolTip("This dataset has no derivatives/ with subject data.")
+        self._derivatives.toggled.connect(lambda *_a: self._refresh())
+        deriv_row.addWidget(self._derivatives)
+        self._derivatives_hint = QLabel(
+            ", ".join(f"derivatives/{n}/" for n in pipelines) if pipelines
+            else "No derivatives in this dataset")
+        self._derivatives_hint.setObjectName("dlg-hint")
+        deriv_row.addWidget(self._derivatives_hint, 1)
+        sl.addLayout(deriv_row)
+
         self._scope = QLabel("")
         self._scope.setObjectName("dlg-hint")
         self._scope.setWordWrap(True)
@@ -213,7 +254,7 @@ class DefaceDialog(QDialog):
 
         self._keep = QCheckBox(self._copy["option"])
         self._keep.setToolTip(self._copy["option_tip"])
-        self._keep.toggled.connect(lambda *_a: self._update_status())
+        self._keep.toggled.connect(lambda *_a: self._update_notes())
         el.addWidget(self._keep)
         engine_card.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum,
@@ -236,7 +277,13 @@ class DefaceDialog(QDialog):
         self._preview.setHeaderLabels(["In the dataset", "What happens"])
         self._preview.setRootIsDecorated(True)
         self._preview.setUniformRowHeights(True)
+        # The middle goes when a row is too long: a path's end is the file,
+        # and a note's end is the name the result is written as.
+        self._preview.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self._preview.itemChanged.connect(self._on_item_checked)
+        from .widgets.tree_click import toggle_on_click
+
+        toggle_on_click(self._preview)
         pl.addWidget(self._preview, 1)
 
         tools = QHBoxLayout()
@@ -311,7 +358,10 @@ class DefaceDialog(QDialog):
         self._refresh()
 
     def _refresh(self) -> None:
-        self._selection = walk(self._root, self._targets)
+        self._selection = walk(
+            self._root, self._targets,
+            include_derivatives=self._derivatives.isChecked(),
+        )
         sel = self._selection
 
         self._scope.setText(
@@ -322,20 +372,31 @@ class DefaceDialog(QDialog):
 
         self._preview.blockSignals(True)
         self._preview.clear()
+        # Grouped by where the images are once derivatives are in play: raw
+        # data first, then each pipeline. A flat list of forty paths that
+        # begin with derivatives/ hides which half of the dataset is which.
+        groups: dict[str, list] = {}
         for cand in sel.candidates:
-            item = QTreeWidgetItem(self._preview, [cand.relative, ""])
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(0, Qt.CheckState.Checked)
-            item.setData(0, Qt.ItemDataRole.UserRole, cand.relative)
-            note = (
-                "brain kept, everything else removed"
-                if self._kind == engines.KIND_STRIP else "face removed"
-            )
-            if cand.previous_engine:
-                note = f"done again (was {cand.previous_engine})"
-            elif cand.foreign_methods:
-                note = f"{note}; another tool also deidentified this"
-            item.setText(1, note)
+            groups.setdefault(cand.pipeline, []).append(cand)
+        grouped = any(groups) and set(groups) != {""}
+        for pipeline, members in groups.items():
+            parent = self._preview
+            if grouped:
+                title = (f"derivatives/{pipeline}/" if pipeline else "Raw data")
+                head = QTreeWidgetItem(self._preview, [f"{title} ({len(members)})", ""])
+                head.setFlags(
+                    head.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsAutoTristate
+                )
+                head.setCheckState(0, Qt.CheckState.Checked)
+                head.setExpanded(True)
+                parent = head
+            for cand in members:
+                item = QTreeWidgetItem(parent, [cand.relative, ""])
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(0, Qt.CheckState.Checked)
+                item.setData(0, Qt.ItemDataRole.UserRole, cand.relative)
+                item.setData(1, Qt.ItemDataRole.UserRole, cand)
 
         if sel.skipped:
             # Grouped by reason rather than listed flat. Seven fieldmap files
@@ -360,6 +421,9 @@ class DefaceDialog(QDialog):
                 node.setExpanded(len(group) <= 4)
             head.setExpanded(True)
 
+        self._preview.blockSignals(False)
+        self._update_notes()
+
         # Fit the path column to its content, but never past half the width:
         # a long session path would otherwise push the reason off the right
         # edge, and the reason is the column that stops somebody shipping a
@@ -368,25 +432,56 @@ class DefaceDialog(QDialog):
         cap = max(240, int(self._preview.viewport().width() * 0.55))
         if self._preview.columnWidth(0) > cap:
             self._preview.setColumnWidth(0, cap)
-        self._preview.blockSignals(False)
 
+    def _candidate_items(self) -> list[QTreeWidgetItem]:
+        """Every row that stands for an image, grouped or not."""
+        out: list[QTreeWidgetItem] = []
+        stack = [self._preview.topLevelItem(i)
+                 for i in range(self._preview.topLevelItemCount())]
+        while stack:
+            item = stack.pop(0)
+            if item.data(0, Qt.ItemDataRole.UserRole):
+                out.append(item)
+            elif item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                stack.extend(item.child(j) for j in range(item.childCount()))
+        return out
+
+    def _note(self, cand) -> str:
+        """What happens to one image, as the options stand."""
+        strip = self._kind == engines.KIND_STRIP
+        if strip and not self._keep.isChecked():
+            target = derivatives.derivative_path(self._root, cand.path)
+            note = (f"brain kept, written as {target.name}" if target is not None
+                    else "brain kept")
+        elif strip:
+            note = "brain kept, original overwritten"
+        else:
+            note = "face removed"
+        if cand.previous_engine:
+            note = f"{note}; done again (was {cand.previous_engine})"
+        elif cand.foreign_methods:
+            note = f"{note}; another tool also deidentified this"
+        return note
+
+    def _update_notes(self) -> None:
+        self._preview.blockSignals(True)
+        for item in self._candidate_items():
+            cand = item.data(1, Qt.ItemDataRole.UserRole)
+            if cand is not None:
+                item.setText(1, self._note(cand))
+                item.setToolTip(1, self._note(cand))
+        self._preview.blockSignals(False)
         self._update_status()
 
     def _checked(self) -> list[str]:
-        out: list[str] = []
-        for i in range(self._preview.topLevelItemCount()):
-            item = self._preview.topLevelItem(i)
-            rel = item.data(0, Qt.ItemDataRole.UserRole)
-            if rel and item.checkState(0) == Qt.CheckState.Checked:
-                out.append(str(rel))
-        return out
+        return [str(item.data(0, Qt.ItemDataRole.UserRole))
+                for item in self._candidate_items()
+                if item.checkState(0) == Qt.CheckState.Checked]
 
     def _set_all(self, state: Qt.CheckState) -> None:
         self._preview.blockSignals(True)
-        for i in range(self._preview.topLevelItemCount()):
-            item = self._preview.topLevelItem(i)
-            if item.data(0, Qt.ItemDataRole.UserRole):
-                item.setCheckState(0, state)
+        for item in self._candidate_items():
+            item.setCheckState(0, state)
         self._preview.blockSignals(False)
         self._update_status()
 
@@ -414,6 +509,10 @@ class DefaceDialog(QDialog):
                 "The originals stay in .bidsmgr/, so Undo restores them "
                 "exactly."
             )
+            if (self._kind == engines.KIND_DEFACE and self._keep.isChecked()
+                    and any(c.startswith("derivatives/") for c in self._checked())):
+                where += (" Derivatives are not copied to sourcedata/, which "
+                          "holds raw data only.")
         self._status.setText(
             f"{n} image(s) will be {self._copy['verb']}. {where}"
         )
@@ -488,8 +587,11 @@ class DefaceDialog(QDialog):
             self._progress.setRange(0, max(total, 1))
             self._progress.setValue(0)
         self._ok.setEnabled(not running)
-        for widget in (self._preview, self._engine, self._keep):
+        for widget in (self._preview, self._engine, self._keep,
+                       self._scope_bar):
             widget.setEnabled(not running)
+        self._derivatives.setEnabled(
+            not running and bool(derivative_pipelines(self._root)))
         self._spinner.set_busy(
             running, message=self._copy["busy"] if running else "",
         )

@@ -8,8 +8,9 @@ intend to keep, and (b) hide the ownership of each output file in the
 shared per-folder dump. Instead, for every row that the user is likely
 to commit to the BIDS root we:
 
-1. Build a per-series staging directory of symlinks (one per source
-   DICOM file belonging to that ``SeriesInstanceUID``).
+1. Build a per-series staging directory holding every source DICOM
+   file of that ``SeriesInstanceUID``, linked or copied
+   (:mod:`bidsmgr.util.staging`).
 2. Invoke dcm2niix against the staging directory.
 3. Walk the output and attribute every produced file to the series that
    was staged into that directory (a multi-echo or phase acquisition
@@ -75,6 +76,7 @@ from typing import Iterable, Optional
 from joblib import delayed  # pools are built by bidsmgr.util.parallel
 
 from bidsmgr.util.paths import long_path
+from bidsmgr.util.staging import stage_files, staging_folder
 
 from ..classifier.dcm2niix_bidsguess import find_dcm2niix, run_dcm2niix
 from .types import InventoryRow
@@ -236,65 +238,6 @@ def collect_probe_stats(
     return by_uid
 
 
-def _stage_series(
-    series_uid: str,
-    file_paths: list[str],
-    staging_dir: Path,
-) -> int:
-    """Symlink every DICOM of one SeriesInstanceUID into ``staging_dir``.
-
-    Returns the number of files staged. Existing entries are removed and
-    re-linked so re-running the probe is idempotent.
-
-    Windows notes (mirrors ``dcm2niix_direct._stage_dicoms``):
-
-    * ``os.symlink`` requires ``SeCreateSymbolicLinkPrivilege`` (granted
-      by Developer Mode) or Administrator on Windows. When the syscall
-      fails with ``WinError 1314`` this function switches the rest of
-      the series to ``shutil.copyfile`` so non-admin Windows users still
-      get a working probe pass.
-    * Staged filenames are short, zero-padded sequential names rather
-      than the source name. Vendor Siemens/GE DICOMs are ~80 chars and
-      easily push the full Win32 path past the 260-char ``MAX_PATH``
-      ceiling inside a deep staging tree, which makes dcm2niix exit
-      ``rc=2`` without a useful error. dcm2niix orders frames by DICOM
-      tags (InstanceNumber etc.), not by filename, so renaming on stage
-      is safe and removes the need for collision handling.
-    """
-
-    if staging_dir.exists():
-        shutil.rmtree(long_path(staging_dir), ignore_errors=False)
-    staging_dir.mkdir(parents=True)
-    n = 0
-    use_copy_fallback = False
-    for idx, fp in enumerate(file_paths):
-        src = Path(fp)
-        if not src.exists():
-            continue
-        link_name = f"{idx:06d}{src.suffix or '.dcm'}"
-        link = staging_dir / link_name
-        src_resolved = src.resolve()
-        if use_copy_fallback:
-            shutil.copyfile(long_path(src_resolved), long_path(link))
-            n += 1
-            continue
-        try:
-            os.symlink(long_path(src_resolved), long_path(link))
-        except FileExistsError:
-            os.unlink(long_path(link))
-            os.symlink(long_path(src_resolved), long_path(link))
-        except OSError as exc:
-            # WinError 1314: SeCreateSymbolicLinkPrivilege missing.
-            # Switch to copy-mode for the rest of this series.
-            if getattr(exc, "winerror", None) == 1314:
-                use_copy_fallback = True
-                shutil.copyfile(long_path(src_resolved), long_path(link))
-            else:
-                raise
-        n += 1
-    return n
-
-
 def _should_probe_row(row: InventoryRow) -> bool:
     """Decide whether a row is worth converting in the probe pass.
 
@@ -357,16 +300,26 @@ def _probe_one_series(
     this module; the worker's stdout/stderr are merged by joblib.
     """
 
-    staging_dir = series_workdir / "_dicoms"
-    n = _stage_series(uid, files, staging_dir)
-    if n == 0:
-        log.warning("probe: staging directory empty for UID %s", uid)
-        return uid, None
-
+    # On Windows, a probe folder on a network share stages in a local
+    # temporary folder instead (util.staging explains why).
+    staging_dir = staging_folder(series_workdir / "_dicoms")
     output_dir = series_workdir / "out"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    proc = _run_dcm2niix_full(staging_dir, output_dir, dcm2niix_bin=Path(dcm2niix_bin))
+    try:
+        n = stage_files(files, staging_dir)
+        if n == 0:
+            log.warning("probe: staging directory empty for UID %s", uid)
+            return uid, None
+        output_dir.mkdir(parents=True, exist_ok=True)
+        proc = _run_dcm2niix_full(staging_dir, output_dir, dcm2niix_bin=Path(dcm2niix_bin))
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        # A probe is advisory: one series that cannot be read (a share that
+        # dropped, a file locked by another program, a slow share that ran
+        # past the timeout) leaves that series unprobed, not the scan failed.
+        log.warning("probe: UID %s skipped: %s", uid, exc)
+        return uid, None
+    finally:
+        if staging_dir.parent != series_workdir:
+            shutil.rmtree(long_path(staging_dir), ignore_errors=True)
     if proc.returncode != 0:
         log.info(
             "probe: dcm2niix returncode=%s%s for UID %s; stderr tail=%s",
@@ -481,7 +434,7 @@ def preview_series(
         raise ValueError("no DICOM of this series was found")
     work_dir = Path(work_dir)
     staging = work_dir / "_dicoms"
-    _stage_series("series", files, staging)
+    stage_files(files, staging)
     output = work_dir / "out"
     output.mkdir(parents=True, exist_ok=True)
     proc = _run_dcm2niix_full(staging, output, dcm2niix_bin=dcm2niix_bin)

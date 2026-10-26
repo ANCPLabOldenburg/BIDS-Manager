@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
 
 from ..cli._scaffold import slugify_name
 from ..cli.create import open_or_create_workspace
+from ..samples import SAMPLE_DATA_PAGE, SAMPLES
 from .app_settings import AppSettings
 from .theme_manager import CUR
 
@@ -71,29 +72,8 @@ _DOCS_URL = _RESOURCE_LINKS[0][1]
 # Sample datasets, offered two ways: straight to the download for somebody who
 # knows which one they want, and to the documentation section for somebody who
 # does not. The section says what each dataset demonstrates and what a full run
-# of it produces, which a bare link cannot.
-#
-# These are hosted on the UOL cloud and must be kept in step with the Sample
-# data page of the documentation (``site.yml`` there holds the same links). They
-# have drifted before: the list here had four while the documentation offered
-# six, and in October 2026 every share was reissued, which left all six links
-# here dead. If you add or replace a dataset, change both.
-#
-# An installed application cannot be corrected, so a share must keep its link:
-# replace a zip INSIDE its share on the cloud rather than making a new share.
-_SAMPLE_DATA_PAGE = (
-    "https://ancplaboldenburg.github.io/bids_manager_documentation/start/sample-data/"
-)
-_SAMPLE_DATASETS: tuple[tuple[str, str], ...] = (
-    ("MRI walkthrough dataset", "https://cloud.uol.de/s/qpE8KeBpqgTn2LB/download"),
-    ("Advanced MRI (Siemens) dataset", "https://cloud.uol.de/s/KdFzsDtLA9ijNAb/download"),
-    ("PET, DICOM and ECAT with blood", "https://cloud.uol.de/s/Sfmdo6m2GCrKyfi/download"),
-    ("EEG motor-imagery dataset", "https://cloud.uol.de/s/8YcmPwFJ5qzfEAq/download"),
-    ("MEG Elekta sample dataset", "https://cloud.uol.de/s/XQoEqsa42bNQ4JX/download"),
-    ("Multimodal: MRI, MRS, PET, EEG, MEG, eye tracking",
-     "https://cloud.uol.de/s/kY9nQwdzgyQF6At/download"),
-)
-_SAMPLE_DATASETS_URL = _SAMPLE_DATA_PAGE
+# of it produces, which a bare link cannot. The list is ``bidsmgr.samples``,
+# which the tests' download fixture reads too.
 
 
 def _parse_qcolor(value: str) -> QColor:
@@ -387,6 +367,8 @@ class WelcomePanel(QWidget):
         browse.setObjectName("tb-btn-ghost")
         browse.setCursor(Qt.CursorShape.PointingHandCursor)
         browse.clicked.connect(self._on_browse_location)
+        self._browse_btn = browse
+        self._browse_clicks = 0         # the guide moves on when the user browses
         loc_row.addWidget(self._location_edit, 1)
         loc_row.addWidget(browse)
         lay.addLayout(loc_row)
@@ -448,7 +430,7 @@ class WelcomePanel(QWidget):
         sample = QLabel("Sample datasets")
         sample.setObjectName("welcome-subsection")
         lay.addWidget(sample)
-        # One button with a menu rather than six links: the card ran past the
+        # One button with a menu rather than a link per sample: the card ran past the
         # fold on a first run. Each item opens its download in the browser.
         from .viz.menus import popup_menu
 
@@ -456,11 +438,12 @@ class WelcomePanel(QWidget):
         self._samples_button.setObjectName("tb-btn")
         self._samples_button.setToolTip("Pick one: the download opens in your browser")
         menu = popup_menu(self._samples_button)
-        for text, url in _SAMPLE_DATASETS:
-            action = menu.addAction(text)
-            action.setData(url)
-            action.setToolTip(url)
-            action.triggered.connect(lambda _c=False, u=url: QDesktopServices.openUrl(QUrl(u)))
+        for sample in SAMPLES:
+            action = menu.addAction(sample.label)
+            action.setData(sample.url)
+            action.setToolTip(sample.url)
+            action.triggered.connect(
+                lambda _c=False, u=sample.url: QDesktopServices.openUrl(QUrl(u)))
         self._samples_button.setMenu(menu)
         row = QHBoxLayout()
         row.addWidget(self._samples_button)
@@ -468,33 +451,44 @@ class WelcomePanel(QWidget):
         lay.addLayout(row)
         lay.addWidget(self._link_label(
             "Compare them, and see what each one demonstrates",
-            _SAMPLE_DATASETS_URL,
+            SAMPLE_DATA_PAGE,
         ))
         return card
 
     def _build_updates_card(self) -> QFrame:
-        from .whats_new import NEWS_FOR
+        from .viz.menus import popup_menu
+        from .whats_new import NEWS
 
         card, lay = _section_card(
             "What's new",
-            f"What BIDS Manager {NEWS_FOR} brings, and the notes of every release: "
-            "new features, fixes, and anything worth knowing before you upgrade.",
+            "What each release brings, and the notes of every release: new features, "
+            "fixes, and anything worth knowing before you upgrade.",
         )
-        news = self._link_label(f"See what's new in BIDS Manager {NEWS_FOR}", "#whats-new")
-        news.setOpenExternalLinks(False)
-        news.setToolTip("The announcement shown when this release first opened")
-        news.linkActivated.connect(lambda _href: self._show_whats_new())
-        lay.addWidget(news)
+        # One button with a menu, as the sample datasets: one entry per
+        # release's news, the newest first.
+        self._news_button = QPushButton("See what's new")
+        self._news_button.setObjectName("tb-btn")
+        self._news_button.setToolTip("The announcement each release showed when it first opened")
+        menu = popup_menu(self._news_button)
+        for item in NEWS:
+            action = menu.addAction(f"In {item.label}")
+            action.setData(item.key)
+            action.triggered.connect(lambda _c=False, k=item.key: self._show_whats_new(k))
+        self._news_button.setMenu(menu)
+        row = QHBoxLayout()
+        row.addWidget(self._news_button)
+        row.addStretch(1)
+        lay.addLayout(row)
         lay.addWidget(self._link_label(
             "Read the update notes",
             "https://ancplaboldenburg.github.io/bids_manager_documentation/updates/",
         ))
         return card
 
-    def _show_whats_new(self) -> None:
+    def _show_whats_new(self, key: str) -> None:
         from .whats_new import show_dialog
 
-        show_dialog(self.window())
+        show_dialog(self.window(), start=key)
 
     def _show_star_request(self) -> None:
         from .star_request import show_dialog
@@ -665,6 +659,7 @@ class WelcomePanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_browse_location(self) -> None:
+        self._browse_clicks += 1
         d = QFileDialog.getExistingDirectory(
             self, "Choose where to create the dataset",
             str(self._create_location),
@@ -672,6 +667,22 @@ class WelcomePanel(QWidget):
         if d:
             self._create_location = Path(d)
             self._location_edit.setText(d)
+
+    # ------------------------------------------------------------------
+    # The guide (gui/guide.py)
+    # ------------------------------------------------------------------
+
+    def guide_facts(self) -> dict:
+        """What the guide's Home tasks need to know (``guide_steps``)."""
+        return {"browse_clicks": self._browse_clicks,
+                "name": bool(self._name_edit.text().strip()),
+                "recents": self._recent.count()}
+
+    def guide_targets(self) -> dict:
+        """The controls the guide can point at, by name."""
+        return {"browse": self._browse_btn, "name": self._name_edit,
+                "create": self._create_btn, "open": self._open_btn,
+                "recent": self._recent, "samples": self._samples_button}
 
     def _on_inline_create(self) -> None:
         name = self._name_edit.text().strip()

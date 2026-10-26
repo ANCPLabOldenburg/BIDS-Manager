@@ -202,7 +202,9 @@ def test_origin_and_format_are_shown_by_default() -> None:
 
 # Metadata columns that only mean something for some datatypes. Editability is
 # the column's own flag AND whether the row's datatype has any use for it.
-_MODALITY_SCOPED = {"line_freq", "montage", "eeg_reference", "eeg_ground"}
+# Columns that apply only to some recordings: EEG/MEG metadata, and the dummy
+# volumes of a functional run.
+_MODALITY_SCOPED = {"line_freq", "montage", "eeg_reference", "eeg_ground", "drop_volumes"}
 
 
 def test_flags_only_editable_columns_carry_edit_flag() -> None:

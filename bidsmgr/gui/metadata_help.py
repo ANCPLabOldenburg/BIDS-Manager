@@ -55,6 +55,34 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+#: Where one sentence ends and the next begins in a schema description.
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"(])")
+
+
+def schema_summary(text: str, limit: int = 300, width: int = 72) -> str:
+    """A schema description as a tooltip shows it: plain text, whole sentences.
+
+    The schema writes Markdown (links, backticks, bold) over many short lines,
+    and some descriptions run past a thousand characters. Cutting at a fixed
+    length stopped a tooltip mid-word with its Markdown showing ("MUST be
+    indexed with the [`run-<index>`](SPEC_ROOT/...) entity: ... w"). This keeps
+    the sentences that fit in ``limit`` characters, always the first, and
+    breaks them into lines of ``width``: Qt does not wrap a plain-text tooltip.
+    """
+    import textwrap
+
+    plain = _clean(text).replace("**", "")
+    if not plain:
+        return ""
+    sentences = _SENTENCE_END.split(plain)
+    kept = sentences[0]
+    for sentence in sentences[1:]:
+        if len(kept) + 1 + len(sentence) > limit:
+            break
+        kept = f"{kept} {sentence}"
+    return textwrap.fill(kept, width)
+
+
 @functools.lru_cache(maxsize=256)
 def bids_tooltip(bids_key: str) -> str:
     """Cleaned ``<display name>: <description>`` from the schema, or ``""``."""
@@ -76,4 +104,4 @@ def tooltip_for(ui_field_key: str) -> str:
     return _FALLBACKS.get(ui_field_key, "")
 
 
-__all__ = ["bids_tooltip", "tooltip_for"]
+__all__ = ["bids_tooltip", "schema_summary", "tooltip_for"]

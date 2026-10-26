@@ -29,9 +29,9 @@ import pytest
 
 from bidsmgr.cli.scan import BIDS_GUESS_COLUMNS, run_scan
 from bidsmgr.inventory.mri_dicom import TSV_COLUMNS
-from tests.fixtures.data_root import dataset
+from tests.fixtures.data_root import MRI_WALKTHROUGH, dataset, have, why_missing
 
-REAL_MRI_ROOT = dataset("MRI", "neuroimaging_unit_new")
+REAL_MRI_ROOT = dataset(*MRI_WALKTHROUGH)
 
 
 pytestmark = [
@@ -40,10 +40,7 @@ pytestmark = [
         not os.environ.get("BIDS_MANAGER_REAL_MRI_DATA"),
         reason="BIDS_MANAGER_REAL_MRI_DATA not set",
     ),
-    pytest.mark.skipif(
-        not REAL_MRI_ROOT.exists(),
-        reason=f"real MRI dataset missing at {REAL_MRI_ROOT}",
-    ),
+    pytest.mark.skipif(not have(*MRI_WALKTHROUGH), reason=why_missing(*MRI_WALKTHROUGH)),
 ]
 
 

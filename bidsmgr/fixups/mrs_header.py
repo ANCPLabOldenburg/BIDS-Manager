@@ -90,6 +90,23 @@ def _drop_zero_absent(data: dict) -> list[str]:
     return gone
 
 
+def sidecar_fields(header: dict) -> dict:
+    """The fields of a NIfTI-MRS header that belong in its sidecar, in order.
+
+    The acquisition parameters a reader needs (:data:`_SIDECAR_FIELDS`),
+    without the empty ones and without a zero that means "not done". The
+    conversion copies these out, and the Editor writes them when a sidecar
+    is made again from the image.
+    """
+    out: dict = {}
+    for field in _SIDECAR_FIELDS:
+        value = header.get(field)
+        if value in (None, "") or (field in _ZERO_MEANS_ABSENT and _is_zero(value)):
+            continue
+        out[field] = value
+    return out
+
+
 def read_mrs_header(path: Path) -> Optional[dict]:
     """The NIfTI-MRS JSON header inside ``path``, or ``None``.
 
@@ -216,9 +233,8 @@ def _write_sidecar(path: Path, header: dict) -> None:
     # explicitly or it survives into the dataset.
     cleared = _drop_zero_absent(existing)
     added = False
-    for field in _SIDECAR_FIELDS:
-        value = header.get(field)
-        if value in (None, "") or field in existing:
+    for field, value in sidecar_fields(header).items():
+        if field in existing:
             continue
         existing[field] = value
         added = True
@@ -252,4 +268,5 @@ __all__ = [
     "clean_mrs_file",
     "clean_mrs_outputs",
     "read_mrs_header",
+    "sidecar_fields",
 ]

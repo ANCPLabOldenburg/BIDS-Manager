@@ -79,6 +79,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     app, theme = create_application(args.theme)
 
+    # The version this computer last ran, read before this session writes any
+    # setting: it decides which What's new a start shows (``greet``).
+    from .gui import whats_new
+
+    previous = whats_new.read_previous()
+
     # Warm the schema on a background thread while the user is still
     # choosing a folder. Answering "which sidecar fields apply here" is a
     # walk of the standard's rule tree, cached for the life of the process,
@@ -114,19 +120,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     # test that builds a window gets neither.
     from PyQt6.QtCore import QTimer
 
-    QTimer.singleShot(600, lambda: greet(win))
+    QTimer.singleShot(600, lambda: greet(win, previous))
     return app.exec()
 
 
-def greet(window) -> None:
-    """The dialogs a start may show, one after the other: What's new if this
-    release's news is unseen, then the star request if it is due today
+def greet(window, previous="") -> None:
+    """The dialogs a start may show, one after the other: What's new for the
+    releases a user coming from ``previous`` has not had (read from the
+    settings when not given), then the star request if it is due today
     (after What's new closes, when both are due)."""
     from PyQt6.QtCore import QTimer
 
     from .gui import star_request, whats_new
 
-    news = whats_new.maybe_show(window)
+    news = whats_new.maybe_show(window, previous)
     if news is None:
         star_request.maybe_show(window)
     else:

@@ -255,6 +255,13 @@ class _TopHeader(QFrame):
 
         self._theme = theme
         from . import icons
+        from .guide import GuideSwitch
+
+        # The guide's switch, left of Settings: on, the next control to use
+        # is ringed and explained (gui/guide.py).
+        self.guide_switch = GuideSwitch(self)
+        h.addWidget(self.guide_switch)
+        h.addSpacing(2)
 
         # Settings gear, immediately left of the theme toggle. Lives in the
         # header (not the converter toolbar) so it reads as a global control
@@ -276,6 +283,11 @@ class _TopHeader(QFrame):
         self._sync_theme_button()
         self._theme_btn.clicked.connect(self._open_theme_menu)
         h.addWidget(self._theme_btn)
+
+    def guide_targets(self) -> dict:
+        """The header's controls the guide can point at, by name."""
+        return {"home": self._welcome_btn, "converter": self._converter_btn,
+                "editor": self._editor_btn, "settings": self._settings_btn}
 
     def set_active_view(self, view: str) -> None:
         """Programmatically toggle the pills (no signal emitted)."""
@@ -505,6 +517,7 @@ class _TopHeader(QFrame):
         icons.apply_button(self._settings_btn, "settings")
         icons.apply_button(self._project_btn, "project")
         self._sync_theme_button()
+        self.guide_switch.repaint_for_palette()
 
 
 class MainWindow(QMainWindow):
@@ -606,6 +619,58 @@ class MainWindow(QMainWindow):
         # at construction time (delegate paints, inline ``setStyleSheet``)
         # repaint with the new palette without requiring an app restart.
         theme.add_listener(self._on_palette_changed)
+
+        # The guide: off unless the user switched it on (remembered).
+        from .guide import Guide
+
+        self._guide = Guide(self)
+        self._header.guide_switch.set_on(settings.guided_mode)
+        self._header.guide_switch.toggled.connect(self._on_guide_toggled)
+        self.stack.currentChanged.connect(lambda _i: self._guide.refresh())
+        if settings.guided_mode:
+            self._guide.set_enabled(True)
+
+    # ------------------------------------------------------------------
+    # The guide (gui/guide.py, gui/guide_steps.py)
+    # ------------------------------------------------------------------
+
+    @property
+    def guide(self):
+        return self._guide
+
+    def _on_guide_toggled(self, on: bool) -> None:
+        from .app_settings import AppSettings
+
+        AppSettings.remember_guided_mode(on)
+        self._guide.set_enabled(on)
+
+    def guide_view(self) -> str:
+        return {0: "converter", 1: "editor", 2: "welcome"}.get(self.stack.currentIndex(),
+                                                               "converter")
+
+    def guide_facts(self) -> dict:
+        """The current view's facts for the guide's step (``guide_steps``)."""
+        view = self.guide_view()
+        if view == "welcome":
+            facts = self.welcome.guide_facts()
+            facts["project"] = self._project_root is not None
+            facts["project_root"] = str(self._project_root or "")
+            if self._project_root is not None:
+                from .welcome_panel import _dataset_display_name
+
+                facts["project_name"] = _dataset_display_name(self._project_root)
+            return facts
+        return (self.editor if view == "editor" else self.converter).guide_facts()
+
+    def guide_target(self, name: str):
+        """The widget the guide's step names: a header control, else one of
+        the current view's."""
+        found = self._header.guide_targets().get(name)
+        if found is not None:
+            return found
+        view = self.guide_view()
+        panel = {"welcome": self.welcome, "editor": self.editor}.get(view, self.converter)
+        return panel.guide_targets().get(name)
 
     def _open_settings(self) -> None:
         """Open the Settings dialog (triggered by the header gear).
@@ -807,6 +872,8 @@ class MainWindow(QMainWindow):
         ThemeHub.instance().publish(pal)
         # Brand logo gradient — rebuilt from the new palette.
         self._header.repaint_for_palette(pal)
+        if hasattr(self, "_guide"):
+            self._guide.repaint_for_palette()
         # Cascade into the Converter and Editor panels.
         if hasattr(self, "converter"):
             self.converter.repaint_for_palette(pal)

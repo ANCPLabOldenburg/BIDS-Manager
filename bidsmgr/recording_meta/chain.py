@@ -170,11 +170,23 @@ def _coerce(name: str, value: Any, datatype: str, suffix: str) -> Any:
         return value
 
 
-def _acquisition_as_bids(acq, datatype: str, field_applies) -> dict[str, Any]:
-    """Translate one acquisition block into the BIDS names this datatype uses.
+def _acquisition_as_bids(acq, datatype: str, field_applies,
+                         suffix: str = "") -> dict[str, Any]:
+    """Translate one acquisition block into the BIDS names this file uses.
 
     Accepts an :class:`AcquisitionSpec` or a plain mapping of the same
     attribute names, which is how the inventory's own cells join the chain.
+
+    An acquisition block describes the datatype's RECORDING (the amplifier,
+    the reference, the mains frequency of an EEG run), so a field is written
+    only where it belongs to the recording (``datatype``/``datatype``, as
+    always) AND to the file being written (``datatype``/``suffix``). Asking only
+    the first put an EEG amplifier into every JSON beside the recording, its
+    ``_events.json``, ``_channels.json``, ``_electrodes.json`` and
+    ``_coordsystem.json`` (issue #187). Asking only the second would have added
+    fields where none went before: the eye tracker's ``beh/*_physio.json``
+    takes a ``Manufacturer``, and the EEG amplifier's would have replaced the
+    tracker's own. Both questions together only ever remove.
     """
     if acq is None:
         return {}
@@ -182,13 +194,15 @@ def _acquisition_as_bids(acq, datatype: str, field_applies) -> dict[str, Any]:
         acq = _AttrView(acq)
 
     out: dict[str, Any] = {}
+    own_file = not suffix or suffix == datatype
 
     def put(candidates: tuple[str, ...], value: Any) -> None:
         if value in (None, "", [], {}) or is_varies(value):
             # VARIES points at where the answer lives; it is never the answer.
             return
         for name in candidates:
-            if field_applies(name, datatype, datatype):
+            if field_applies(name, datatype, datatype) and (
+                    own_file or field_applies(name, datatype, suffix)):
                 out[name] = _coerce(name, value, datatype, datatype)
                 return
 
@@ -255,12 +269,12 @@ def resolve_sidecar_fields(
         field_applies = schema_mod.field_applies
 
     contributions: list[tuple[str, dict[str, Any]]] = [
-        ("dataset", _acquisition_as_bids(spec.defaults, datatype, field_applies)),
+        ("dataset", _acquisition_as_bids(spec.defaults, datatype, field_applies, suffix)),
         (
             "datatype",
             {
                 **_acquisition_as_bids(
-                    spec.datatype_defaults.get(datatype), datatype, field_applies,
+                    spec.datatype_defaults.get(datatype), datatype, field_applies, suffix,
                 ),
                 # PET keeps its own block because an injected dose and an EEG cap
                 # have nothing to say to each other. It is still this datatype's
@@ -295,7 +309,7 @@ def resolve_sidecar_fields(
             "row",
             {
                 **_acquisition_as_bids(
-                    spec.overrides.get(row_id), datatype, field_applies,
+                    spec.overrides.get(row_id), datatype, field_applies, suffix,
                 ),
                 **_pet_as_bids(
                     spec.pet_overrides.get(row_id), datatype, suffix, field_applies,
@@ -310,7 +324,7 @@ def resolve_sidecar_fields(
             "cell",
             _acquisition_as_bids(
                 {k: v for k, v in row_values.items() if v not in (None, "")},
-                datatype, field_applies,
+                datatype, field_applies, suffix,
             ),
         ))
 

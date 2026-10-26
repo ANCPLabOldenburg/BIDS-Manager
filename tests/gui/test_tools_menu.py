@@ -59,12 +59,14 @@ def test_the_menu_holds_the_dataset_wide_actions(panel: EditorPanel) -> None:
         "Quality check...",
 
         "CHECK AND REPAIR",
-        # All four answer "what is wrong with this dataset": coherence
-        # finds what disagrees, the tables tool writes the scans and
-        # sessions tables a dataset lacks, References finds what points at
-        # nothing, Fix ups fills what is missing.
+        # All answer "what is wrong with this dataset": coherence finds
+        # what disagrees, the tables tool writes the scans and sessions
+        # tables a dataset lacks, the sidecars tool writes the sidecars
+        # recordings lack, References finds what points at nothing, Fix
+        # ups fills what is missing.
         "Check coherence...",
         "Scans and sessions tables...",
+        "Write sidecars from the recordings...",
         "References (IntendedFor, Sources...)...",
         "Fix ups...",
         "Ignored files...",

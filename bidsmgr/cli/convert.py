@@ -48,7 +48,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, NamedTuple, Optional
 
 import pandas as pd
 from joblib import delayed  # pools are built by bidsmgr.util.parallel
@@ -64,6 +64,7 @@ from ..converter import (
     select_backend,
 )
 from ..metadata.preserve import is_mergeable, merge_file
+from ..fixups.dummy_volumes import drop_leading_volumes
 from ..fixups import (
     apply_fieldmap_renames,
     attach_companion_files,
@@ -268,7 +269,9 @@ def _apply_pet_metadata_json(spec, path: Path, df) -> object:
      "source data": a["raw_root"], "workers": a["n_jobs"],
      "existing files": a["on_existing"] or ("replace" if a["overwrite"] else "skip"),
      "dry run": a["dry_run"], "deface": a["deface"],
-     "source data kept": a["sourcedata"]}))
+     "source data kept": a["sourcedata"],
+     "volumes removed from functional runs": a["drop_volumes"],
+     "physiology": f'{a["physio_layout"]}{", aligned to the run" if a["physio_align"] else ""}'}))
 def run_convert(
     tsv: Path,
     bids_parent: Path,
@@ -293,8 +296,19 @@ def run_convert(
     b0_field: bool = True,
     sourcedata: str = "none",
     sourcedata_modalities=SOURCEDATA_MODALITIES,
+    drop_volumes: int = 0,
+    physio_layout: str = "by_rate",
+    physio_align: bool = False,
 ) -> int:
     """Convert every commit-ready row in ``tsv`` to BIDS under ``bids_parent``.
+
+    ``drop_volumes`` is removed from the start of every functional run whose
+    ``drop_volumes`` cell is empty (a cell wins, 0 included); the run's
+    physiology starts at the first volume kept too. ``physio_layout`` is
+    ``"by_rate"`` (one table per sampling rate), ``"one_interpolated"`` (one
+    table, slower channels interpolated) or ``"one_as_recorded"`` (one table,
+    n/a between a slower channel's samples); ``physio_align`` crops physiology
+    to its run.
 
     Returns 0 on success, non-zero if any subject failed.
 
@@ -322,6 +336,11 @@ def run_convert(
     (``converter/sourcedata``). Refused before anything is written when the
     disk cannot hold them.
     """
+    from ..converter.physio_cmrr import LAYOUTS as _PHYSIO_LAYOUTS
+
+    if physio_layout not in _PHYSIO_LAYOUTS:
+        raise ValueError(f"unknown physio layout {physio_layout!r}; choose from "
+                         f"{', '.join(_PHYSIO_LAYOUTS)}")
     tsv = Path(tsv)
     src_options = SourcedataOptions.parse(sourcedata, sourcedata_modalities)
     bids_parent = Path(bids_parent)
@@ -454,6 +473,9 @@ def run_convert(
     if pet_spreadsheet is not None:
         spec = _apply_pet_spreadsheet(spec, Path(pet_spreadsheet), df)
 
+    task_options = TaskOptions(drop_volumes=max(0, int(drop_volumes or 0)),
+                               physio_layout=physio_layout, physio_align=bool(physio_align))
+
     backends = default_backends(dcm2niix_bin=dcm2niix_bin)
     # Capture dcm2niix version once for provenance — it's still the
     # primary backend for MRI rows.
@@ -471,6 +493,7 @@ def run_convert(
                     subject_df, bids_parent, files_by_uid,
                     source_search_roots=source_search_roots,
                     skip_residuals=skip_residuals, force_edf=force_edf, spec=spec,
+                    options=task_options,
                 ), src_options))[1]
         problem = _sd.space_problem(bids_parent, needed)
         if problem:
@@ -524,6 +547,7 @@ def run_convert(
                 skip_residuals=skip_residuals,
                 force_edf=force_edf,
                 spec=spec,
+                options=task_options,
             )
             if not tasks:
                 continue
@@ -651,15 +675,18 @@ def _convert_subject(
         # this one opens it: measured on real data the moment MRS
         # conversion was enabled, every _svs file carried all five.
         n_enriched += clean_mrs_outputs(staging, tasks)
-        # Physio: the vendored bidsphysio writes the three fields a physio
-        # sidecar cannot do without and nothing the standard has asked for
-        # since. This fills what can be DERIVED, asking the active schema
-        # which fields it declares rather than hard-coding one BIDS version
-        # into third-party code.
+        # Physio: converter.physio_cmrr writes the fields a physio sidecar
+        # cannot do without. This fills what can be DERIVED, asking the
+        # active schema which fields it declares rather than hard-coding one
+        # BIDS version.
         n_enriched += enrich_physio_sidecars(staging)
         # Copy any per-row curated companion files (events/beh/stim/...) into
         # the staged tree (place + name only; no conversion).
         n_enriched += attach_companion_files(staging, tasks)
+        # Dummy scans the user asked to remove, from the image, its sidecar
+        # and its events (which the line above may just have attached). Its
+        # physiology was written starting at the first volume kept.
+        n_enriched += drop_leading_volumes(results)
         # The screen an eye tracker measured gaze on, beside the run's events
         # (which the line above may just have attached).
         n_enriched += place_stimulus_presentation(staging, tasks)
@@ -1267,6 +1294,15 @@ def _filter_convertible_rows(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+class TaskOptions(NamedTuple):
+    """What a conversion asks of every task, beyond its row."""
+
+    #: Volumes removed from a functional run whose cell is empty.
+    drop_volumes: int = 0
+    physio_layout: str = "by_rate"
+    physio_align: bool = False
+
+
 def _build_tasks_for_subject(
     subject_df: pd.DataFrame,
     bids_root: Path,
@@ -1276,6 +1312,7 @@ def _build_tasks_for_subject(
     skip_residuals: bool = True,
     force_edf: bool = False,
     spec: Optional[RecordingMetaSpec] = None,
+    options: TaskOptions = TaskOptions(),
 ) -> list[ConvertTask]:
     tasks: list[ConvertTask] = []
     for _, row in subject_df.iterrows():
@@ -1285,10 +1322,60 @@ def _build_tasks_for_subject(
             skip_residuals=skip_residuals,
             force_edf=force_edf,
             spec=spec,
+            options=options,
         )
         if task is not None:
             tasks.append(task)
-    return tasks
+    return _physio_follows_its_run(tasks, _physio_links(subject_df))
+
+
+def _physio_links(df: pd.DataFrame) -> dict[str, str]:
+    """``{physio row id: run row id}`` for the logs of functional runs
+    (``fixups.dummy_volumes.physio_runs``), in the ids the tasks carry."""
+    from ..fixups.dummy_volumes import physio_runs
+    from ..project.orchestration import row_id
+
+    positions = {label: k for k, label in enumerate(df.index)}
+    frame = df.reset_index(drop=True)
+    return {row_id(frame, positions[log_]): row_id(frame, positions[run])
+            for log_, run in physio_runs(df).items()}
+
+
+def _physio_follows_its_run(tasks: list[ConvertTask],
+                            links: dict[str, str]) -> list[ConvertTask]:
+    """A physiology log takes the volumes removed from the run it was
+    recorded with (``links``): its tables then start where the run's image
+    starts. A log with no run while volumes are removed from this subject's
+    runs is said so in the log, since its tables then keep every volume."""
+    from ..fixups.dummy_volumes import applies
+
+    by_id = {t.row_id: t for t in tasks}
+    cutting = any(applies(t.datatype, t.suffix) and t.drop_volumes > 0 for t in tasks)
+    out = []
+    for t in tasks:
+        if t.datatype == "func" and t.suffix == "physio":
+            run = by_id.get(links.get(t.row_id, ""))
+            if run is not None:
+                if run.drop_volumes != t.drop_volumes:
+                    t = t.model_copy(update={"drop_volumes": run.drop_volumes})
+            elif cutting:
+                log.warning(
+                    "%s: no functional run being converted was recorded with this "
+                    "physiological log, so no volumes are removed from it", t.basename)
+        out.append(t)
+    return out
+
+
+def _drop_volumes_for(row: pd.Series, datatype: str, suffix: str, default: int) -> int:
+    """Volumes to remove from this row (``fixups.dummy_volumes.volumes_to_remove``);
+    a cell that is not a number is reported and the default used."""
+    from ..fixups.dummy_volumes import volumes_to_remove
+
+    try:
+        return volumes_to_remove(row.get("drop_volumes", ""), datatype, suffix, default)
+    except ValueError:
+        log.warning("drop_volumes %r is not a number; %d used", row.get("drop_volumes"), default)
+        return volumes_to_remove("", datatype, suffix, default)
 
 
 def _row_to_task(
@@ -1300,6 +1387,7 @@ def _row_to_task(
     skip_residuals: bool = True,
     force_edf: bool = False,
     spec: Optional[RecordingMetaSpec] = None,
+    options: TaskOptions = TaskOptions(),
 ) -> Optional[ConvertTask]:
     """Detect the row's shape and dispatch to the right builder.
 
@@ -1313,6 +1401,7 @@ def _row_to_task(
     if series_uid:
         return _row_to_task_mri(
             row, bids_root, files_by_uid, skip_residuals=skip_residuals,
+            options=options,
         )
 
     source_file = str(row.get("source_file", "")).strip()
@@ -1331,6 +1420,7 @@ def _row_to_task_mri(
     files_by_uid: dict[str, list[str]],
     *,
     skip_residuals: bool = True,
+    options: TaskOptions = TaskOptions(),
 ) -> Optional[ConvertTask]:
     series_uid = str(row.get("series_uid", "")).strip()
     if not series_uid:
@@ -1381,7 +1471,7 @@ def _row_to_task_mri(
         return None
 
     # Expected outputs differ by suffix. Physio rows produce
-    # ``.tsv.gz`` + ``.json`` from the bidsphysio backend; everything
+    # ``.tsv.gz`` + ``.json`` from the physio backend; everything
     # else dcm2niix-direct handles produces ``.nii.gz`` + ``.json``,
     # plus DWI extras.
     if suffix == "physio":
@@ -1414,6 +1504,9 @@ def _row_to_task_mri(
         skip_residuals=skip_residuals,
         companion_files=parse_companions(row.get("companion_files", "")),
         fieldmap_targets=_parse_fieldmap_targets(row),
+        drop_volumes=_drop_volumes_for(row, datatype, suffix, options.drop_volumes),
+        physio_layout=options.physio_layout,
+        physio_align=options.physio_align,
     )
 
 
@@ -1631,6 +1724,34 @@ def _suffix_from_basename(basename: str) -> str:
     return basename.rsplit("_", 1)[-1]
 
 
+def _row_data(row: pd.Series, sources) -> tuple[dict[str, list[str]], Optional[Path]]:
+    """Where one row's source data is now: ``(files_by_uid, None)`` for a
+    DICOM series, ``({}, path)`` for a recording file. Raises with the reason
+    when it cannot be found."""
+    from ..inventory.probe_convert import series_files
+
+    uid = str(row.get("series_uid", "")).strip()
+    source_file = str(row.get("source_file", "")).strip()
+    if not uid:
+        if not source_file:
+            raise ValueError("this row names no source data")
+        path = sources.file(source_file)
+        if path is None:
+            raise FileNotFoundError(f"{source_file} is not in {sources.root}")
+        return {}, path
+    uids = [u for u in uid.split("|") if u]
+    files_by_uid = {u: [str(p) for p in sources.series_files(u)] for u in uids}
+    if not any(files_by_uid.values()):
+        # A scan without its files_by_uid record: look in the row's folder.
+        folder = sources.folder(str(row.get("source_folder", "")))
+        if folder is not None:
+            files_by_uid = {u: series_files(folder, u) for u in uids}
+    if not any(files_by_uid.values()):
+        raise FileNotFoundError(
+            f"no DICOM of this series was found under {sources.root}")
+    return files_by_uid, None
+
+
 def preview_row(row, work_dir: Path, sources) -> list[Path]:
     """What converting this one row makes, for a look before the real thing.
 
@@ -1649,19 +1770,12 @@ def preview_row(row, work_dir: Path, sources) -> list[Path]:
 
     Returns the files a viewer opens; raises with the reason otherwise.
     """
-    from ..fixups.fieldmaps import apply_fieldmap_renames
-    from ..inventory.probe_convert import preview_series, series_files
+    from ..inventory.probe_convert import preview_series
     from ..viz.data.formats import is_recording_path, kind_of
 
     row = pd.Series({k: ("" if v is None else v) for k, v in dict(row).items()})
-    uid = str(row.get("series_uid", "")).strip()
-    source_file = str(row.get("source_file", "")).strip()
-    if not uid:
-        if not source_file:
-            raise ValueError("this row names no source data")
-        path = sources.file(source_file)
-        if path is None:
-            raise FileNotFoundError(f"{source_file} is not in {sources.root}")
+    files_by_uid, path = _row_data(row, sources)
+    if path is not None:
         # An EyeLink .edf shares its extension with an EEG recording and is
         # nothing like one: it is converted (to the BEP020 physio tables the
         # signal viewer plots), not read as it is.
@@ -1670,22 +1784,10 @@ def preview_row(row, work_dir: Path, sources) -> list[Path]:
             return [path]
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
-    files_by_uid: dict[str, list[str]] = {}
-    if uid:
-        uids = [u for u in uid.split("|") if u]
-        files_by_uid = {u: [str(p) for p in sources.series_files(u)] for u in uids}
-        if not any(files_by_uid.values()):
-            # A scan without its files_by_uid record: look in the row's folder.
-            folder = sources.folder(str(row.get("source_folder", "")))
-            if folder is not None:
-                files_by_uid = {u: series_files(folder, u) for u in uids}
-        if not any(files_by_uid.values()):
-            raise FileNotFoundError(
-                f"no DICOM of this series was found under {sources.root}")
     roots = (sources.root,) if sources.root is not None else ()
     task = _row_to_task(row, work_dir, files_by_uid, source_search_roots=roots)
     if task is None:
-        if uid:
+        if files_by_uid:
             return preview_series([f for files in files_by_uid.values() for f in files],
                                   work_dir)
         raise ValueError("the plan for this row converts nothing")
@@ -1698,6 +1800,55 @@ def preview_row(row, work_dir: Path, sources) -> list[Path]:
     if not shown:
         raise RuntimeError("the conversion made no file that can be shown")
     return shown
+
+
+def sidecars_for_row(row, work_dir: Path, sources, *,
+                     spec: Optional[RecordingMetaSpec] = None,
+                     options: TaskOptions = TaskOptions()) -> dict[str, dict]:
+    """The sidecars converting this one row writes, by file name.
+
+    The row goes through the conversion's own task builder and backend into
+    ``work_dir``, then the per-subject steps that shape a sidecar: fieldmap
+    names, PET and MR spectroscopy fields, physio fields, the converter
+    repairs and the identifiers. What the user stated is not applied, as in
+    the conversion: that is the metadata step's job. ``spec`` is passed for
+    what a backend needs from it (an eye tracker's settings, the PET block).
+
+    How the Editor rebuilds a sidecar that was deleted from the data it was
+    converted from. Raises with the reason when the row cannot be converted.
+    """
+    row = pd.Series({k: ("" if v is None else v) for k, v in dict(row).items()})
+    files_by_uid, _path = _row_data(row, sources)
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    roots = (sources.root,) if sources.root is not None else ()
+    task = _row_to_task(row, work_dir, files_by_uid, source_search_roots=roots, spec=spec,
+                        options=options)
+    if task is None:
+        raise ValueError("the plan for this row converts nothing")
+    if task.suffix == "physio":
+        # Alone, the row has no run to follow: the number recorded for it.
+        task = task.model_copy(update={"drop_volumes": options.drop_volumes})
+    staging = work_dir / f"sub-{safe_path_component(task.subject)}"
+    result = _phase1_one(default_backends(), task, staging)
+    if not result.success:
+        raise RuntimeError(result.error or "the conversion made nothing")
+    apply_fieldmap_renames(staging)
+    drop_leading_volumes([result])
+    enrich_pet_sidecars(staging, [task], spec)
+    clean_mrs_outputs(staging, [task])
+    enrich_physio_sidecars(staging)
+    repair_converter_output(staging)
+    prune_identifiers(staging)
+    out: dict[str, dict] = {}
+    for path in sorted(staging.rglob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            out[path.name] = data
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1768,6 +1919,11 @@ def _write_provenance(
                 "suffix": r.task.suffix,
                 "basename": r.task.basename,
                 "outputs": [p.name for p in r.staged_files],
+                # What was asked of it, so converting it again (the
+                # Editor's sidecars from the source data) does the same.
+                "drop_volumes": r.task.drop_volumes,
+                "physio_layout": r.task.physio_layout,
+                "physio_align": r.task.physio_align,
                 "n_input_dicoms": len(r.task.source_files),
                 "success": r.success,
                 "error": r.error,
@@ -2028,6 +2184,36 @@ def _main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--drop-volumes", type=int, default=0, metavar="N",
+        help=(
+            "Remove the first N volumes (dummy scans) of every functional run "
+            "whose drop_volumes cell in the table is empty; a cell wins, 0 "
+            "included. The image, its sidecar (NumberOfVolumesDiscardedByUser, "
+            "the acquisition time), its time in the scans table, its events and "
+            "the physiology recorded with it then start at the first volume kept."
+        ),
+    )
+    parser.add_argument(
+        "--physio-layout", choices=("by-rate", "one-interpolated", "one-as-recorded"),
+        default="by-rate",
+        help=(
+            "Physiological recordings. BIDS asks one sampling frequency per table: "
+            "one table per sampling rate, the samples as recorded (by-rate, default); "
+            "one table for the run at the fastest rate, slower channels interpolated "
+            "(one-interpolated); or one table at the fastest rate with each sample in "
+            "the row of its own time and n/a between a slower channel's samples "
+            "(one-as-recorded). All carry the scanner trigger as the last column."
+        ),
+    )
+    parser.add_argument(
+        "--physio-align", action="store_true",
+        help=(
+            "Crop physiological recordings to their run: from its first volume "
+            "(after any removed with --drop-volumes) to the end of its last, so "
+            "StartTime is 0."
+        ),
+    )
+    parser.add_argument(
         "--keep-residuals", action="store_true",
         help=(
             "Keep dcm2niix residual/secondary outputs. By default the "
@@ -2164,6 +2350,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
             b0_field=not args.no_b0_field_identifier,
             sourcedata=args.sourcedata,
             sourcedata_modalities=args.sourcedata_modalities,
+            drop_volumes=args.drop_volumes,
+            physio_layout=args.physio_layout.replace("-", "_"),
+            physio_align=args.physio_align,
             **log_keywords(args),
         )
         return _anonymise_after(rc, bids_root.parent, [bids_root.name], args)
@@ -2193,6 +2382,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
         b0_field=not args.no_b0_field_identifier,
         sourcedata=args.sourcedata,
         sourcedata_modalities=args.sourcedata_modalities,
+        drop_volumes=args.drop_volumes,
+        physio_layout=args.physio_layout.replace("-", "_"),
+        physio_align=args.physio_align,
         **log_keywords(args),
     )
     names = [args.dataset] if args.dataset else _dataset_names(Path(args.tsv))

@@ -93,6 +93,9 @@ class ConvertWorker(QThread):
         b0_field: bool = True,
         sourcedata: str = "none",
         sourcedata_modalities: str = "",
+        drop_volumes: int = 0,
+        physio_layout: str = "by_rate",
+        physio_align: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -114,6 +117,9 @@ class ConvertWorker(QThread):
         self._b0_field = b0_field
         self._sourcedata = sourcedata
         self._sourcedata_modalities = sourcedata_modalities
+        self._drop_volumes = drop_volumes
+        self._physio_layout = physio_layout
+        self._physio_align = physio_align
         # Cooperative stop flag, polled by ``run_convert`` between subjects
         # and between per-subject tasks.
         self._stop = threading.Event()
@@ -163,6 +169,9 @@ class ConvertWorker(QThread):
                 b0_field=self._b0_field,
                 sourcedata=self._sourcedata,
                 sourcedata_modalities=self._sourcedata_modalities,
+                drop_volumes=self._drop_volumes,
+                physio_layout=self._physio_layout,
+                physio_align=self._physio_align,
             )
             if rc == 130 or self._stop.is_set():
                 # 130 = run_convert's "stopped before all subjects" code.

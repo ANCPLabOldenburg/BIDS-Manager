@@ -8,8 +8,8 @@ orchestrator asks each in priority order and the first match wins.
 Today's roster (priority order — narrower matches first):
 
 * ``PhysioDcmBackend`` — claims rows whose ``suffix == "physio"`` that
-  look like Siemens CMRR ``_PhysioLog.dcm`` outputs. Wraps
-  ``bidsphysio.dcm2bidsphysio``.
+  look like Siemens CMRR ``_PhysioLog.dcm`` outputs. Reads them with
+  ``converter.physio_cmrr``.
 * ``EcatDirect`` — claims PET rows whose source carries the ECAT
   ``MATRIX7x`` signature (Siemens HRRT and older CTI scanners, which
   dcm2niix cannot read). Uses nibabel, no subprocess.
@@ -51,8 +51,8 @@ def default_backends(
     """Return the priority-ordered list of registered backends.
 
     Narrower matches go first. Lazy imports keep modules with heavy
-    optional deps (bidsphysio's pkg_resources warning, mne, dcm2niix
-    discovery) out of the import path until actually used.
+    optional deps (mne, dcm2niix discovery) out of the import path until
+    actually used.
 
     Order: ``PhysioDcmBackend`` (suffix=physio narrow match) →
     ``EcatDirect`` (datatype=pet AND an ECAT signature) →

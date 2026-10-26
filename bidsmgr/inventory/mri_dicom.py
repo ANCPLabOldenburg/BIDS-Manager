@@ -507,8 +507,14 @@ def scan_dicoms_long(
     n_jobs: int = 1,
     dataset: Optional[str] = None,
     cancel_check=None,
+    subject_from: str = "number",
 ) -> pd.DataFrame:
     """Walk ``root_dir`` and return a long-format inventory DataFrame.
+
+    ``subject_from`` is where the subject labels come from: ``"number"``
+    (``sub-001``, ...), or ``"patient_id"``, ``"given_name"``,
+    ``"family_name"`` (curated into a BIDS label, numbered where empty;
+    :mod:`bidsmgr.inventory.subject_label`).
 
     Parameters
     ----------
@@ -672,9 +678,12 @@ def scan_dicoms_long(
     cluster_root_for_tuple = cluster_subjects(set(identity_to_tuple.values()))
 
     cluster_roots = sorted(set(cluster_root_for_tuple.values()))
-    cluster_to_id: dict[IdentityTuple, str] = {
-        root: f"sub-{i + 1:03d}" for i, root in enumerate(cluster_roots)
-    }
+    members: dict[IdentityTuple, list[IdentityTuple]] = {root: [] for root in cluster_roots}
+    for t in sorted(set(identity_to_tuple.values())):
+        members[cluster_root_for_tuple[t]].append(t)
+    from .subject_label import assign as assign_subject_labels
+
+    cluster_to_id: dict[IdentityTuple, str] = assign_subject_labels(members, subject_from)
 
     participant_map: dict[str, str] = {}
     for k, t in identity_to_tuple.items():

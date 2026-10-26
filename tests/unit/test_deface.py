@@ -238,7 +238,7 @@ def test_the_selector_finds_anatomy_and_says_why_it_skipped_the_rest(tmp_path):
     assert reasons["sub-01/func/sub-01_task-x_bold.nii.gz"] is select.Skip.DATATYPE
     assert reasons[
         "derivatives/fmriprep/sub-01/anat/sub-01_desc-p_T1w.nii.gz"
-    ] is select.Skip.LOCATION
+    ] is select.Skip.DERIVATIVE
 
 
 def test_a_four_d_anatomical_is_skipped_as_four_d_not_silently(tmp_path):

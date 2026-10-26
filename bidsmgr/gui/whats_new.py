@@ -1,97 +1,193 @@
-"""What is new in this version: shown once, the first time it opens.
+"""What is new: shown once, for the releases a user has not had yet.
 
-A user who updates, or installs for the first time, sees one dialog that says
-what the version brings: new features, the redesigned GUI and viewers, and the
-new documentation website. Beside the text, an animation: the seven kinds of
-data BIDS Manager reads (MRI, MR spectroscopy, PET, EEG, MEG, physiology, eye
-tracking) appear as small figures and then gather into the BIDS Manager logo,
-each keeping its colour.
+Each piece of news (``News``) tells what one or more releases brought:
 
-Shown once per release whose notes this is (``NEWS_FOR``), not once per
-version string: 1.5.1 does not show the 1.5 news again. Called from
-:func:`bidsmgr.main.main` after the window is up, never from the window
-itself, so a test that builds a window gets no dialog.
+- **1.5.0**: new features, a redesigned GUI and viewers, a new documentation
+  website, beside an animation of the seven kinds of data BIDS Manager reads
+  gathering into its logo (``GatherCanvas``);
+- **1.5.1 and 1.5.2**: a list of their features beside a stage that plays a
+  short painted scene of each (``FeatureStage`` over ``gui/news_scenes.py``).
 
-The animation is painted (one ``drawPoints`` per colour), runs only while the
-dialog is visible, takes its colours from the theme's plot series
-(``VizTheme.series``) and its fonts from ``gui/viz/fonts``.
+Which news a start shows depends on the version the user comes from
+(``previous_version``): the version that last ran, recorded at every start
+(``ui/last_version``); before that record existed, the news last shown
+(``ui/whats_new_seen``: "1.5" was shown by 1.5.0 and 1.5.1, so it means 1.5.0
+at the latest); else any setting at all, which means an earlier release, from
+before What's new existed; else nothing, a first installation. ``due`` lists
+every news describing a release newer than that, newest first; a first
+installation gets the newest alone. The dialog opens on the newest, and Next
+walks to the older ones that are due; within the 1.5.2 news, a release the user
+already had is left out of the list. Every news is in the dialog's release
+menu and in Home's What's new menu, as Home's sample datasets are.
+
+Called from :func:`bidsmgr.main.main` after the window is up, never from the
+window itself, so a test that builds a window gets no dialog. The animations
+are painted, run only while visible, and take their colours from the theme
+and their fonts from ``gui/viz/fonts``.
 """
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
-from PyQt6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer, QUrl
+from PyQt6.QtCore import QElapsedTimer, QPointF, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QImage, QPainter, QPen
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-#: The release this news describes. Bump it with new text when a release
-#: deserves a new dialog; a patch release keeps it, so it is not shown again.
-NEWS_FOR = "1.5"
+from .news_scenes import ALSO, H, SCENES, W, Scene, paint_scene
 
 DOCS_URL = "https://ancplaboldenburg.github.io/bids_manager_documentation/"
-NOTES_URL = DOCS_URL + "updates/#v150"
 
 _LOGO = Path(__file__).parent / "assets" / "logo.png"
 
 #: The seven kinds of data, in the order they stand around the logo.
 KINDS = ("MRI", "MR spectroscopy", "PET", "EEG", "MEG", "Physiology", "Eye tracking")
 
-#: The timeline, in seconds: the figures appear, hold, gather into the logo
-#: (each particle a little after the last, so the stream reads as one), and
-#: the logo then breathes.
+#: The gathering's timeline, in seconds: the figures appear, hold, gather
+#: into the logo (each particle a little after the last, so the stream reads
+#: as one), and the logo then breathes.
 APPEAR = 0.9
 GATHER_AT = 1.6
 GATHER = 1.5
 STAGGER = 0.6
 SETTLED = GATHER_AT + GATHER + STAGGER
 
+#: Seconds a scene takes to appear and to fade at its end.
+FADE = 0.35
+
 
 # ---------------------------------------------------------------------------
-# When to show it
+# The news, and which a start shows
 # ---------------------------------------------------------------------------
 
 
-def should_show(seen: str) -> bool:
-    """Whether the news of ``NEWS_FOR`` has not been shown yet."""
-    return (seen or "").strip() != NEWS_FOR
+@dataclass(frozen=True)
+class News:
+    """What one or more releases brought, as one page of the dialog."""
+
+    #: The newest release it tells about.
+    key: str
+    #: How the menus name it.
+    label: str
+    #: The releases it tells about, oldest first.
+    releases: tuple[str, ...]
+    #: Its card on the documentation's Updates page.
+    anchor: str
+
+    @property
+    def notes_url(self) -> str:
+        return DOCS_URL + "updates/#" + self.anchor
 
 
-def maybe_show(window: QWidget) -> Optional["WhatsNewDialog"]:
-    """Open the dialog over ``window`` if this release's news is unseen.
+#: Every news, newest first.
+NEWS: tuple[News, ...] = (
+    News("1.5.2", "1.5.1 and 1.5.2", ("1.5.1", "1.5.2"), "v152"),
+    News("1.5.0", "1.5.0", ("1.5.0",), "v150"),
+)
 
-    Remembered as soon as it opens, so a crash or a closed laptop does not
-    bring it back on every start.
+
+def version_tuple(text: str) -> tuple[int, int, int]:
+    """``"1.5.2"`` -> ``(1, 5, 2)``; a missing part is 0, a suffix
+    (``1.5.2.dev0``, ``1.5.2+local``) is ignored."""
+    parts = [int(p) for p in re.findall(r"\d+", (text or "").split("+")[0])[:3]]
+    return tuple((parts + [0, 0, 0])[:3])
+
+
+def previous_version(*, last: str, seen: str, used_before: bool) -> Optional[str]:
+    """The version the user comes from, or ``None`` for a first installation.
+
+    ``last`` is the version that last ran (recorded since 1.5.2), ``seen``
+    the news last shown ("1.5": 1.5.0 or 1.5.1, so 1.5.0 at the latest), and
+    ``used_before`` whether any setting exists (a release from before What's
+    new: 1.4 or earlier).
     """
+    if (last or "").strip():
+        return last.strip()
+    seen = (seen or "").strip()
+    if seen:
+        return "1.5.0" if seen == "1.5" else seen
+    return "1.4" if used_before else None
+
+
+def read_previous() -> Optional[str]:
+    """``previous_version`` from this computer's settings. Read at start-up,
+    before anything of this session is written."""
     from .app_settings import AppSettings
 
-    if not should_show(AppSettings.whats_new_seen()):
+    return previous_version(last=AppSettings.last_version(), seen=AppSettings.whats_new_seen(),
+                            used_before=AppSettings.used_before())
+
+
+def due(previous: Optional[str]) -> list[News]:
+    """The news for a user coming from ``previous``, newest first: every one
+    telling about a release newer than it. A first installation gets the
+    newest alone."""
+    if previous is None:
+        return [NEWS[0]]
+    after = version_tuple(previous)
+    return [n for n in NEWS if version_tuple(n.key) > after]
+
+
+def releases_new_to(news: News, previous: Optional[str]) -> tuple[str, ...]:
+    """The releases of ``news`` the user has not had (all of them for a
+    first installation, or when the dialog is opened by hand)."""
+    if previous is None:
+        return news.releases
+    after = version_tuple(previous)
+    return tuple(r for r in news.releases if version_tuple(r) > after) or news.releases
+
+
+def maybe_show(window: QWidget, previous: Optional[str] = "") -> Optional["WhatsNewDialog"]:
+    """Open the dialog over ``window`` with the news due for a user coming
+    from ``previous`` (read from the settings when not given), and record the
+    version running now, so the next start shows nothing again.
+
+    Recorded as soon as it opens, so a crash or a closed laptop does not
+    bring it back on every start.
+    """
+    from .. import __version__
+    from .app_settings import AppSettings
+
+    if previous == "":
+        previous = read_previous()
+    news = due(previous)
+    AppSettings.remember_last_version(__version__)
+    AppSettings.remember_whats_new_seen(NEWS[0].key)
+    if not news:
         return None
-    AppSettings.remember_whats_new_seen(NEWS_FOR)
-    return show_dialog(window)
+    return show_dialog(window, news=news, previous=previous, walk=True)
 
 
-def show_dialog(parent: QWidget) -> "WhatsNewDialog":
-    """Open the dialog over ``parent`` (the first launch, or Home's What's
-    new link); it is deleted when closed, so opening it again adds none."""
-    dialog = WhatsNewDialog(parent)
+def show_dialog(parent: QWidget, *, news: Optional[Sequence[News]] = None,
+                previous: Optional[str] = None, start: Optional[str] = None,
+                walk: bool = False) -> "WhatsNewDialog":
+    """Open the dialog over ``parent``: the first launch of a release, or
+    Home's What's new menu (``start`` names the news to open on). It is
+    deleted when closed, so opening it again adds none."""
+    dialog = WhatsNewDialog(parent, news=news, previous=previous, start=start, walk=walk)
     dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
     dialog.open()
     return dialog
 
 
 # ---------------------------------------------------------------------------
-# The particles: where each one is at time t
+# The particles of the 1.5.0 news: where each one is at time t
+# (``logo_points``, ``ease`` and ``seven_colours`` are the star request's too)
 # ---------------------------------------------------------------------------
 
 
@@ -391,42 +487,298 @@ class GatherCanvas(QWidget):
         self._paint_ms = 0.9 * self._paint_ms + 0.1 * clock.nsecsElapsed() / 1e6
 
 
-class WhatsNewDialog(QDialog):
-    """What this release brings, beside the gathering animation."""
+# ---------------------------------------------------------------------------
+# The 1.5.1 and 1.5.2 news: a scene per feature
+# ---------------------------------------------------------------------------
+
+
+def scene_alpha(t: float, duration: float) -> float:
+    """How visible a scene is ``t`` seconds in: it appears, holds, and fades
+    at its end, so one scene hands over to the next."""
+    return max(0.0, min(1.0, t / FADE, (duration - t) / FADE))
+
+
+class FeatureStage(QWidget):
+    """The scenes, one after the other. A scene the user picked plays again
+    until another is picked; until then each hands over to the next."""
+
+    scene_changed = pyqtSignal(int)
+
+    def __init__(self, parent: Optional[QWidget] = None,
+                 scenes: Sequence[Scene] = SCENES) -> None:
+        super().__init__(parent)
+        from .viz import fonts
+        from .viz.bridge import ThemeHub, connect_while_alive
+
+        self.setObjectName("whatsnew-stage")
+        self.setMinimumWidth(fonts.px(360))
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        self.scenes: tuple[Scene, ...] = tuple(scenes)
+        self._index = 0
+        self._auto = True
+        self._clock = QElapsedTimer()
+        self._frozen: Optional[float] = None
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+        self._paint_ms = 0.0           # a running average of the paint's cost
+        self._describe()
+        connect_while_alive(ThemeHub.instance().changed, self, lambda w, _t: w.update())
+
+    # -- which scene, and when --------------------------------------------
+
+    def index(self) -> int:
+        return self._index
+
+    def scene(self) -> Scene:
+        return self.scenes[self._index]
+
+    def is_auto(self) -> bool:
+        """Whether the scenes still hand over to each other by themselves."""
+        return self._auto
+
+    def set_scene(self, index: int, *, by_user: bool = False) -> None:
+        """Play scene ``index`` from its start; one the user picked plays
+        again until another is picked."""
+        self._index = index % len(self.scenes)
+        if by_user:
+            self._auto = False
+        if self._clock.isValid():
+            self._clock.restart()
+        self._describe()
+        self.scene_changed.emit(self._index)
+        self.update()
+
+    def set_time(self, t: Optional[float]) -> None:
+        """Freeze the scene at ``t`` seconds (``None`` lets it run), shown as it
+        is at that moment, fading included."""
+        self._frozen = t
+        self.update()
+
+    def time(self) -> float:
+        if self._frozen is not None:
+            return self._frozen
+        return self._clock.elapsed() / 1000.0 if self._clock.isValid() else 0.0
+
+    def is_running(self) -> bool:
+        return self._timer.isActive()
+
+    def _tick(self) -> None:
+        if self._frozen is None and self.time() >= self.scene().duration:
+            if self._auto:
+                self.set_scene(self._index + 1)
+            else:
+                self._clock.restart()
+        self.update()
+
+    def _describe(self) -> None:
+        scene = self.scene()
+        self.setAccessibleName(f"Animation: {scene.title}")
+        self.setAccessibleDescription(scene.shows)
+
+    # -- Qt -----------------------------------------------------------------
+
+    @staticmethod
+    def _pads() -> tuple[int, int]:
+        """The card's padding around the scene, and the room under it for
+        the progress line."""
+        from .viz import fonts
+
+        return fonts.px(10), fonts.px(4)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt
+        """As tall as the scenes' own proportions (16 by 10) ask."""
+        pad, below = self._pads()
+        return round((width - 2 * pad) * H / W) + 2 * pad + below
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt
+        from .viz import fonts
+
+        width = fonts.px(600)
+        return QSize(width, self.heightForWidth(width))
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt
+        super().showEvent(event)
+        if not self._clock.isValid():
+            self._clock.start()
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt
+        from .theme_manager import CUR
+        from .viz import fonts
+
+        clock = QElapsedTimer()
+        clock.start()
+        palette = CUR()
+        scene = self.scene()
+        t = self.time()
+        if self._frozen is None and self._paint_ms > 12.0 and self._timer.interval() == 16:
+            self._timer.setInterval(33)     # a slow machine draws half as often
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        card = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = fonts.px(10)
+        p.setPen(QPen(QColor(palette.get("border", "#444444")), 1.0))
+        p.setBrush(QColor(palette.get("surface", "#222222")))
+        p.drawRoundedRect(card, radius, radius)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        pad, below = self._pads()
+        stage = card.adjusted(pad, pad, -pad, -pad - below)
+        p.save()
+        p.setClipRect(card.adjusted(1, 1, -1, -1))
+        p.setOpacity(scene_alpha(t, scene.duration))
+        paint_scene(p, stage, scene, t)
+        p.restore()
+
+        # How far the scene has played, along the card's bottom edge.
+        done = max(0.0, min(1.0, t / scene.duration))
+        y = card.bottom() - fonts.px(6)
+        left, right = card.left() + radius, card.right() - radius
+        track = QColor(palette.get("subtle", "#333333"))
+        p.setPen(QPen(track, max(2.0, fonts.px(2)), Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap))
+        p.drawLine(int(left), int(y), int(right), int(y))
+        if done > 0:
+            p.setPen(QPen(QColor(palette.get("dim", "#999999")), max(2.0, fonts.px(2)),
+                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(int(left), int(y), int(left + (right - left) * done), int(y))
+        p.end()
+        self._paint_ms = 0.9 * self._paint_ms + 0.1 * clock.nsecsElapsed() / 1e6
+
+
+# ---------------------------------------------------------------------------
+# The dialog: one page per news
+# ---------------------------------------------------------------------------
+
+
+def _text_column(title: str, lede: str) -> tuple[QVBoxLayout, QLabel, QLabel]:
+    """A page's right-hand column, started: its title and its lede."""
+    from .viz import fonts
+
+    col = QVBoxLayout()
+    col.setSpacing(fonts.px(2))
+    head = QLabel(title)
+    head.setObjectName("whatsnew-title")
+    words = QLabel(lede)
+    words.setObjectName("whatsnew-lede")
+    words.setWordWrap(True)
+    col.addWidget(head)
+    col.addWidget(words)
+    return col, head, words
+
+
+class ScenesPage(QWidget):
+    """The 1.5.1 and 1.5.2 news: the stage and its caption beside the list
+    of features, grouped by release, only the releases ``releases``."""
+
+    def __init__(self, releases: Sequence[str], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        from .viz import fonts
+
+        scenes = [s for s in SCENES if s.version in releases]
+        body = QHBoxLayout(self)
+        body.setContentsMargins(fonts.px(18), fonts.px(12), fonts.px(22), fonts.px(10))
+        body.setSpacing(fonts.px(22))
+
+        show = QVBoxLayout()
+        show.setSpacing(fonts.px(4))
+        self.stage = FeatureStage(self, scenes)
+        show.addWidget(self.stage)
+        show.addSpacing(fonts.px(8))
+        self.scene_title = QLabel(self)
+        self.scene_title.setObjectName("whatsnew-scene-title")
+        self.scene_text = QLabel(self)
+        self.scene_text.setObjectName("whatsnew-scene-text")
+        self.scene_text.setWordWrap(True)
+        self.scene_text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        # Room for three lines, so the stage does not jump as the text changes.
+        self.scene_text.setMinimumHeight(round(fonts.px(12) * 1.45 * 3))
+        show.addWidget(self.scene_title)
+        show.addWidget(self.scene_text)
+        show.addStretch(1)
+        body.addLayout(show, 17)
+
+        both = len(set(releases)) > 1
+        side, _title, _lede = _text_column(
+            f"BIDS Manager {max(releases, key=version_tuple)}",
+            ("What versions " + " and ".join(sorted(set(releases), key=version_tuple))
+             + " bring, together." if both else f"What version {releases[0]} brings.")
+            + " Pick one to see it again.")
+        side.addSpacing(fonts.px(8))
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self.feature_buttons: list[QPushButton] = []
+        version = None
+        for i, scene in enumerate(self.stage.scenes):
+            if scene.version != version:
+                version = scene.version
+                heading = QLabel(f"New in {version}")
+                heading.setObjectName("whatsnew-group")
+                side.addSpacing(fonts.px(6))
+                side.addWidget(heading)
+            button = QPushButton(scene.title, self)
+            button.setObjectName("whatsnew-feature")
+            button.setCheckable(True)
+            button.setAutoDefault(False)
+            button.setToolTip(scene.text)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _c=False, k=i: self.stage.set_scene(k, by_user=True))
+            self._group.addButton(button, i)
+            self.feature_buttons.append(button)
+            side.addWidget(button)
+        side.addSpacing(fonts.px(10))
+        also = QLabel(ALSO)
+        also.setObjectName("whatsnew-item")
+        also.setWordWrap(True)
+        side.addWidget(also)
+        side.addStretch(1)
+        body.addLayout(side, 9)
+
+        self.stage.scene_changed.connect(self._show_scene)
+        self._show_scene(self.stage.index())
+
+    def _show_scene(self, index: int) -> None:
+        scene = self.stage.scenes[index]
+        self.feature_buttons[index].setChecked(True)
+        self.scene_title.setText(scene.title)
+        self.scene_text.setText(scene.text)
+
+    def step(self, by: int) -> None:
+        """The previous or next feature, as the user picks it."""
+        self.stage.set_scene(self.stage.index() + by, by_user=True)
+
+
+class GatherPage(QWidget):
+    """The 1.5.0 news: the seven kinds of data gathering into the logo,
+    beside what the release brought."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         from .viz import fonts
 
-        self.setObjectName("whatsnew-dialog")
-        self.setWindowTitle("What's new in BIDS Manager")
-        self.setModal(True)
-        self.resize(fonts.px(920), fonts.px(560))
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        body = QHBoxLayout()
-        body.setContentsMargins(fonts.px(16), fonts.px(16), fonts.px(28), fonts.px(8))
+        body = QHBoxLayout(self)
+        body.setContentsMargins(fonts.px(18), fonts.px(12), fonts.px(28), fonts.px(10))
         body.setSpacing(fonts.px(20))
         self.canvas = GatherCanvas(self)
         body.addWidget(self.canvas, 11)
 
-        text = QVBoxLayout()
-        text.setSpacing(fonts.px(6))
-        kicker = QLabel("What's new")
-        kicker.setObjectName("whatsnew-kicker")
-        title = QLabel(f"BIDS Manager {NEWS_FOR}")
-        title.setObjectName("whatsnew-title")
-        lede = QLabel(
+        text, _title, _lede = _text_column(
+            "BIDS Manager 1.5.0",
             "This version brings new features, a redesigned GUI and viewers, and a "
             "new documentation website.")
-        lede.setObjectName("whatsnew-lede")
-        lede.setWordWrap(True)
-        text.addStretch(1)
-        for widget in (kicker, title, lede):
-            text.addWidget(widget)
+        text.insertStretch(0, 1)
         text.addSpacing(fonts.px(10))
         for heading, words in (
             ("New features",
@@ -455,39 +807,6 @@ class WhatsNewDialog(QDialog):
             text.addSpacing(fonts.px(6))
         text.addStretch(1)
         body.addLayout(text, 9)
-        outer.addLayout(body, 1)
-
-        footer = QFrame(self)
-        footer.setObjectName("whatsnew-footer")
-        row = QHBoxLayout(footer)
-        row.setContentsMargins(fonts.px(16), fonts.px(10), fonts.px(16), fonts.px(10))
-        notes = QPushButton("Release notes", footer)
-        notes.setAutoDefault(False)
-        notes.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(NOTES_URL)))
-        star = QPushButton("Give us a star", footer)
-        star.setAutoDefault(False)
-        star.setToolTip("Why a star on GitHub helps, and how to give one")
-        star.clicked.connect(self._show_star_request)
-        docs = QPushButton("Open the documentation", footer)
-        docs.setAutoDefault(False)
-        docs.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(DOCS_URL)))
-        start = QPushButton("Continue", footer)
-        start.setDefault(True)
-        start.clicked.connect(self.accept)
-        row.addWidget(notes)
-        row.addWidget(star)
-        row.addStretch(1)
-        row.addWidget(docs)
-        row.addWidget(start)
-        outer.addWidget(footer)
-        self._buttons = {"notes": notes, "star": star, "docs": docs, "continue": start}
-        start.setFocus()
-
-    def _show_star_request(self) -> None:
-        """The request for a GitHub star (``gui/star_request.py``), over this."""
-        from .star_request import show_dialog
-
-        show_dialog(self)
 
     def _credit_row(self) -> QHBoxLayout:
         """The MRI naming is an early implementation, and part of its idea
@@ -508,6 +827,169 @@ class WhatsNewDialog(QDialog):
         return row
 
 
-__all__ = ["DOCS_URL", "KINDS", "NEWS_FOR", "NOTES_URL", "Particles", "GatherCanvas",
-           "WhatsNewDialog", "ease", "logo_points", "maybe_show", "seven_colours", "should_show",
-           "show_dialog"]
+class WhatsNewDialog(QDialog):
+    """The news of one or more releases, one page each, chosen in a menu.
+
+    ``news``: the pages Next walks through (all of them by default);
+    ``previous``: the version the user comes from, which leaves the releases
+    they already had out of a page; ``walk``: opened at start-up, so the main
+    button walks to the next page that is due before it reads Continue.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None, *,
+                 news: Optional[Sequence[News]] = None, previous: Optional[str] = None,
+                 start: Optional[str] = None, walk: bool = False) -> None:
+        super().__init__(parent)
+        from .viz import fonts
+        from .viz.menus import popup_menu
+
+        self.setObjectName("whatsnew-dialog")
+        self.setWindowTitle("What's new in BIDS Manager")
+        self.setModal(True)
+        width, height = fonts.px(1000), fonts.px(620)
+        screen = (parent.screen() if parent is not None else None) or self.screen()
+        if screen is not None:
+            room = screen.availableGeometry()
+            width = min(width, int(room.width() * 0.94))
+            height = min(height, int(room.height() * 0.9))
+        self.resize(width, height)
+        self._walk = list(news) if news else list(NEWS)
+        self._previous = previous if walk else None
+        self._walking = walk and len(self._walk) > 1
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # The kicker, and the menu of every news: a release opens its page.
+        top = QHBoxLayout()
+        top.setContentsMargins(fonts.px(18), fonts.px(16), fonts.px(22), 0)
+        kicker = QLabel("What's new")
+        kicker.setObjectName("whatsnew-kicker")
+        top.addWidget(kicker)
+        top.addStretch(1)
+        self.release_button = QPushButton(self)
+        self.release_button.setObjectName("tb-btn")
+        self.release_button.setToolTip("What each release brought: pick one")
+        self.release_menu = popup_menu(self.release_button)
+        self._actions = {}
+        for item in NEWS:
+            action = self.release_menu.addAction(f"What's new in {item.label}")
+            action.setCheckable(True)
+            action.triggered.connect(lambda _c=False, k=item.key: self.show_news(k))
+            self._actions[item.key] = action
+        self.release_button.setMenu(self.release_menu)
+        top.addWidget(self.release_button)
+        outer.addLayout(top)
+
+        self.pages = QStackedWidget(self)
+        self._page: dict[str, QWidget] = {}
+        outer.addWidget(self.pages, 1)
+
+        footer = QFrame(self)
+        footer.setObjectName("whatsnew-footer")
+        row = QHBoxLayout(footer)
+        row.setContentsMargins(fonts.px(16), fonts.px(10), fonts.px(16), fonts.px(10))
+        notes = QPushButton("Release notes", footer)
+        notes.setAutoDefault(False)
+        notes.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.news().notes_url)))
+        star = QPushButton("Give us a star", footer)
+        star.setAutoDefault(False)
+        star.setToolTip("Why a star on GitHub helps, and how to give one")
+        star.clicked.connect(self._show_star_request)
+        docs = QPushButton("Open the documentation", footer)
+        docs.setAutoDefault(False)
+        docs.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(DOCS_URL)))
+        main = QPushButton("Continue", footer)
+        main.setDefault(True)
+        main.clicked.connect(self._on_main)
+        row.addWidget(notes)
+        row.addWidget(star)
+        row.addStretch(1)
+        row.addWidget(docs)
+        row.addWidget(main)
+        outer.addWidget(footer)
+        self._buttons = {"notes": notes, "star": star, "docs": docs, "continue": main}
+
+        self._key = ""
+        self.show_news(start or self._walk[0].key)
+        main.setFocus()
+
+    # -- which page ---------------------------------------------------------
+
+    def news(self) -> News:
+        return next(n for n in NEWS if n.key == self._key)
+
+    def page(self) -> QWidget:
+        return self._page[self._key]
+
+    def show_news(self, key: str) -> None:
+        """Show the news ``key``, built the first time it is shown."""
+        item = next(n for n in NEWS if n.key == key)
+        if key not in self._page:
+            if key == "1.5.0":
+                page = GatherPage(self.pages)
+            else:
+                page = ScenesPage(releases_new_to(item, self._previous), self.pages)
+            self._page[key] = page
+            self.pages.addWidget(page)
+        self._key = key
+        self.pages.setCurrentWidget(self._page[key])
+        for k, action in self._actions.items():
+            action.setChecked(k == key)
+        self.release_button.setText(f"What's new in {item.label}")
+        self._buttons["notes"].setToolTip(item.notes_url)
+        main = self._buttons["continue"]
+        main.setText(self._main_text())
+        # The default button is drawn bold by the stylesheet, after its size
+        # was measured in the regular weight: room for the bold text.
+        from PyQt6.QtGui import QFont, QFontMetrics
+
+        from .viz import fonts
+
+        bold = QFont(main.font())
+        bold.setWeight(QFont.Weight.DemiBold)
+        main.setMinimumWidth(QFontMetrics(bold).horizontalAdvance(main.text()) + fonts.px(36))
+
+    def _next_due(self) -> Optional[News]:
+        """The next page of the walk, while walking."""
+        if not self._walking:
+            return None
+        keys = [n.key for n in self._walk]
+        if self._key not in keys:
+            return None
+        i = keys.index(self._key)
+        return self._walk[i + 1] if i + 1 < len(self._walk) else None
+
+    def _main_text(self) -> str:
+        following = self._next_due()
+        return f"Next: what {following.label} brought" if following else "Continue"
+
+    def _on_main(self) -> None:
+        following = self._next_due()
+        if following is not None:
+            self.show_news(following.key)
+        else:
+            self.accept()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt
+        """Left and right (or up and down) pick the previous or next feature."""
+        step = {Qt.Key.Key_Left: -1, Qt.Key.Key_Up: -1,
+                Qt.Key.Key_Right: 1, Qt.Key.Key_Down: 1}.get(Qt.Key(event.key()))
+        page = self.page()
+        if step is None or not isinstance(page, ScenesPage):
+            super().keyPressEvent(event)
+            return
+        page.step(step)
+
+    def _show_star_request(self) -> None:
+        """The request for a GitHub star (``gui/star_request.py``), over this."""
+        from .star_request import show_dialog
+
+        show_dialog(self)
+
+
+__all__ = ["DOCS_URL", "FADE", "FeatureStage", "GatherCanvas", "GatherPage", "KINDS", "NEWS",
+           "News", "Particles", "ScenesPage", "WhatsNewDialog", "due", "ease", "logo_points",
+           "maybe_show", "previous_version", "read_previous", "releases_new_to", "scene_alpha",
+           "seven_colours", "show_dialog", "version_tuple"]

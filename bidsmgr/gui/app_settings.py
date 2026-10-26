@@ -62,6 +62,8 @@ KEYS = {
     "scan_skip_bids_guess": "scan/skip_bids_guess",
     "scan_index_widths":  "scan/index_widths",       # JSON: entity -> width
     "scan_drop_entities": "scan/drop_entities",      # JSON: [short entity key]
+    "scan_subject_from":  "scan/subject_from",       # number|patient_id|given_name|family_name
+    "scan_name_entities": "scan/name_entities",      # JSON: [short entity key]
     # Convert defaults
     "convert_n_jobs":     "convert/n_jobs",
     "convert_overwrite":  "convert/overwrite",      # legacy; migrated to on_existing
@@ -74,6 +76,9 @@ KEYS = {
     "convert_intended_for": "convert/intended_for",
     "convert_b0_field":   "convert/b0_field",
     "convert_sourcedata": "convert/sourcedata",      # none|copy|archive
+    "convert_drop_volumes": "convert/drop_volumes",  # dummy scans removed from func runs
+    "convert_physio_layout": "convert/physio_layout",  # by_rate|one_interpolated|one_as_recorded
+    "convert_physio_align": "convert/physio_align",
     # The parameter-based classifier's settings, as JSON (its own model).
     "classifier_config":  "classifier/acquisition",
     "convert_sourcedata_modalities": "convert/sourcedata_modalities",  # comma list
@@ -102,12 +107,16 @@ KEYS = {
     # "default" → ``assets/logo.png`` (monochrome, palette-inverted on dark).
     # "app_icon" → ``assets/macos/AppIcon128.png`` (full-color BIDS-Manager logo).
     "header_logo": "ui/header_logo",
-    # The release whose "What's new" dialog was last shown (``whats_new.NEWS_FOR``,
-    # e.g. "1.5"). Not a setting the user sees: it keeps the dialog to once.
+    # The newest release whose "What's new" was last shown ("1.5" before 1.5.2,
+    # then ``whats_new.NEWS[0].key``), and the version that last ran (since
+    # 1.5.2). Not settings the user sees: they say which news a start shows.
     "whats_new_seen": "ui/whats_new_seen",
+    "last_version": "ui/last_version",
     # Now and then, ask for a star on GitHub (gui/star_request.py). The switch
     # is in Settings > Display and in the dialog ("Don't ask me again").
     "ask_for_star": "ui/ask_for_star",
+    # Guided mode: the next step highlighted in the window.
+    "guided_mode": "ui/guided_mode",
     # When to ask: not settings the user sees (``star_request.StarSchedule``).
     "star_last_asked": "ui/star_last_asked",
     "star_opened": "ui/star_opened",
@@ -133,6 +142,9 @@ class AppSettings:
     log_clear_on_run: bool = True
     #: Now and then, ask for a star on GitHub (gui/star_request.py).
     ask_for_star: bool = True
+    # Guided mode (``gui/guide``): the next step highlighted. Off by default;
+    # the switch is in the header, left of Settings.
+    guided_mode: bool = False
     accent: str = ""
     custom_accent: dict = field(default_factory=dict)
     tint: int = 0
@@ -210,6 +222,12 @@ class AppSettings:
     # (``["acq"]``), where the standard does not require them and they do not
     # tell two recordings apart (``inventory.leave_out``). Empty: none.
     scan_drop_entities: list = field(default_factory=list)
+    # Where DICOM subjects' labels come from (``inventory.subject_label``):
+    # numbers, or the patient ID / given / family name, curated.
+    scan_subject_from: str = "number"
+    # Entities whose value the sequence name decides when it states one, as
+    # short keys (``inventory.name_entities``). Empty: the scan's estimates.
+    scan_name_entities: list = field(default_factory=list)
     # Record what the conversion answers by itself, so the metadata form
     # shows it instead of an empty box for a field nobody has to fill in.
     scan_converter_preview: bool = True
@@ -245,6 +263,13 @@ class AppSettings:
     # "archive" (one .tar.gz per series), for these modalities (comma list).
     # Off by default: the copies are not anonymised.
     convert_sourcedata: str = "none"
+    # Dummy scans removed from the start of every functional run whose
+    # ``drop_volumes`` cell is empty (``fixups.dummy_volumes``).
+    convert_drop_volumes: int = 0
+    # Physiology: one table per sampling rate, or one table for the run; and
+    # cropped to the run (``converter.physio_cmrr``).
+    convert_physio_layout: str = "by_rate"
+    convert_physio_align: bool = False
     # The parameter-based classifier (classifier/acquisition/config.py), as
     # its JSON; "" is the defaults. Read through ``classifier()``.
     classifier_config: str = ""
@@ -407,6 +432,7 @@ class AppSettings:
         out.log_clear_on_run = _as_bool(s.value(KEYS["log_clear_on_run"]),
                                         out.log_clear_on_run)
         out.ask_for_star = _as_bool(s.value(KEYS["ask_for_star"]), out.ask_for_star)
+        out.guided_mode = _as_bool(s.value(KEYS["guided_mode"]), out.guided_mode)
         out.editor_strict_validate = _as_bool(
             s.value(KEYS["editor_strict_validate"]),
             out.editor_strict_validate,
@@ -463,6 +489,22 @@ class AppSettings:
             ] if isinstance(parsed, list) else []
         except (TypeError, ValueError):
             out.scan_drop_entities = []
+        out.scan_subject_from = _as_str(s.value(KEYS["scan_subject_from"]),
+                                        out.scan_subject_from)
+        from ..inventory.subject_label import SOURCES as _SUBJECT_SOURCES
+
+        if out.scan_subject_from not in _SUBJECT_SOURCES:
+            out.scan_subject_from = "number"
+        try:
+            from ..inventory.name_entities import OFFERED
+
+            raw = s.value(KEYS["scan_name_entities"], "")
+            parsed = json.loads(raw) if raw else []
+            out.scan_name_entities = [
+                str(k) for k in parsed if str(k) in OFFERED
+            ] if isinstance(parsed, list) else []
+        except (TypeError, ValueError):
+            out.scan_name_entities = []
         out.scan_converter_preview = _as_bool(
             s.value(KEYS["scan_converter_preview"]), out.scan_converter_preview,
         )
@@ -508,6 +550,14 @@ class AppSettings:
                                        or out.convert_intended_for)
         if out.convert_intended_for not in ("uri", "relative"):
             out.convert_intended_for = "uri"
+        out.convert_drop_volumes = max(0, min(100, _as_int(
+            s.value(KEYS["convert_drop_volumes"]), out.convert_drop_volumes)))
+        out.convert_physio_layout = _as_str(s.value(KEYS["convert_physio_layout"]),
+                                            out.convert_physio_layout)
+        if out.convert_physio_layout not in ("by_rate", "one_interpolated", "one_as_recorded"):
+            out.convert_physio_layout = "by_rate"
+        out.convert_physio_align = _as_bool(s.value(KEYS["convert_physio_align"]),
+                                            out.convert_physio_align)
         out.convert_b0_field = _as_bool(s.value(KEYS["convert_b0_field"]),
                                         out.convert_b0_field)
         out.classifier_config = str(s.value(KEYS["classifier_config"]) or "")
@@ -615,6 +665,7 @@ class AppSettings:
         # Ints / floats.
         s.setValue(KEYS["scan_n_jobs"], int(self.scan_n_jobs))
         s.setValue(KEYS["convert_n_jobs"], int(self.convert_n_jobs))
+        s.setValue(KEYS["convert_drop_volumes"], int(self.convert_drop_volumes))
         # Bools — store as strings so the load path doesn't depend on
         # platform-specific QVariant→Python bool quirks.
         for key, val in (
@@ -627,6 +678,8 @@ class AppSettings:
             ("convert_force_edf",        self.convert_force_edf),
             ("convert_deface",           self.convert_deface),
             ("convert_b0_field",         self.convert_b0_field),
+            ("convert_physio_align",     self.convert_physio_align),
+            ("guided_mode",              self.guided_mode),
             ("post_run_metadata",        self.post_run_metadata),
             ("post_run_validate",        self.post_run_validate),
             ("post_metadata_fill_todos", self.post_metadata_fill_todos),
@@ -661,6 +714,9 @@ class AppSettings:
         s.setValue(KEYS["convert_sourcedata_modalities"], self.convert_sourcedata_modalities)
         s.setValue(KEYS["scan_index_widths"], json.dumps(self.scan_index_widths))
         s.setValue(KEYS["scan_drop_entities"], json.dumps(list(self.scan_drop_entities)))
+        s.setValue(KEYS["scan_name_entities"], json.dumps(list(self.scan_name_entities)))
+        s.setValue(KEYS["scan_subject_from"], self.scan_subject_from)
+        s.setValue(KEYS["convert_physio_layout"], self.convert_physio_layout)
         s.setValue(KEYS["validate_schema_version"], self.validate_schema_version)
         s.setValue(KEYS["validate_max_rows"], int(self.validate_max_rows))
         s.setValue(KEYS["validate_show"], self.validate_show)
@@ -728,8 +784,30 @@ class AppSettings:
         cls._settings().setValue(KEYS["whats_new_seen"], release)
 
     @classmethod
+    def last_version(cls) -> str:
+        """The version of BIDS Manager that last ran here ("" if none has
+        recorded it: a first installation, or a version before 1.5.2)."""
+        value = cls._settings().value(KEYS["last_version"])
+        return str(value) if value is not None else ""
+
+    @classmethod
+    def remember_last_version(cls, version: str) -> None:
+        cls._settings().setValue(KEYS["last_version"], version)
+
+    @classmethod
+    def used_before(cls) -> bool:
+        """Whether any setting exists: BIDS Manager has run here before. Read
+        at start-up, before this session writes anything."""
+        return bool(cls._settings().allKeys())
+
+    @classmethod
     def remember_ask_for_star(cls, ask: bool) -> None:
         cls._settings().setValue(KEYS["ask_for_star"], "1" if ask else "0")
+
+    @classmethod
+    def remember_guided_mode(cls, on: bool) -> None:
+        """The header's guided-mode switch, kept for the next start."""
+        cls._settings().setValue(KEYS["guided_mode"], "1" if on else "0")
 
     @classmethod
     def star_schedule(cls) -> dict:

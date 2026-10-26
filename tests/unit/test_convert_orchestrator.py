@@ -78,9 +78,20 @@ def _row(
     }
 
 
+_REAL_RUN = subprocess.run
+
+
 def _fake_dcm2niix_writer(write_files: list[str], *, returncode: int = 0, stderr: str = ""):
-    """Replacement for ``subprocess.run`` that writes synthetic outputs."""
+    """Replacement for ``subprocess.run`` that writes synthetic outputs.
+
+    Anything that is not a dcm2niix call goes to the real ``subprocess.run``:
+    the run log asks ``platform.platform()``, which runs ``uname -p`` once per
+    process, and a fake that answered it as dcm2niix failed every test in this
+    file whenever it ran first.
+    """
     def runner(cmd, **kwargs):
+        if "-h" not in cmd and "-o" not in cmd:
+            return _REAL_RUN(cmd, **kwargs)
         # Detect "-h" version probe — write nothing.
         if "-h" in cmd:
             return subprocess.CompletedProcess(

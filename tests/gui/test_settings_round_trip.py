@@ -109,6 +109,7 @@ def test_every_string_setting_round_trips_a_non_boolish_value():
         "metadata_fill_scope": "optional", "header_logo": "mark",
         "convert_deface_engine": "allineate-robust",
         "post_anonymise": "strict",
+        "scan_subject_from": "patient_id", "convert_physio_layout": "one_as_recorded",
     }
     probes = {
         str: "allineate-robust",

@@ -10,8 +10,9 @@ The probe pass:
 * Runs each detected sequence as its own dcm2niix invocation, in
   parallel (``-j`` / ``n_jobs``).
 
-Output landing directory for the user-visible TSVs:
-``$BIDSMGR_TEST_OUTPUT/testing/``.
+The inventory is written to a pytest temporary folder. It was written to
+``Path("$BIDSMGR_TEST_OUTPUT/testing")``, a literal never expanded, which
+made a folder of that name wherever pytest ran.
 """
 
 from __future__ import annotations
@@ -25,12 +26,9 @@ import pytest
 from bidsmgr.cli.scan import PROBE_COLUMNS, run_scan
 from bidsmgr.inventory import probe_convert as probe_convert_module
 from bidsmgr.inventory.mri_dicom import scan_dicoms_long
-from tests.fixtures.data_root import dataset
+from tests.fixtures.data_root import MRI_WALKTHROUGH, dataset, have, why_missing
 
-REAL_MRI_ROOT = dataset("MRI")
-TESTING_OUT_ROOT = Path(
-    "$BIDSMGR_TEST_OUTPUT/testing"
-)
+WALKTHROUGH = dataset(*MRI_WALKTHROUGH)
 
 
 pytestmark = [
@@ -39,25 +37,20 @@ pytestmark = [
         not os.environ.get("BIDS_MANAGER_REAL_MRI_DATA"),
         reason="BIDS_MANAGER_REAL_MRI_DATA not set",
     ),
-    pytest.mark.skipif(
-        not REAL_MRI_ROOT.exists(),
-        reason=f"real MRI dataset root missing at {REAL_MRI_ROOT}",
-    ),
+    pytest.mark.skipif(not have(*MRI_WALKTHROUGH), reason=why_missing(*MRI_WALKTHROUGH)),
 ]
 
 
 @pytest.fixture(scope="module")
-def neuroimaging_unit_new_probe() -> pd.DataFrame:
+def neuroimaging_unit_new_probe(tmp_path_factory) -> pd.DataFrame:
     """Run probe-convert on the small Prisma dataset and return the TSV.
 
-    The probe ``.tmp/`` directory is auto-cleaned by ``run_scan``; the
-    inventory TSV stays in the user's testing root.
+    The probe ``.tmp/`` directory is auto-cleaned by ``run_scan``.
     """
-    src = REAL_MRI_ROOT / "neuroimaging_unit_new"
-    if not src.exists():
+    src = WALKTHROUGH
+    if src is None or not src.exists():
         pytest.skip("neuroimaging_unit_new missing")
-    TESTING_OUT_ROOT.mkdir(parents=True, exist_ok=True)
-    out_tsv = TESTING_OUT_ROOT / "neuroimaging_unit_new.tsv"
+    out_tsv = tmp_path_factory.mktemp("probe") / "neuroimaging_unit_new.tsv"
     run_scan(src, out_tsv, n_jobs=4, probe_convert=True)
     return pd.read_csv(out_tsv, sep="\t", keep_default_na=False, dtype=str)
 
@@ -65,8 +58,8 @@ def neuroimaging_unit_new_probe() -> pd.DataFrame:
 def test_probe_tmp_is_auto_deleted(tmp_path: Path):
     """The default ``<output_tsv_parent>/.tmp/`` is removed when
     ``run_scan`` returns. The inventory TSV remains."""
-    src = REAL_MRI_ROOT / "neuroimaging_unit_new"
-    if not src.exists():
+    src = WALKTHROUGH
+    if src is None or not src.exists():
         pytest.skip("neuroimaging_unit_new missing")
     out_tsv = tmp_path / "scan.tsv"
     run_scan(src, out_tsv, n_jobs=4, probe_convert=True)
@@ -83,8 +76,8 @@ def test_probe_rows_low_level_layout_is_per_series(tmp_path: Path):
     low-level entry to inspect the layout against a pytest tmp_path
     that pytest cleans up itself.
     """
-    src = REAL_MRI_ROOT / "neuroimaging_unit_new"
-    if not src.exists():
+    src = WALKTHROUGH
+    if src is None or not src.exists():
         pytest.skip("neuroimaging_unit_new missing")
     df = scan_dicoms_long(src, n_jobs=4)
     files_by_uid = df.attrs["files_by_uid"]

@@ -10,8 +10,8 @@ citation file). Then every predicted file must be written, every written file
 predicted, and every value the preview states (anything but "…") must be the
 value in the file, TODO placeholders included.
 
-Gated on ``BIDS_MANAGER_REAL_MRI_DATA``; the sample lives beside the raw data
-(``sample_datasets/2026-10/BIDS_Manager_multimodal_sample_v2``).
+Gated on ``BIDS_MANAGER_REAL_MRI_DATA``; the published multimodal sample is
+downloaded once and cached (``tests/fixtures/sample_data``).
 """
 
 from __future__ import annotations
@@ -23,19 +23,20 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from tests.fixtures.data_root import data_root
-
-_ROOT = data_root()
-SAMPLE = (_ROOT.parent / "sample_datasets" / "2026-10" / "BIDS_Manager_multimodal_sample_v2"
-          if _ROOT is not None else None)
+from tests.fixtures import sample_data
 
 pytestmark = [
     pytest.mark.real_data,
     pytest.mark.skipif(not os.environ.get("BIDS_MANAGER_REAL_MRI_DATA"),
                        reason="BIDS_MANAGER_REAL_MRI_DATA not set"),
-    pytest.mark.skipif(SAMPLE is None or not SAMPLE.exists(),
-                       reason=f"multimodal sample missing at {SAMPLE}"),
 ]
+
+
+def _sample() -> Path:
+    """The published multimodal sample, downloaded once and cached
+    (``tests/fixtures/sample_data``): the folder holding ``raw/`` and its
+    spreadsheets. Skips when it cannot be had."""
+    return sample_data.require("multimodal").parent
 
 
 @pytest.fixture(scope="module")
@@ -45,17 +46,18 @@ def converted(tmp_path_factory):
     from bidsmgr.cli.scan import run_scan
     from bidsmgr.recording_meta import dump_spec, load_spec, scaffold_sidecar_path
 
+    sample = _sample()
     work = tmp_path_factory.mktemp("preview")
     inv = work / "inv.tsv"
-    run_scan(SAMPLE / "raw", inv, n_jobs=2, probe_convert=True)
+    run_scan(sample / "raw", inv, n_jobs=2, probe_convert=True)
     spec = load_spec(scaffold_sidecar_path(inv))
     spec.sequence_templates["func/bold"] = {"TaskDescription": "Rest with eyes open"}
     spec.defaults.institution_name = "University of Oldenburg"
     spec.dataset_description.authors = ["Ada Lovelace", "Alan Turing"]
     spec.dataset_description.license = "CC-BY-4.0"
-    spec.participants_file = str(SAMPLE / "participants.csv")
+    spec.participants_file = str(sample / "participants.csv")
     scaffold_sidecar_path(inv).write_text(dump_spec(spec), encoding="utf-8")
-    assert run_convert(inv, work / "bids", raw_root=SAMPLE / "raw") == 0
+    assert run_convert(inv, work / "bids", raw_root=sample / "raw") == 0
     assert run_metadata_cli(work / "bids", inventory_tsv=inv, fill_scope="recommended",
                             generate_companions=True, write_citation_file=True) == 0
     root = next(p for p in (work / "bids").iterdir() if p.is_dir())
@@ -180,3 +182,71 @@ def test_the_predicted_times_are_the_written_ones(converted) -> None:
             if abs(seconds(when) - seconds(got)) > 3:
                 wrong.append(f"{path}: {name} predicted {when}, written {got}")
     assert not wrong, "\n".join(wrong)
+
+
+# ---------------------------------------------------------------------------
+# Volumes removed from the start of the run (Settings > Convert > Dummy
+# volumes): the preview follows, and the run's times move with its image.
+# ---------------------------------------------------------------------------
+
+CUT = 3
+
+
+@pytest.fixture(scope="module")
+def converted_cut(tmp_path_factory):
+    from bidsmgr.cli.convert import run_convert
+    from bidsmgr.cli.metadata import run_metadata_cli
+    from bidsmgr.cli.scan import run_scan
+
+    sample = _sample()
+    work = tmp_path_factory.mktemp("preview_cut")
+    inv = work / "inv.tsv"
+    run_scan(sample / "raw", inv, n_jobs=2, probe_convert=True)
+    assert run_convert(inv, work / "bids", raw_root=sample / "raw", drop_volumes=CUT) == 0
+    assert run_metadata_cli(work / "bids", inventory_tsv=inv, fill_scope="recommended") == 0
+    root = next(p for p in (work / "bids").iterdir() if p.is_dir())
+    return inv, root
+
+
+def test_removed_volumes_are_predicted_and_move_the_runs_times(converted, converted_cut) -> None:
+    from datetime import datetime
+
+    from bidsmgr.classifier.acquisition import cache
+    from bidsmgr.converter.output_plan import PlanOptions, approximate, plan_output
+    from bidsmgr.metadata.tables import read_table
+
+    inv, root = converted_cut
+    df = pd.read_csv(inv, sep="\t", dtype=str, keep_default_na=False)
+    features = cache.read(inv)
+    options = PlanOptions(dataset=root.name, inventory_dir=str(inv.parent),
+                          fill_scope="recommended", drop_volumes=CUT)
+    plan = plan_output(df, None, options, features)
+    bold = next(f for f in plan.files if f.path.endswith("_task-rest_bold.json"))
+    fields = {k: v for k, v, _s in approximate(df, bold, options, features).fields}
+    sidecar = json.loads((root / bold.path).read_text())
+    assert fields["NumberOfVolumesDiscardedByUser"] == CUT == sidecar[
+        "NumberOfVolumesDiscardedByUser"]
+    tr = sidecar["RepetitionTime"]
+
+    # The scans table: predicted as written, and CUT x TR after the uncut run.
+    home = bold.path.rsplit("/", 2)[0]               # the run's session folder
+    scans = next(f for f in plan.files if f.path.endswith("_scans.tsv")
+                 and f.path.rsplit("/", 1)[0] == home)
+    said = dict(approximate(df, scans, options, features).rows)
+    header, rows = read_table(root / scans.path)
+    written = {r["filename"]: r["acq_time"] for r in rows}
+    _h, uncut_rows = read_table(converted[1] / scans.path)
+    uncut = {r["filename"]: r["acq_time"] for r in uncut_rows}
+    run = next(name for name in written if name.endswith("_task-rest_bold.nii.gz"))
+    assert said[run] == written[run]
+    moved = (datetime.fromisoformat(written[run])
+             - datetime.fromisoformat(uncut[run])).total_seconds()
+    assert moved == pytest.approx(CUT * tr, abs=1e-6)
+    sbref = next(name for name in written if name.endswith("_sbref.nii.gz"))
+    assert written[sbref] == uncut[sbref], "a run's reference image loses nothing"
+
+    # The physiology recorded with the run starts CUT volumes later.
+    for table in (root / bold.path).parent.glob("*_task-rest_*physio.json"):
+        start = json.loads(table.read_text())["StartTime"]
+        before = json.loads((converted[1] / table.relative_to(root)).read_text())["StartTime"]
+        assert start == pytest.approx(before - CUT * tr, abs=1e-6), table.name

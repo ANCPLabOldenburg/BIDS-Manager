@@ -8,5 +8,5 @@ Modules:
 * ``dcm2niix_direct`` — default MRI backend.
 
 Planned later: ``dcm2bids``, ``heudiconv`` (heudiconv-ancp fork),
-``mne_bids`` (EEG/MEG/iEEG), ``bidsphysio``, ``passthrough``.
+``mne_bids`` (EEG/MEG/iEEG), ``passthrough``.
 """

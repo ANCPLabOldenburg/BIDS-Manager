@@ -8,10 +8,13 @@ shows both.
 
 What is a candidate:
 
-* a NIfTI image,
+* a NIfTI image of the head (not a mask, a segmentation or a defacemask),
 * in a datatype that can show a face,
 * that is a single 3-D volume,
-* under a subject, not under ``derivatives/``, ``sourcedata/`` or a dot folder.
+* under a subject, not under ``sourcedata/`` or a dot folder;
+* under ``derivatives/<pipeline>/sub-*`` only when the caller includes
+  derivatives: a preprocessed T1w carries the face of the scan it came from,
+  so a dataset shared with its derivatives needs them defaced too.
 
 Qt-free, and it reads nothing but headers and sidecars.
 """
@@ -41,10 +44,21 @@ FACE_BEARING_DATATYPES = frozenset({"anat", "pet"})
 
 # Folders whose contents are never defaced in place.
 #
-# derivatives and sourcedata hold data produced from, or feeding, the raw
-# images; defacing a derivative without its source is how a dataset ends up
-# internally inconsistent. Dot folders are tool state, ours included.
-EXCLUDED_TOP_LEVEL = frozenset({"derivatives", "sourcedata", "code", "stimuli"})
+# sourcedata holds what fed the conversion, code and stimuli are not images
+# of anybody. Dot folders are tool state, ours included. ``derivatives`` is
+# its own case: excluded unless the caller asks for it (``include_derivatives``),
+# because a derivative defaced without its source, or the other way round, is
+# a choice the user should make knowingly.
+EXCLUDED_TOP_LEVEL = frozenset({"sourcedata", "code", "stimuli"})
+DERIVATIVES = "derivatives"
+
+# Suffixes that a datatype allows but that are not an image of the head: a
+# defacemask is the mask itself, the rest are not NIfTI images at all. A
+# derivative folder adds its own (mask, dseg, probseg), which the schema's raw
+# suffix list does not name, so they are refused by not being on it.
+NOT_HEAD_IMAGES = frozenset({
+    "defacemask", "physio", "physioevents", "stim", "blood", "events",
+})
 
 NIFTI_SUFFIXES = (".nii.gz", ".nii")
 
@@ -56,6 +70,9 @@ class Skip(str, Enum):
     UNREADABLE = "not a readable NIfTI-1 image"
     DATATYPE = "not a datatype that shows a face"
     LOCATION = "not raw subject data"
+    DERIVATIVE = "in derivatives/ (Include derivatives to do it too)"
+    NOT_HEAD = "not an image of the head (a mask, a segmentation, a map)"
+    STRIPPED = "already skull stripped: no face left"
     ALREADY = "already defaced by BIDS Manager"
 
 
@@ -68,6 +85,10 @@ class Candidate:
     datatype: str
     shape: tuple[int, ...]
     size_bytes: int
+    # The derivative pipeline the image belongs to (``fmriprep``), or ``""``
+    # for raw data. A dialog groups by it; the skull strip names its output
+    # after it.
+    pipeline: str = ""
     # Set when another tool has recorded deidentification on this image. Not a
     # refusal: they may have done something different, or something partial.
     foreign_methods: tuple[str, ...] = ()
@@ -125,32 +146,72 @@ def _datatype_of(root: Path, path: Path) -> str:
         parts = path.relative_to(root).parts
     except ValueError:
         return ""
-    # <sub>/[<ses>/]<datatype>/<file>
+    # <sub>/[<ses>/]<datatype>/<file>, also inside derivatives/<pipeline>/
     return parts[-2] if len(parts) >= 2 else ""
 
 
-def _in_excluded_location(root: Path, path: Path) -> bool:
+def pipeline_of(root: Path, path: Path) -> str:
+    """``fmriprep`` for ``derivatives/fmriprep/...``; ``""`` for raw data."""
+    try:
+        parts = Path(path).relative_to(root).parts
+    except ValueError:
+        return ""
+    if len(parts) >= 2 and parts[0] == DERIVATIVES:
+        return parts[1]
+    return ""
+
+
+def _suffix_of(name: str) -> str:
+    for ext in NIFTI_SUFFIXES:
+        if name.lower().endswith(ext):
+            name = name[: -len(ext)]
+            break
+    return name.rsplit("_", 1)[-1] if "_" in name else ""
+
+
+def _head_suffixes(datatype: str) -> frozenset[str]:
+    """The suffixes of ``datatype`` that name an image of the head."""
+    from .. import schema
+
+    try:
+        known = schema.list_suffixes(datatype)
+    except Exception:  # noqa: BLE001 - an unknown datatype has none
+        known = []
+    return frozenset(s for s in known if s not in NOT_HEAD_IMAGES)
+
+
+def _location(root: Path, path: Path, include_derivatives: bool) -> Optional[Skip]:
+    """Why the place an image sits in rules it out, or ``None``."""
     try:
         parts = path.relative_to(root).parts
     except ValueError:
-        return True
+        return Skip.LOCATION
     if not parts:
-        return True
+        return Skip.LOCATION
     if any(p.startswith(".") for p in parts[:-1]):
-        return True
+        return Skip.LOCATION
+    if parts[0] == DERIVATIVES:
+        # derivatives/<pipeline>/sub-*/.../<file>: the pipeline's own subject
+        # data. Anything else in a pipeline folder (its sourcedata, its
+        # figures) is not an image of a participant's head.
+        if len(parts) < 4 or not parts[2].startswith("sub-"):
+            return Skip.LOCATION
+        return None if include_derivatives else Skip.DERIVATIVE
     if parts[0] in EXCLUDED_TOP_LEVEL:
-        return True
-    return not parts[0].startswith("sub-")
+        return Skip.LOCATION
+    return None if parts[0].startswith("sub-") else Skip.LOCATION
 
 
-def inspect(root: Path, path: Path) -> Candidate | Skipped:
+def inspect(root: Path, path: Path, *,
+            include_derivatives: bool = False) -> Candidate | Skipped:
     """Classify one image."""
     root = Path(root)
     path = Path(path)
     rel = _relative(root, path)
 
-    if _in_excluded_location(root, path):
-        return Skipped(path, rel, Skip.LOCATION)
+    where = _location(root, path, include_derivatives)
+    if where is not None:
+        return Skipped(path, rel, where)
 
     datatype = _datatype_of(root, path)
     if datatype not in FACE_BEARING_DATATYPES:
@@ -158,6 +219,10 @@ def inspect(root: Path, path: Path) -> Candidate | Skipped:
             path, rel, Skip.DATATYPE,
             f"in {datatype}/" if datatype else "",
         )
+
+    suffix = _suffix_of(path.name)
+    if suffix and suffix not in _head_suffixes(datatype):
+        return Skipped(path, rel, Skip.NOT_HEAD, f"_{suffix}")
 
     try:
         dims = read_dimensions(path)
@@ -171,6 +236,10 @@ def inspect(root: Path, path: Path) -> Candidate | Skipped:
 
     sidecar = read_sidecar(sidecar_for(path))
     ours = defaced_by_us(sidecar)
+    if ours is not None and ours.is_strip:
+        # Our own skull strip: only the brain is left, so there is no face to
+        # remove and no skull to strip.
+        return Skipped(path, rel, Skip.STRIPPED, ours.label)
     theirs = defaced_by_others(sidecar)
     try:
         size = path.stat().st_size
@@ -185,20 +254,65 @@ def inspect(root: Path, path: Path) -> Candidate | Skipped:
         size_bytes=size,
         foreign_methods=tuple(theirs),
         previous_engine=ours.id if ours else None,
+        pipeline=pipeline_of(root, path),
     )
 
 
-def walk(root: Path, targets: Optional[Iterable[Path]] = None) -> Selection:
+def derivative_pipelines(root: Path) -> list[Path]:
+    """Every ``derivatives/<pipeline>/`` folder that holds subject data."""
+    base = Path(root) / DERIVATIVES
+    try:
+        folders = sorted(p for p in base.iterdir()
+                         if p.is_dir() and not p.name.startswith("."))
+    except OSError:
+        return []
+    return [p for p in folders if any(c.is_dir() for c in p.glob("sub-*"))]
+
+
+def has_derivatives(root: Path) -> bool:
+    """Whether the dataset has a derivative pipeline with subject data."""
+    return bool(derivative_pipelines(root))
+
+
+def _counterparts(root: Path, starts: list[Path]) -> list[Path]:
+    """For each raw place in ``starts`` (the dataset, a subject, a session,
+    a datatype folder), the same place in every derivative pipeline: what
+    "this subject, derivatives included" means."""
+    pipelines = derivative_pipelines(root)
+    out: list[Path] = []
+    for start in starts:
+        try:
+            rel = start.relative_to(root)
+        except ValueError:
+            continue
+        if rel.parts and rel.parts[0] in (DERIVATIVES, *EXCLUDED_TOP_LEVEL):
+            continue
+        if start.is_file():
+            continue
+        for pipe in pipelines:
+            twin = pipe / rel
+            if twin.is_dir():
+                out.append(twin)
+    return out
+
+
+def walk(root: Path, targets: Optional[Iterable[Path]] = None, *,
+         include_derivatives: bool = False) -> Selection:
     """Classify every image under ``root``, or under each of ``targets``.
 
     ``targets`` may name files or folders; a folder is walked. Passing none
     walks the whole dataset, which is what the Tools menu does.
+    ``include_derivatives`` makes images under ``derivatives/<pipeline>/``
+    candidates too, and widens a raw scope to the same subject or session in
+    every pipeline.
     """
     root = Path(root)
     if targets is None:
         roots: list[Path] = [root]
     else:
         roots = [Path(t) for t in targets]
+    if include_derivatives:
+        roots = roots + [t for t in _counterparts(root, roots) if t not in roots]
 
     seen: set[Path] = set()
     found: list[Path] = []
@@ -221,15 +335,30 @@ def walk(root: Path, targets: Optional[Iterable[Path]] = None) -> Selection:
     candidates: list[Candidate] = []
     skipped: list[Skipped] = []
     for path in found:
-        result = inspect(root, path)
+        result = inspect(root, path, include_derivatives=include_derivatives)
         if isinstance(result, Candidate):
             candidates.append(result)
         else:
             skipped.append(result)
 
-    candidates.sort(key=lambda c: c.relative)
+    candidates.sort(key=lambda c: (c.pipeline != "", c.pipeline, c.relative))
     skipped.sort(key=lambda s: s.relative)
     return Selection(tuple(candidates), tuple(skipped))
+
+
+def targets_in_derivatives(root: Path, targets: Optional[Iterable[Path]]) -> bool:
+    """Whether any of ``targets`` lies inside ``derivatives/``: a right-click
+    on a derivative image means derivatives are wanted."""
+    if not targets:
+        return False
+    for t in targets:
+        try:
+            parts = Path(t).relative_to(root).parts
+        except ValueError:
+            continue
+        if parts and parts[0] == DERIVATIVES:
+            return True
+    return False
 
 
 def summarise(selection: Selection, eng: Engine) -> str:
@@ -246,12 +375,17 @@ def summarise(selection: Selection, eng: Engine) -> str:
 
 __all__ = [
     "Candidate",
+    "DERIVATIVES",
     "EXCLUDED_TOP_LEVEL",
     "FACE_BEARING_DATATYPES",
     "Selection",
     "Skip",
     "Skipped",
+    "derivative_pipelines",
+    "has_derivatives",
     "inspect",
+    "pipeline_of",
     "summarise",
+    "targets_in_derivatives",
     "walk",
 ]

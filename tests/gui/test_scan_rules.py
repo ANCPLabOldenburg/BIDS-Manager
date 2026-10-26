@@ -92,3 +92,19 @@ def test_load_into_widgets_then_restore_defaults(qtbot, isolated_settings) -> No
     dlg._on_restore_defaults()
     assert dlg._hint_table.rowCount() == 0
     assert dlg._excl_table.rowCount() == 0
+
+
+def test_builtin_criteria_titles_are_not_cut(qtbot) -> None:
+    """The first three columns size to their content and title: at Qt's
+    default width the capitalised "Label / group" read "ABEL / GROUI"."""
+    from PyQt6.QtWidgets import QHeaderView
+
+    dlg = SettingsDialog(AppSettings(), None)
+    qtbot.addWidget(dlg)
+    table = next(t for t in dlg.findChildren(QTableWidget)
+                 if t.horizontalHeaderItem(0) is not None
+                 and t.horizontalHeaderItem(0).text() == "Label / group")
+    header = table.horizontalHeader()
+    for col in range(3):
+        assert header.sectionResizeMode(col) == QHeaderView.ResizeMode.ResizeToContents
+    assert header.sectionResizeMode(3) == QHeaderView.ResizeMode.Stretch

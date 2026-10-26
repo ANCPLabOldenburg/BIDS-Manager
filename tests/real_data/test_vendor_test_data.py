@@ -17,20 +17,21 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from tests.fixtures.data_root import dataset
+from tests.fixtures.data_root import dataset, have, why_missing
 
-ROOT = dataset("MRI") / "vendor_test_data"
+ROOT = dataset("MRI", "vendor_test_data")
 
 pytestmark = [
     pytest.mark.real_data,
     pytest.mark.skipif(not os.environ.get("BIDS_MANAGER_REAL_MRI_DATA"),
                        reason="BIDS_MANAGER_REAL_MRI_DATA not set"),
-    pytest.mark.skipif(not ROOT.exists(), reason=f"vendor test data missing at {ROOT}"),
+    pytest.mark.skipif(not have("MRI", "vendor_test_data"),
+                       reason=why_missing("MRI", "vendor_test_data")),
 ]
 
 
 def _sets() -> list[Path]:
-    return sorted(p.parent for p in ROOT.glob("*/*/*/DICOM")) if ROOT.exists() else []
+    return sorted(p.parent for p in ROOT.glob("*/*/*/DICOM")) if have("MRI", "vendor_test_data") else []
 
 
 @pytest.mark.parametrize("folder", _sets(), ids=lambda p: f"{p.parent.parent.name}/{p.name}")

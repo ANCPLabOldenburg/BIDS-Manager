@@ -215,9 +215,11 @@ def _current(row) -> str:
 
 
 def rescore(df, features: dict[str, SeriesFeatures], cfg: ClassifierConfig = DEFAULT,
-            book: Optional[dict] = None) -> list[Change]:
+            book: Optional[dict] = None, name_entities=()) -> list[Change]:
     """Score the MRI rows of an inventory again from their cached features.
     dcm2niix's guess is the one the scan recorded in each row's evidence.
+    ``name_entities`` (short keys) are the entities the sequence name decides
+    (``inventory.name_entities``): laid over the new estimate, as at scan.
     Returns one :class:`Change` per scored row (``new == old`` when the name
     stays)."""
     import json
@@ -275,6 +277,13 @@ def rescore(df, features: dict[str, SeriesFeatures], cfg: ClassifierConfig = DEF
             withce = _allowed({**entities, "ceagent": label}, datatype, suffix)
             if "ceagent" in withce:
                 entities = {**entities, "ceagent": label}
+        if name_entities and new and not new.startswith("exclude/"):
+            from ...inventory.name_entities import apply as by_name
+
+            datatype, _, suffix = new.partition("/")
+            protocol = outcome.features.protocol if outcome.features is not None else ""
+            entities, _changed = by_name(entities, datatype, suffix, name_entities,
+                                         str(row.get("sequence", "") or ""), protocol)
         exclude = d.excluded and not old.startswith("exclude/")
         renamed = exclude or (not d.excluded and (new != old or entities != before))
         changes.append(Change(index=int(key) if key.isdigit() else key, old=old, new=new,

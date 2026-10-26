@@ -77,9 +77,22 @@ def test_physio_is_one_file_per_signal_when_it_has_several() -> None:
     rows = [_row("sub-01", "sub-01_task-rest_physio", "func", uid="p1")]
     plan = plan_output(pd.DataFrame(rows))
     maybe = _paths(plan, sure=False)
-    for signal in ("cardiac", "ecg", "respiratory", "trigger"):
+    for signal in ("cardiac", "ecg", "respiratory", "externalTrigger"):
         assert f"sub-01/func/sub-01_task-rest_recording-{signal}_physio.tsv.gz" in maybe
     assert "sub-01/func/sub-01_task-rest_physio.tsv.gz" in maybe
+    # The scanner trigger is a column of every table, never a table of its own.
+    assert not any("recording-trigger" in p for p in maybe)
+
+
+def test_physio_as_one_table_for_the_run() -> None:
+    from bidsmgr.converter.output_plan import PlanOptions
+
+    rows = [_row("sub-01", "sub-01_task-rest_physio", "func", uid="p1")]
+    plan = plan_output(pd.DataFrame(rows), None, PlanOptions(physio_layout="one_as_recorded"))
+    sure = _paths(plan)
+    assert "sub-01/func/sub-01_task-rest_physio.tsv.gz" in sure
+    assert "sub-01/func/sub-01_task-rest_physio.json" in sure
+    assert not any("recording-" in p for p in _paths(plan, sure=False))
     assert not any(p.endswith("_scans.tsv") for p in _paths(plan)), \
         "physio is not a row of the scans table"
 

@@ -209,7 +209,7 @@ def _along(x: np.ndarray, y: np.ndarray, n: int, rng: np.random.Generator) -> np
 
 
 @lru_cache(maxsize=None)
-def _template(name: str) -> np.ndarray:
+def template_volume(name: str) -> np.ndarray:
     """A volume of the MNI template the quality check ships (uint8 NIfTI-1).
 
     Read here rather than through nibabel: this dialog opens at start-up, on
@@ -230,8 +230,8 @@ def _brain(n: int, rng: np.random.Generator) -> np.ndarray:
     """A brain seen from the side, nose to the left, in 3-D: the template's
     surface and grey matter."""
     try:
-        t1 = _template("mni2009c_2mm_T1w.nii.gz") / 255.0
-        mask = _template("mni2009c_2mm_brain_mask.nii.gz") > 127
+        t1 = template_volume("mni2009c_2mm_T1w.nii.gz") / 255.0
+        mask = template_volume("mni2009c_2mm_brain_mask.nii.gz") > 127
     except (OSError, ValueError):     # no template: an ellipsoid stands in
         u = rng.standard_normal((n, 3))
         u /= np.linalg.norm(u, axis=1, keepdims=True)
@@ -1139,4 +1139,4 @@ class StarDialog(QDialog):
 
 __all__ = ["COUNTS", "ITEMS", "JUMPS", "REPO_URL", "Pose", "StarCanvas", "StarDialog",
            "StarParticles", "StarSchedule", "dimness", "due", "form_points", "joint", "jump_at",
-           "lit", "maybe_show", "pose_at", "show_dialog", "star_outline"]
+           "lit", "maybe_show", "pose_at", "show_dialog", "star_outline", "template_volume"]

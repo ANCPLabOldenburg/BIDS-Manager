@@ -208,7 +208,7 @@ If BIDS Manager helped you prepare a dataset, please cite it, together with
 the tools your data went through:
 
 ```
-López Vilaret, K. M. and Rieger, J. BIDS Manager (version 1.5.1). 2026.
+López Vilaret, K. M. and Rieger, J. BIDS Manager (version 1.5.2). 2026.
 https://github.com/ANCPLabOldenburg/BIDS-Manager
 ```
 

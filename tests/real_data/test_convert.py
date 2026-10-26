@@ -18,10 +18,9 @@ import pytest
 
 from bidsmgr.cli.convert import run_convert
 from bidsmgr.cli.scan import run_scan
-from tests.fixtures.data_root import dataset
+from tests.fixtures.data_root import MRI_WALKTHROUGH, dataset, have, why_missing
 
 
-REAL_MRI_ROOT = dataset("MRI")
 
 
 pytestmark = [
@@ -30,10 +29,7 @@ pytestmark = [
         not os.environ.get("BIDS_MANAGER_REAL_MRI_DATA"),
         reason="BIDS_MANAGER_REAL_MRI_DATA not set",
     ),
-    pytest.mark.skipif(
-        not REAL_MRI_ROOT.exists(),
-        reason=f"real MRI dataset root missing at {REAL_MRI_ROOT}",
-    ),
+    pytest.mark.skipif(not have(*MRI_WALKTHROUGH), reason=why_missing(*MRI_WALKTHROUGH)),
 ]
 
 
@@ -44,10 +40,13 @@ def neuroimaging_unit_new_artifacts(tmp_path_factory) -> tuple[Path, Path]:
     tsv = work / "inventory.tsv"
     bids_parent = work / "out"
 
+    # The dataset keeps the name the assertions below use; the folder was
+    # renamed after them.
     run_scan(
-        REAL_MRI_ROOT / "neuroimaging_unit_new",
+        dataset(*MRI_WALKTHROUGH),
         tsv,
         n_jobs=4,
+        dataset="neuroimaging_unit_new",
     )
     rc = run_convert(tsv, bids_parent, n_jobs=4)
     assert rc == 0
@@ -129,8 +128,10 @@ class TestConvertNeuroimagingUnitNew:
         self, neuroimaging_unit_new_artifacts,
     ) -> None:
         _, dataset_root = neuroimaging_unit_new_artifacts
+        # One file per subject in the dataset's own ``.bidsmgr/provenance/``
+        # (``cli.convert._write_provenance``), not inside the subject folder.
         for sub_dir in sorted(dataset_root.glob("sub-*")):
-            prov_path = sub_dir / ".bidsmgr" / "provenance.json"
+            prov_path = dataset_root / ".bidsmgr" / "provenance" / f"{sub_dir.name}.json"
             assert prov_path.exists(), f"missing {prov_path}"
             prov = json.loads(prov_path.read_text())
             assert prov["bidsmgr_version"]

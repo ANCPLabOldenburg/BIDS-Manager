@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QSpinBox,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -66,6 +67,7 @@ from .metadata_help import tooltip_for
 from .models import InventoryTableModel
 from .theme_manager import CUR, scaled_px
 from .widgets import BusySpinner, PaneHeader, ValMessage
+from .widgets.primitives import ElidedLabel
 from .widgets.template_form import (
     CollapsibleSection,
     FieldLabel,
@@ -318,6 +320,7 @@ class PropertiesPanel(QWidget):
         self._refresh_timer.setInterval(0)
         self._refresh_timer.timeout.connect(self._on_refresh_timer)
         self._links_cache: Optional[tuple] = None
+        self._physio_cache: Optional[tuple] = None
 
         # Build the initial empty body (just a hint).
         self._render_empty()
@@ -532,6 +535,12 @@ class PropertiesPanel(QWidget):
             if section is not None:
                 self._body_layout.addSpacing(6)
                 self._body_layout.addWidget(section)
+        if self._model.column_applies(row, "drop_volumes"):
+            self._body_layout.addSpacing(6)
+            self._body_layout.addWidget(self._build_dummy_volumes(row))
+        elif datatype == "func" and suffix == "physio":
+            self._body_layout.addSpacing(6)
+            self._body_layout.addWidget(self._build_physio_volumes(row))
         why = self._build_why_this_name(row)
         if why is not None:
             self._body_layout.addSpacing(6)
@@ -1439,6 +1448,131 @@ class PropertiesPanel(QWidget):
             self._jobs.done.connect(self._on_job_done)
             self._jobs.failed.connect(self._on_job_failed)
         return self._jobs
+
+    def _build_dummy_volumes(self, row: int) -> QWidget:
+        """How many volumes the conversion removes from the start of this
+        functional run (``fixups.dummy_volumes``): its own number, or the
+        default in Settings > Convert."""
+        from .app_settings import AppSettings
+
+        default = int(AppSettings.load().convert_drop_volumes)
+        own = self._model.drop_volumes(row)
+        count = default if own is None else own
+        total = self._cell(row, "probe_n_volumes").strip()
+        box = CollapsibleSection(
+            "Dummy volumes",
+            subtitle=("default" if own is None else "this run"),
+            badge=(f"{count} removed" if count else "none removed"),
+            expanded=bool(count) or own is not None,
+        )
+        why = QLabel(
+            "Volumes removed from the start of this run at conversion, before the signal "
+            "is steady. Its sidecar records it (NumberOfVolumesDiscardedByUser); its "
+            "events and its physiology start at the first volume kept.")
+        why.setObjectName("dlg-hint")
+        why.setWordWrap(True)
+        box.add(why)
+        line = QWidget()
+        h = QHBoxLayout(line)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        spin = QSpinBox()
+        spin.setObjectName("ent-input")
+        spin.setRange(-1, 100)
+        spin.setSpecialValueText(f"Default ({default})")
+        spin.setSuffix(" volumes")
+        spin.setValue(-1 if own is None else own)
+        spin.setToolTip("Default: the number in Settings > Convert > Dummy volumes. "
+                        "0 keeps every volume of this run whatever the default.")
+        spin.valueChanged.connect(
+            lambda v, rr=row: self._model.set_drop_volumes(rr, None if v < 0 else v))
+        h.addWidget(spin)
+        if total.isdigit():
+            of = QLabel(f"of {total} volumes")
+            of.setObjectName("dlg-hint")
+            h.addWidget(of)
+        h.addStretch(1)
+        box.add(line)
+        self.dummy_volumes_spin = spin
+        logs = [log_ for log_, run in self._physio_links().items() if run == row]
+        self.dummy_volumes_physio = None
+        if logs:
+            name = self._cell(logs[0], "bids_name")
+            pair, value = self._name_row(
+                "Physiology", name,
+                f"{name}\nThe physiological log recorded with this run: its tables start "
+                "at the same volume.")
+            box.add(pair)
+            self.dummy_volumes_physio = value
+        return box
+
+    def _name_row(self, key: str, name: str, tip: str) -> tuple[QWidget, QLabel]:
+        """A dim key and a name that elides in its middle (the end of a BIDS
+        name tells two apart), never widening the panel (4.23)."""
+        pair = QWidget()
+        h = QHBoxLayout(pair)
+        h.setContentsMargins(0, 2, 0, 0)
+        h.setSpacing(8)
+        label = QLabel(key)
+        label.setObjectName("dlg-hint")
+        label.setStyleSheet(f"color:{CUR()['dim']};")
+        value = ElidedLabel(name, mode=Qt.TextElideMode.ElideMiddle)
+        value.setToolTip(tip)
+        h.addWidget(label)
+        h.addWidget(value, 1)
+        return pair, value
+
+    def _physio_links(self) -> dict[int, int]:
+        """``{physio row: run row}``, the run each physiological log was
+        recorded with, by the conversion's rule (``fixups.dummy_volumes.
+        physio_runs``), computed once per table state."""
+        from ..fixups.dummy_volumes import physio_runs
+
+        if self._model is None:
+            return {}
+        key = (id(self._model), self._model.revision)
+        if self._physio_cache is None or self._physio_cache[0] != key:
+            self._physio_cache = (key, physio_runs(self._model.dataframe()))
+        return self._physio_cache[1]
+
+    def _build_physio_volumes(self, row: int) -> QWidget:
+        """What a physiological log of a functional run loses at the start:
+        the volumes removed from the run it was recorded with, read only
+        here (the number is the run's)."""
+        from .app_settings import AppSettings
+
+        run = self._physio_links().get(row)
+        count = 0
+        if run is not None:
+            own = self._model.drop_volumes(run)
+            count = int(AppSettings.load().convert_drop_volumes) if own is None else own
+        box = CollapsibleSection(
+            "Dummy volumes",
+            subtitle=("its run" if run is not None else "no run"),
+            badge=(f"{count} removed" if count else "none removed"),
+            expanded=bool(count),
+        )
+        self.physio_volumes_box = box
+        why = QLabel(
+            "Cut with the run it was recorded with: the tables start where the run's image "
+            "starts, and the trigger marks only the volumes kept."
+            if run is not None else
+            "No functional run in this table was recorded with this log, so its tables "
+            "keep every volume.")
+        why.setObjectName("dlg-hint")
+        why.setWordWrap(True)
+        why.setStyleSheet(f"color:{CUR()['dim']};")
+        box.add(why)
+        self.physio_run_label = None
+        if run is not None:
+            name = self._cell(run, "bids_name") or self._cell(run, "sequence")
+            pair, value = self._name_row(
+                "Run", name,
+                f"{name}\nSeries {self._cell(run, 'sequence')}, acquired "
+                f"{self._cell(run, 'acq_time')}. Set the number of volumes on this run.")
+            box.add(pair)
+            self.physio_run_label = value
+        return box
 
     def _build_fieldmap_links(self, row: int) -> Optional[QWidget]:
         """Which runs this fieldmap corrects, as the conversion will link

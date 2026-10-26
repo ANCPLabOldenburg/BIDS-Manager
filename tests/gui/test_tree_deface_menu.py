@@ -200,3 +200,39 @@ def test_comparing_emits_the_clicked_image(
     pane._on_show_context_menu(QPoint(1, 1))
 
     assert seen == [[dataset / "sub-01" / "anat" / "sub-01_T1w.nii.gz"]]
+
+
+# ---------------------------------------------------------------------------
+# Derivatives (1.5.1): an image of another pipeline is offered both tools, and
+# the dialog it opens is told so.
+
+
+def test_a_derivative_image_offers_removing_the_face_and_the_skull(
+    qtbot, dataset: Path, monkeypatch,
+) -> None:
+    anat = dataset / "derivatives" / "fmriprep" / "sub-01" / "anat"
+    anat.mkdir(parents=True)
+    image = anat / "sub-01_desc-preproc_T1w.nii.gz"
+    image.write_bytes(b"\0" * 64)
+    widget = BidsTreePane()
+    qtbot.addWidget(widget)
+    widget.set_root(dataset)
+    labels = _menu_labels(widget, monkeypatch, image.name)
+    assert "Remove faces..." in labels and "Remove the skull..." in labels
+    # Any image gets a sidecar, a derivative's included (written beside it).
+    assert "Write its sidecar from the recording..." in labels
+
+    seen: list[list] = []
+    widget.strip_requested.connect(seen.append)
+    item = _item_for(widget, image.name)
+    monkeypatch.setattr(widget._tree, "itemAt", lambda _pos: item)
+
+    def _exec(self, *args, **kwargs):
+        for action in self.actions():
+            if action.text() == "Remove the skull...":
+                action.trigger()
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", _exec)
+    widget._on_show_context_menu(QPoint(1, 1))
+    assert seen == [[image]]

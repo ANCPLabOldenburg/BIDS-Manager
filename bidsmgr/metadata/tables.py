@@ -239,22 +239,56 @@ def acq_time(recording: Path, times: Optional[Mapping[str, str]] = None) -> str:
     The sidecar's ``AcquisitionDateTime``; else ``times[stem]``, what the
     conversion knew (the scan's study date and time); else ``n/a``. A
     sidecar's ``AcquisitionTime`` alone is a time without a date, which the
-    standard does not accept here, so it is not used.
+    standard does not accept here, so it is not used, with one exception:
+    volumes removed from the start of a run (``NumberOfVolumesDiscardedByUser``)
+    make the image start later than the series the scan timed, and the
+    sidecar's ``AcquisitionTime`` was moved to its first volume kept
+    (``fixups.dummy_volumes``), so that time goes with the scan's date.
     """
+    meta: dict = {}
     sidecar = _sidecar(recording)
     if sidecar.is_file():
         try:
             meta = json.loads(sidecar.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             meta = {}
-        value = meta.get("AcquisitionDateTime") if isinstance(meta, dict) else None
+        if not isinstance(meta, dict):
+            meta = {}
+        value = meta.get("AcquisitionDateTime")
         if isinstance(value, str) and is_datetime(value):
             return value
     if times:
         value = times.get(recording.name.split(".", 1)[0], "")
         if is_datetime(value):
-            return value
+            return _first_volume_kept(value, meta)
     return NA
+
+
+def _first_volume_kept(stamp: str, meta: Mapping) -> str:
+    """``stamp`` (the scan's date and time of the series) at the time of
+    day the sidecar gives its first volume kept, when volumes were removed
+    from the start of the run; ``stamp`` unchanged otherwise. A time that
+    went past midnight is on the next day."""
+    import datetime as dt
+
+    from ..inventory._time import parse_time_seconds
+
+    removed = meta.get("NumberOfVolumesDiscardedByUser")
+    if not isinstance(removed, int) or isinstance(removed, bool) or removed <= 0:
+        return stamp
+    kept = meta.get("AcquisitionTime")
+    seconds = parse_time_seconds(kept) if isinstance(kept, str) and "T" not in kept else None
+    try:
+        series = dt.datetime.fromisoformat(stamp)
+    except ValueError:
+        return stamp
+    if seconds is None:
+        return stamp
+    day = dt.datetime.combine(series.date(), dt.time())
+    moved = day + dt.timedelta(seconds=seconds)
+    if moved < series - dt.timedelta(hours=12):
+        moved += dt.timedelta(days=1)
+    return moved.isoformat(timespec="microseconds")
 
 
 def _recording_key(name: str) -> str:

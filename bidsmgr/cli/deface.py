@@ -76,6 +76,7 @@ def run_deface_cli(
     targets: Optional[Sequence[Path]] = None,
     dry_run: bool = False,
     keep_original: bool = False,
+    include_derivatives: bool = False,
     quiet: bool = False,
 ) -> int:
     root = Path(root).expanduser().resolve()
@@ -97,7 +98,8 @@ def run_deface_cli(
         print(f"error: {reason}", file=sys.stderr)
         return 2
 
-    selection = walk(root, [Path(t) for t in targets] if targets else None)
+    selection = walk(root, [Path(t) for t in targets] if targets else None,
+                     include_derivatives=include_derivatives)
     if not quiet or dry_run:
         _report(selection, eng)
 
@@ -178,6 +180,16 @@ def build_parser() -> argparse.ArgumentParser:
             "in place is not deidentified"
         ),
     )
+    p.add_argument(
+        "--include-derivatives", action="store_true",
+        help=(
+            "also the anatomical and PET images under derivatives/<pipeline>/ "
+            "(a preprocessed T1w carries the face of the scan it came from). "
+            "Defaced in place; a skull strip of one is written to "
+            "derivatives/bidsmgr-skullstrip/ with the source's desc and "
+            "'brain', e.g. desc-preprocbrain"
+        ),
+    )
     p.add_argument("-q", "--quiet", action="store_true")
     p.add_argument(
         "--in-place", action="store_true",
@@ -217,6 +229,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         targets=args.targets,
         dry_run=args.dry_run,
         keep_original=args.keep_original,
+        include_derivatives=args.include_derivatives,
         quiet=args.quiet,
     )
 

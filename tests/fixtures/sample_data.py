@@ -7,18 +7,26 @@ is where this tool does its hardest work, so a suite without it is missing the
 part most likely to break.
 
 The documentation already publishes exactly what is needed. The multimodal
-sample is **56 MB** and holds, for one participant:
+sample (127 MB) holds, in one participant folder:
 
-* ``mri/``  35 Siemens DICOM: T1w, a BOLD run, two fieldmap series, a
-  localizer, and a PhoenixZIPReport (the non-image series the scanner is
-  supposed to detect and exclude, which is a regression target in itself);
-* ``pet/``  35 DICOM, one FDG scan on a GE Advance, plus ``dose_sheet.csv``
-  for the PET spreadsheet reader;
-* ``eeg/``  two 64-channel EDF recordings;
-* ``meg/``  one 325-channel Elekta FIF.
+* ``mri/``  Siemens Prisma DICOM: T1w, FLAIR, a resting BOLD run with its
+  SBRef and its physiological log, a fieldmap, diffusion and its reversed-
+  phase reference, three scouts and a PhoenixZIPReport (the non-image series
+  the scanner is supposed to detect and exclude, a regression target in
+  itself);
+* ``mrs/``  Siemens single-voxel spectroscopy;
+* ``pet/``  35 DICOM, one FDG scan on a GE Advance, with ``dose_sheet.csv``
+  beside ``raw/`` for the PET spreadsheet reader;
+* ``eeg/``  two 64-channel EDF recordings; ``meg/`` one Elekta FIF;
+* ``eyetracking/``  one binocular EyeLink recording.
 
-One folder, four modalities, one session. That is the shape the recently
-reported ``*_scans.tsv`` defect needed, and no synthetic fixture produced it.
+Six kinds of recording in one tree is the shape the ``*_scans.tsv`` defect
+needed, and no synthetic fixture produced it.
+
+The links, sizes and versions are ``bidsmgr.samples``, the list Home's sample
+menu reads: ONE list. This file kept a copy of its own until the shares were
+reissued in October 2026, and its links then answered 404, so every test
+below skipped on every machine without a cached copy, CI included.
 
 Caching, and why it lives outside the repository
 ------------------------------------------------
@@ -41,65 +49,22 @@ import ssl
 import urllib.error
 import urllib.request
 import zipfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import pytest
 
 
-@dataclass(frozen=True)
-class Sample:
-    """One published dataset: where to get it and what it should contain."""
+from bidsmgr.samples import SAMPLES as _PUBLISHED  # noqa: E402
+from bidsmgr.samples import Sample  # noqa: E402
 
-    name: str
-    token: str          # the cloud.uol.de share token
-    megabytes: int      # measured, so a surprise download is a visible one
-    root: str           # the top-level folder inside the archive
-    summary: str
-
-    @property
-    def url(self) -> str:
-        return f"https://cloud.uol.de/s/{self.token}/download"
-
-
-# Measured 2026-09-14 with a HEAD request. The two large ones are listed so
-# nobody has to guess why they are not used by default.
-SAMPLES: dict[str, Sample] = {
-    "multimodal": Sample(
-        "multimodal", "o6XCk6zH9DYpoes", 56,
-        "BIDS_Manager_multimodal_sample",
-        "one participant, MRI + PET DICOM, EEG EDF, MEG FIF. The CI default.",
-    ),
-    "pet": Sample(
-        "pet", "CGcjfTpxzFWnrdz", 8, "",
-        "PET DICOM and ECAT.",
-    ),
-    "eeg": Sample(
-        "eeg", "T66zc5mN4eeZPGK", 34, "",
-        "the EEG tutorial dataset.",
-    ),
-    "mri": Sample(
-        "mri", "g9gMPpwL7Xg49y9", 330, "",
-        "the MRI tutorial dataset. Too big for a routine run.",
-    ),
-    "mri_advanced": Sample(
-        "mri_advanced", "ZxaZCtHJPLjtDbR", 4483, "",
-        "4.5 GB. Manual use only.",
-    ),
-    "meg": Sample(
-        "meg", "btGeke5NNkDcs6G", 8303, "",
-        "8.3 GB. Manual use only.",
-    ),
-}
-
-# Bump when a published archive is replaced, so every cache re-fetches.
-VERSION = "v1"
+#: The published samples by key.
+SAMPLES: dict[str, Sample] = {sample.key: sample for sample in _PUBLISHED}
 
 # Anything this size or smaller is fetched without asking. The others need
 # BIDSMGR_ALLOW_BIG_DOWNLOADS=1, so a stray test cannot pull 8 GB onto a
 # laptop over a conference wifi.
-AUTO_FETCH_MB = 100
+AUTO_FETCH_MB = 200
 
 
 def cache_root() -> Path:
@@ -151,7 +116,7 @@ def fetch(name: str, *, allow_big: Optional[bool] = None) -> Path:
     except KeyError:
         raise LookupError(f"no sample called {name!r}") from None
 
-    where = cache_root() / VERSION / sample.name
+    where = cache_root() / f"{sample.key}-v{sample.version}"
     marker = where / ".complete"
     if marker.is_file():
         return where
@@ -160,11 +125,11 @@ def fetch(name: str, *, allow_big: Optional[bool] = None) -> Path:
         allow_big = os.environ.get("BIDSMGR_ALLOW_BIG_DOWNLOADS") == "1"
     if sample.megabytes > AUTO_FETCH_MB and not allow_big:
         raise LookupError(
-            f"{sample.name} is {sample.megabytes} MB; set "
+            f"{sample.key} is {sample.megabytes} MB; set "
             "BIDSMGR_ALLOW_BIG_DOWNLOADS=1 to fetch it"
         )
 
-    archive = cache_root() / VERSION / f"{sample.name}.zip"
+    archive = cache_root() / f"{sample.key}-v{sample.version}.zip"
     try:
         if not archive.is_file():
             _download(sample.url, archive)
@@ -173,26 +138,36 @@ def fetch(name: str, *, allow_big: Optional[bool] = None) -> Path:
             zf.extractall(where)
     except (urllib.error.URLError, OSError, zipfile.BadZipFile) as exc:
         shutil.rmtree(where, ignore_errors=True)
-        raise LookupError(f"could not fetch {sample.name}: {exc}") from exc
+        raise LookupError(f"could not fetch {sample.key}: {exc}") from exc
 
-    marker.write_text(f"{sample.url}\n{VERSION}\n", encoding="utf-8")
+    marker.write_text(f"{sample.url}\n{sample.version}\n", encoding="utf-8")
     # The archive is the big thing and the extraction is what tests read, so
     # the zip goes once the extraction succeeded.
     archive.unlink(missing_ok=True)
     return where
 
 
+def _top(where: Path) -> Path:
+    """The dataset folder an archive unpacked into: its one top-level folder
+    when it has one (``BIDS_Manager_multimodal_sample_v2/``, a name that
+    changes with every version, so it is found rather than named)."""
+    entries = [p for p in where.iterdir()
+               if p.name not in (".complete", "__MACOSX") and not p.name.startswith(".")]
+    if len(entries) == 1 and entries[0].is_dir():
+        return entries[0]
+    return where
+
+
 def raw_root(name: str = "multimodal") -> Path:
     """The ``raw/`` folder a scan should be pointed at."""
-    top = fetch(name)
-    inner = top / SAMPLES[name].root if SAMPLES[name].root else top
-    candidate = inner / "raw"
+    top = _top(fetch(name))
+    candidate = top / "raw"
     if candidate.is_dir():
         return candidate
     # A sample whose layout differs: hand back whatever single directory the
     # archive contains rather than guessing further.
-    subdirs = [p for p in inner.iterdir() if p.is_dir()] if inner.is_dir() else []
-    return subdirs[0] if len(subdirs) == 1 else inner
+    subdirs = [p for p in top.iterdir() if p.is_dir()]
+    return subdirs[0] if len(subdirs) == 1 else top
 
 
 # ---------------------------------------------------------------------------
@@ -213,11 +188,9 @@ def raw_root(name: str = "multimodal") -> Path:
 
 def _pet_tree() -> Optional[Path]:
     try:
-        top = fetch("pet")
+        return _top(fetch("pet"))
     except LookupError:
         return None
-    inner = top / SAMPLES["pet"].root if SAMPLES["pet"].root else top
-    return inner if inner.is_dir() else top
 
 
 def pet_dicom_dir() -> Optional[Path]:
@@ -283,7 +256,6 @@ __all__ = [
     "pet_dose_sheet",
     "pet_ecat_file",
     "SAMPLES",
-    "VERSION",
     "Sample",
     "cache_root",
     "fetch",

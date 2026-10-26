@@ -348,3 +348,99 @@ def test_the_two_modes_have_different_titles_and_buttons(qtbot, tmp_path):
     assert face.windowTitle() != strip.windowTitle()
     assert face._ok.text() == "Remove faces"
     assert strip._ok.text() == "Remove the skull"
+
+
+# ---------------------------------------------------------------------------
+# Derivatives (1.5.1): a preprocessed image carries the face of its source
+# ---------------------------------------------------------------------------
+
+
+def _with_derivatives(tmp_path):
+    root = _dataset(tmp_path)
+    pipe = root / "derivatives" / "fmriprep"
+    (pipe / "sub-01" / "anat").mkdir(parents=True)
+    (pipe / "dataset_description.json").write_text(json.dumps(
+        {"Name": "fmriprep", "BIDSVersion": "1.11.1", "DatasetType": "derivative"}))
+    shutil.copyfile(TEMPLATE, pipe / "sub-01" / "anat" / "sub-01_desc-preproc_T1w.nii.gz")
+    # A mask is not an image of the head: never a candidate.
+    shutil.copyfile(TEMPLATE, pipe / "sub-01" / "anat" / "sub-01_desc-brain_mask.nii.gz")
+    return root
+
+
+def _heads(dlg):
+    tree = dlg._preview
+    return {tree.topLevelItem(i).text(0): tree.topLevelItem(i)
+            for i in range(tree.topLevelItemCount())}
+
+
+def test_derivatives_are_offered_and_off_by_default(qtbot, tmp_path):
+    dlg = DefaceDialog(_with_derivatives(tmp_path))
+    qtbot.addWidget(dlg)
+    assert dlg._derivatives.isEnabled() and not dlg._derivatives.isChecked()
+    assert dlg._derivatives_hint.text() == "derivatives/fmriprep/"
+    assert sorted(dlg._checked()) == ["sub-01/anat/sub-01_T1w.nii.gz",
+                                      "sub-01/anat/sub-01_T2w.nii.gz"]
+    # Raw images stay ungrouped while derivatives are out of it.
+    assert "Raw data (2)" not in _heads(dlg)
+
+
+def test_including_derivatives_groups_them_by_pipeline(qtbot, tmp_path):
+    dlg = DefaceDialog(_with_derivatives(tmp_path))
+    qtbot.addWidget(dlg)
+    dlg._derivatives.setChecked(True)
+    heads = _heads(dlg)
+    assert "Raw data (2)" in heads and "derivatives/fmriprep/ (1)" in heads
+    deriv = "derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz"
+    assert deriv in dlg._checked()
+    assert not any("mask" in c for c in dlg._checked())
+    # Unticking a pipeline unticks its images, and only them.
+    heads["derivatives/fmriprep/ (1)"].setCheckState(0, Qt.CheckState.Unchecked)
+    assert deriv not in dlg._checked() and len(dlg._checked()) == 2
+    # The mask is listed among the skips, with why.
+    skipped = [h for t, h in heads.items() if t.startswith("Cannot be done")]
+    reasons = [skipped[0].child(i).text(0) for i in range(skipped[0].childCount())]
+    assert any("not an image of the head" in r for r in reasons)
+
+
+def test_a_derivative_picked_in_the_tree_ticks_derivatives(qtbot, tmp_path):
+    root = _with_derivatives(tmp_path)
+    image = root / "derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz"
+    dlg = DefaceDialog(root, [image])
+    qtbot.addWidget(dlg)
+    assert dlg._derivatives.isChecked()
+    assert dlg._checked() == [
+        "derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz"]
+
+
+def test_without_derivatives_the_option_is_greyed_and_says_why(qtbot, tmp_path):
+    dlg = DefaceDialog(_dataset(tmp_path))
+    qtbot.addWidget(dlg)
+    assert not dlg._derivatives.isEnabled()
+    assert dlg._derivatives_hint.text() == "No derivatives in this dataset"
+
+
+def test_strip_mode_names_where_a_derivative_goes(qtbot, tmp_path):
+    from bidsmgr.deface import engines as e
+
+    dlg = DefaceDialog(_with_derivatives(tmp_path), kind=e.KIND_STRIP)
+    qtbot.addWidget(dlg)
+    dlg._derivatives.setChecked(True)
+    notes = {item.data(0, Qt.ItemDataRole.UserRole): item.text(1)
+             for item in dlg._candidate_items()}
+    assert notes["derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz"] == \
+        "brain kept, written as sub-01_desc-preprocbrain_T1w.nii.gz"
+    assert notes["sub-01/anat/sub-01_T1w.nii.gz"] == \
+        "brain kept, written as sub-01_desc-brain_T1w.nii.gz"
+    # Overwriting changes what every row promises.
+    dlg._keep.setChecked(True)
+    assert {item.text(1) for item in dlg._candidate_items()} == {
+        "brain kept, original overwritten"}
+
+
+def test_a_derivative_is_not_mirrored_to_sourcedata(qtbot, tmp_path):
+    dlg = DefaceDialog(_with_derivatives(tmp_path))
+    qtbot.addWidget(dlg)
+    dlg._derivatives.setChecked(True)
+    dlg._keep.setChecked(True)
+    if dlg._ok.isEnabled():
+        assert "Derivatives are not copied to sourcedata/" in dlg._status.text()

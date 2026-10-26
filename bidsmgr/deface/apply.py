@@ -80,8 +80,8 @@ def sourcedata_mirror(root: Path, image: Path) -> Optional[Path]:
 
     ``<root>/sub-01/anat/x.nii.gz`` -> ``<root>/sourcedata/sub-01/anat/x.nii.gz``
 
-    ``None`` when the image is not raw subject data, which the selector should
-    already have refused. Defence in depth: a mirror under
+    ``None`` when the image is not raw subject data: a derivative's original
+    stays in ``.bidsmgr/`` only, because a mirror under
     ``sourcedata/derivatives/`` would be a phantom the dataset never asked for.
     """
     root = Path(root)
@@ -140,6 +140,7 @@ def deface_dataset(
     only: Optional[Iterable[str]] = None,
     keep_original_in_sourcedata: bool = False,
     in_place: Optional[bool] = None,
+    include_derivatives: bool = False,
     progress: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], None]] = None,
     label: Optional[str] = None,
@@ -172,7 +173,7 @@ def deface_dataset(
         in_place = not eng.is_strip
 
     if selection is None:
-        selection = walk(root, targets)
+        selection = walk(root, targets, include_derivatives=include_derivatives)
     chosen: list[Candidate] = list(selection.candidates)
     if only is not None:
         wanted = set(only)
@@ -191,6 +192,10 @@ def deface_dataset(
     staging = root / STAGING
     staging.mkdir(parents=True, exist_ok=True)
     produced: list[Path] = []
+    # Derivatives written in this run, by target: two sources that would land
+    # on one name (the same subject's T1w in two pipelines with no desc) must
+    # not silently overwrite each other.
+    written_by: dict[Path, str] = {}
 
     try:
         with begin_operation(root, label) as op:
@@ -207,7 +212,17 @@ def deface_dataset(
                 outcome.seconds += result.seconds
 
                 if not in_place:
+                    target = derivative_path(root, cand.path)
+                    if target is not None and target in written_by:
+                        outcome.skipped.append((
+                            cand.relative,
+                            f"would be written as the same file as "
+                            f"{written_by[target]}",
+                        ))
+                        continue
                     written = _write_derivative(op, root, cand.path, result, eng)
+                    if written is not None:
+                        written_by[written] = cand.relative
                     if written is None:
                         outcome.skipped.append((
                             cand.relative,

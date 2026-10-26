@@ -338,11 +338,11 @@ def test_start_up_shows_whats_new_then_the_star_request(qtbot, isolated_settings
 def test_start_up_with_the_news_seen_shows_the_star_request(qtbot, isolated_settings) -> None:
     from PyQt6.QtWidgets import QWidget
 
-    from bidsmgr.gui import whats_new
+    from bidsmgr import __version__
     from bidsmgr.gui.app_settings import AppSettings
     from bidsmgr.main import greet
 
-    AppSettings.remember_whats_new_seen(whats_new.NEWS_FOR)
+    AppSettings.remember_last_version(__version__)       # this version ran here already
     host = QWidget()
     qtbot.addWidget(host)
     greet(host)

@@ -191,9 +191,16 @@ def long_path_for_tree(path: Path | str) -> str:
     So there is no threshold here. We cannot know the longest child without
     walking the tree ourselves, and a wrong guess costs the entire
     classification, so Windows always gets the prefix and pays a few bytes of
-    argument. The path is resolved first because ``\\\\?\\`` accepts only a
-    fully-qualified, normalised path: it switches OFF the normalisation that
-    would otherwise tidy up ``/`` and ``..``.
+    argument. The path is made absolute and normalised first because
+    ``\\\\?\\`` accepts only a fully-qualified, normalised path: it switches OFF
+    the normalisation that would otherwise tidy up ``/`` and ``..``.
+
+    ``os.path.abspath``, NOT ``Path.resolve``. On Windows ``resolve`` asks the
+    file system for the FINAL path, which turns a mapped drive into its UNC
+    path (``Z:\\data`` into ``\\\\server\\share\\data``) and, on a DFS share,
+    into whichever file server answered. Neither is the folder the user
+    picked, and the second may not be readable at all. ``abspath`` only
+    normalises the text.
 
     A no-op off Windows, exactly like its sibling: macOS and Linux return
     ``str(path)`` and have no ceiling to work around.
@@ -203,13 +210,87 @@ def long_path_for_tree(path: Path | str) -> str:
     p = os.fspath(path)
     if p.startswith("\\\\?\\"):
         return p
-    return _prefixed(os.fspath(Path(p).resolve()))
+    return _prefixed(os.path.abspath(p))
 
 
 def _prefixed(p: str) -> str:
-    """Add the Win32 long-path prefix, in the form UNC paths need."""
+    """Add the Win32 long-path prefix, in the form UNC paths need.
 
-    # UNC paths (``\\server\share\...``) get the special ``UNC\`` form.
+    A path that already carries a prefix (``\\\\?\\`` or the device form
+    ``\\\\.\\``) is returned as it is: read as a UNC path it would become
+    ``\\\\?\\UNC\\?\\...``, which names nothing.
+    """
+    if p.startswith(("\\\\?\\", "\\\\.\\")):
+        return p
+    # UNC paths (``\\\\server\\share\\...``) get the special ``UNC\\`` form.
     if p.startswith("\\\\"):
         return "\\\\?\\UNC\\" + p[2:]
     return "\\\\?\\" + p
+
+
+#: What ``GetDriveTypeW`` answers for a drive mapped to a network share.
+_DRIVE_REMOTE = 4
+
+
+def _drive_type(root: str) -> int:
+    """``GetDriveTypeW`` for a drive root such as ``Z:\\``; 0 when unknown."""
+    try:
+        import ctypes
+
+        return int(ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(root)))
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
+def is_network_path(path: Path | str) -> bool:
+    """Whether ``path`` is on a network share, as Windows sees it.
+
+    A UNC path (``\\\\server\\share\\...``, also in its ``\\\\?\\UNC\\`` form)
+    or a path on a drive letter mapped to a share. Windows treats such a path
+    differently from a local one in ways that matter to staging: it does not
+    follow a symbolic link stored on a share (its default "remote to remote"
+    and "remote to local" link rules are off), and a policy can switch off
+    links from a local folder to a share too.
+
+    Always ``False`` off Windows: macOS and Linux mount a share into the one
+    file tree and follow links into it like any other folder.
+    """
+    if os.name != "nt":
+        return False
+    p = os.fspath(path)
+    if p[:8].upper() == "\\\\?\\UNC\\":
+        return True
+    if p.startswith(("\\\\?\\", "\\\\.\\")):
+        p = p[4:]
+    elif not p.startswith("\\\\"):
+        p = os.path.abspath(p)
+    if p.startswith("\\\\"):
+        return True
+    drive = os.path.splitdrive(p)[0]
+    if len(drive) == 2 and drive[1] == ":":
+        return _drive_type(drive + "\\") == _DRIVE_REMOTE
+    return False
+
+
+def missing_folder_message(path: Path | str) -> str:
+    """Why ``path`` cannot be read, in words a user can act on.
+
+    On Windows a drive letter that does not exist at all is most often a
+    drive mapped to a network share in ANOTHER session: mapped drives belong
+    to the login session that mapped them, so a program started "as
+    administrator" (or by another user, or as a service) does not see them,
+    while File Explorer does.
+    """
+    text = f"no such folder: {os.fspath(path)}"
+    if os.name != "nt":
+        return text
+    drive = os.path.splitdrive(os.path.abspath(os.fspath(path)))[0]
+    if len(drive) == 2 and drive[1] == ":" and not os.path.exists(drive + "\\"):
+        text += (
+            f". Drive {drive} is not visible to BIDS Manager. A drive mapped to a "
+            "network share belongs to the Windows session that mapped it, so a "
+            "program started as administrator, or by another user, does not see "
+            "it. Start BIDS Manager normally, or use the share's \\\\server\\share "
+            "path instead of the drive letter."
+        )
+    return text

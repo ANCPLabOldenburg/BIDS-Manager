@@ -356,3 +356,92 @@ def test_the_preview_converts_an_eyelink_row(tmp_path, mono) -> None:
     names = sorted(p.name for p in shown)
     assert any(n.endswith("_physio.tsv.gz") for n in names), names
     assert not any(n.endswith(".edf") for n in names), "converted, not read as EEG"
+
+
+# ---------------------------------------------------------------------------
+# Whose eye tracker: the participant folder, when it is plainly one person's
+# ---------------------------------------------------------------------------
+
+
+def _frame(*rows):
+    import pandas as pd
+
+    return pd.DataFrame([{"participant_id": pid, "source_folder": folder,
+                          "bids_name": f"{pid}_task-rest_recording-eye1_physio" if pid else "",
+                          "bids_path": "", "entities": json.dumps({"subject": pid[4:]})}
+                         for pid, folder in rows])
+
+
+def test_an_eye_tracker_joins_the_one_subject_of_its_folder() -> None:
+    from bidsmgr.cli.scan import _join_folder_subject, _renumber_subjects_after
+
+    others = _frame(("sub-001", "sub-001/mri"), ("sub-001", "sub-001/mri"),
+                    ("sub-001", "sub-001\\eeg"))                 # a Windows path too
+    eye = _frame(("sub-001", "sub-001/eyetracking"))
+    joined = _join_folder_subject(eye, (others,))
+    _renumber_subjects_after(eye, (others,), keep=joined)
+    assert eye.at[0, "participant_id"] == "sub-001"
+    assert eye.at[0, "bids_name"].startswith("sub-001_")
+    assert json.loads(eye.at[0, "entities"])["subject"] == "001"
+
+
+def test_a_folder_of_several_identities_keeps_the_tracker_apart() -> None:
+    """The multimodal sample v3: the MRI, the spectroscopy and the PET in one
+    folder carry three identities, which the user reconciles; the scan must
+    not decide which of them the eye tracker is."""
+    from bidsmgr.cli.scan import _join_folder_subject, _renumber_subjects_after
+
+    others = _frame(("sub-001", "sub-001/mri"), ("sub-002", "sub-001/mrs"),
+                    ("sub-003", "sub-001/pet"), ("sub-001", "sub-001/eeg"))
+    eye = _frame(("sub-001", "sub-001/eyetracking"))
+    joined = _join_folder_subject(eye, (others,))
+    assert joined == set()
+    _renumber_subjects_after(eye, (others,), keep=joined)
+    assert eye.at[0, "participant_id"] == "sub-004"
+
+
+@pytest.mark.parametrize("where", ["eyetracking", "sub-009/eyetracking"])
+def test_a_tracker_alone_or_outside_a_participant_folder_keeps_its_own_number(where) -> None:
+    from bidsmgr.cli.scan import _join_folder_subject, _renumber_subjects_after
+
+    others = _frame(("sub-001", "sub-001/eeg"))
+    eye = _frame(("sub-001", where))
+    joined = _join_folder_subject(eye, (others,))
+    _renumber_subjects_after(eye, (others,), keep=joined)
+    assert joined == set() and eye.at[0, "participant_id"] == "sub-002"
+
+
+def _eeg(path: Path) -> Path:
+    import mne
+
+    raw = mne.io.RawArray(np.zeros((2, 200)), mne.create_info(["Fz", "Cz"], 100.0, "eeg"),
+                          verbose="error")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw.save(str(path), overwrite=True, verbose="error")
+    return path
+
+
+def test_the_scan_puts_each_tracker_with_its_folders_participant(mono, both, tmp_path) -> None:
+    """Two participants, each folder holding EEG and an eye tracker: each
+    tracker is its folder's participant. A third tracker, alone in a folder,
+    gets a number no one else uses, as before."""
+    from bidsmgr.cli.scan import run_scan
+
+    raw = tmp_path / "raw"
+    _eeg(raw / "sub-001" / "eeg" / "task-rest_eeg-raw.fif")
+    _eeg(raw / "sub-002" / "eeg" / "task-rest_eeg-raw.fif")
+    (raw / "sub-001" / "eyes").mkdir(parents=True)
+    (raw / "sub-002" / "eyes").mkdir(parents=True)
+    (raw / "sub-003" / "eyes").mkdir(parents=True)
+    shutil.copy(mono, raw / "sub-001" / "eyes" / "task-rest_eyes.edf")
+    shutil.copy(both, raw / "sub-002" / "eyes" / "task-rest_eyes.edf")
+    shutil.copy(mono, raw / "sub-003" / "eyes" / "task-rest_eyes.edf")
+    df = run_scan(raw, tmp_path / "inv.tsv", dataset="ds").fillna("")
+    who = {Path(f).parts[0]: p for f, p, m in
+           zip(df["source_file"], df["participant_id"], df["modality"]) if m == "eyetrack"}
+    eeg = {Path(f).parts[0]: p for f, p, m in
+           zip(df["source_file"], df["participant_id"], df["modality"]) if m == "eeg"}
+    assert who["sub-001"] == eeg["sub-001"] and who["sub-002"] == eeg["sub-002"]
+    assert who["sub-003"] not in set(eeg.values()), "alone in its folder: its own number"
+    named = dict(zip(df["source_file"], df["bids_name"]))
+    assert named[str(Path("sub-002", "eyes", "task-rest_eyes.edf"))].startswith(eeg["sub-002"] + "_")
