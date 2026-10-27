@@ -1,0 +1,45 @@
+cff-version: 1.2.0
+message: >-
+  If BIDS Manager helped you prepare a dataset, please cite it as below,
+  together with the tools your data went through (see "Citing BIDS Manager"
+  in the documentation).
+type: software
+title: BIDS Manager
+abstract: >-
+  BIDS Manager prepares neuroimaging data in the Brain Imaging Data Structure
+  (BIDS). It reads raw MRI, MR spectroscopy, PET, EEG, MEG, physiological and
+  eye-tracking recordings, proposes a BIDS name for each one, converts them with
+  the established engines, and then helps you complete, curate, inspect and
+  validate the result. Every decision is shown and can be changed before
+  anything is written, the metadata a recording cannot carry is asked for by the
+  BIDS schema itself, and every change is recorded.
+authors:
+  - given-names: Karel Mauricio
+    family-names: López Vilaret
+    email: karel.mauricio.lopez.vilaret@uni-oldenburg.de
+    affiliation: Applied Neurocognitive Psychology Lab, University of Oldenburg
+    orcid: "https://orcid.org/0009-0007-0504-5258"
+  - given-names: Jochem
+    family-names: Rieger
+    affiliation: Applied Neurocognitive Psychology Lab, University of Oldenburg
+    orcid: "https://orcid.org/0000-0003-0955-2306"
+version: 1.5.2
+date-released: "2026-10-26"
+license: MIT
+repository-code: "https://github.com/ANCPLabOldenburg/BIDS-Manager"
+repository-artifact: "https://pypi.org/project/bids-manager/"
+keywords:
+  - BIDS
+  - Brain Imaging Data Structure
+  - neuroimaging
+  - data curation
+  - DICOM
+  - MRI
+  - MR spectroscopy
+  - PET
+  - EEG
+  - MEG
+  - physiological recordings
+  - eye tracking
+  - metadata
+  - validation
