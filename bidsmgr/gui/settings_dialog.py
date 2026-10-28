@@ -16,6 +16,7 @@ page lays the post-convert chain out as an indented hierarchy (parent step
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import QSize, Qt
@@ -25,6 +26,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -32,6 +34,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -1406,19 +1409,36 @@ class SettingsDialog(QDialog):
         self._validate_schema.addItem("Newest available (recommended)", userData="")
         for ver in schema.available_versions():
             self._validate_schema.addItem(f"BIDS {ver}", userData=ver)
+        self._validate_schema.addItem("Custom schema", userData="custom")
         self._validate_schema.setToolTip(
             "The version of BIDS this session works to. Several ship with "
             "BIDS Manager.\n\nChoose an older one to work to a dataset that "
             "was built against it, so the forms ask for that version's fields "
             "and validation judges it by that version's rules."
         )
-        self._validate_schema.currentIndexChanged.connect(self._describe_bids_version)
         form.addRow("Work to:", self._validate_schema)
+
+        self._custom_schema_row = QWidget()
+        custom_layout = QHBoxLayout(self._custom_schema_row)
+        custom_layout.setContentsMargins(0, 0, 0, 0)
+        self._custom_schema_path = QLineEdit()
+        self._custom_schema_path.setPlaceholderText("Schema JSON file or schema source directory")
+        custom_layout.addWidget(self._custom_schema_path, 1)
+        for label, directory in (("Choose file…", False), ("Choose folder…", True)):
+            button = QPushButton(label)
+            button.clicked.connect(
+                lambda _checked=False, directory=directory:
+                self._browse_custom_schema(directory)
+            )
+            custom_layout.addWidget(button)
+        form.addRow(self._custom_schema_row)
 
         self._version_summary = QLabel()
         self._version_summary.setWordWrap(True)
         self._version_summary.setObjectName("dlg-hint")
         form.addRow("", self._version_summary)
+        self._validate_schema.currentIndexChanged.connect(self._describe_bids_version)
+        self._custom_schema_path.editingFinished.connect(self._describe_bids_version)
         v.addWidget(box)
 
         note = QLabel(
@@ -1433,6 +1453,39 @@ class SettingsDialog(QDialog):
         v.addStretch(1)
         return w
 
+    def _browse_custom_schema(self, directory: bool) -> None:
+        start = self._custom_schema_path.text().strip()
+        if directory:
+            selected = QFileDialog.getExistingDirectory(self, "Choose schema directory", start)
+        else:
+            selected, _ = QFileDialog.getOpenFileName(
+                self, "Choose schema file", start, "JSON schema (*.json);;All files (*)",
+            )
+        if selected:
+            self._custom_schema_path.setText(selected)
+            self._describe_bids_version()
+
+    def _selected_schema(self) -> str:
+        chosen = self._validate_schema.currentData() or ""
+        if chosen != "custom":
+            return chosen
+        text = self._custom_schema_path.text().strip()
+        if not text:
+            raise ValueError("Choose a schema JSON file or schema source directory.")
+        path = Path(text).expanduser()
+        if not path.exists():
+            raise ValueError(f"The custom schema does not exist: {path}")
+        return str(path.resolve())
+
+    def _schema_summary(self, chosen: str) -> str:
+        namespace = schema.get_schema(chosen)
+        return (
+            f"BIDS {namespace.bids_version}: "
+            f"{len(namespace.objects.datatypes)} datatypes, "
+            f"{len(namespace.rules.entities)} entities, "
+            f"{len(namespace.objects.metadata)} metadata fields."
+        )
+
     def _describe_bids_version(self) -> None:
         """Say what the highlighted version actually is, in its own terms.
 
@@ -1440,17 +1493,12 @@ class SettingsDialog(QDialog):
         and they come from the schema rather than from a note that would go
         stale.
         """
-        chosen = self._validate_schema.currentData() or None
+        custom = self._validate_schema.currentData() == "custom"
+        self._custom_schema_row.setVisible(custom)
         try:
-            namespace = schema.get_schema(chosen)
-            self._version_summary.setText(
-                f"BIDS {namespace.bids_version}: "
-                f"{len(namespace.objects.datatypes)} datatypes, "
-                f"{len(namespace.rules.entities)} entities, "
-                f"{len(namespace.objects.metadata)} metadata fields."
-            )
-        except Exception:
-            self._version_summary.setText("")
+            self._version_summary.setText(self._schema_summary(self._selected_schema()))
+        except Exception as exc:
+            self._version_summary.setText(f"Cannot load schema: {exc}" if custom else "")
 
     def _build_validation_tab(self) -> QWidget:
         """Validation-engine (bidsval) knobs.
@@ -1623,6 +1671,9 @@ class SettingsDialog(QDialog):
 
         # BIDS version, then the validation engine's own knobs.
         sidx = self._validate_schema.findData(s.validate_schema_version)
+        self._custom_schema_path.setText(s.validate_schema_version if sidx < 0 else "")
+        if sidx < 0:
+            sidx = self._validate_schema.findData("custom")
         self._validate_schema.setCurrentIndex(sidx if sidx >= 0 else 0)
         self._describe_bids_version()
         self._validate_max_rows.setValue(max(1, int(s.validate_max_rows)))
@@ -1667,6 +1718,14 @@ class SettingsDialog(QDialog):
         self._shortcuts_page.load(VizSettings())
 
     def _on_save(self) -> None:
+        try:
+            selected_schema = self._selected_schema()
+            if self._validate_schema.currentData() == "custom":
+                self._schema_summary(selected_schema)
+        except Exception as exc:
+            QMessageBox.warning(self, "Invalid custom schema", f"Cannot load schema:\n\n{exc}")
+            return
+
         # Validate the scan rules first so an invalid hint blocks the save
         # without losing the user's other edits.
         hints, exclusions, error = self._read_scan_rules()
@@ -1746,7 +1805,7 @@ class SettingsDialog(QDialog):
         s.post_validate_html = self._post_validate_html.isChecked()
         s.post_run_quality = self._post_run_quality.isChecked()
 
-        s.validate_schema_version = self._validate_schema.currentData() or ""
+        s.validate_schema_version = selected_schema
         s.validate_max_rows = self._validate_max_rows.value()
         s.validate_show = self._validate_show.currentData() or "error_warning"
         s.validate_flag_todos = self._validate_flag_todos.isChecked()

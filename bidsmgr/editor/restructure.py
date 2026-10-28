@@ -37,6 +37,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional
 
+from ..schema.loader import register_cache
 from .rename import (
     PATH_FIELDS,
     ContentEdit,
@@ -93,9 +94,8 @@ def _tables(version: str) -> tuple[dict[str, str], frozenset[str]]:
     """``({"acq": "acquisition"}, {datatype folder names})`` for one schema.
 
     Cached because it is read once per file per plan and a plan covers a whole
-    subject, and keyed on the schema VERSION rather than cached outright so
-    that switching schemas in Settings is picked up instead of serving the
-    previous standard's answer for the rest of the session.
+    subject. Cleared when the active schema changes, including custom schemas
+    that report the same version as a bundled schema.
     """
     from ..schema import entity_key_info, entity_keys, list_datatypes
 
@@ -107,6 +107,9 @@ def _tables(version: str) -> tuple[dict[str, str], frozenset[str]]:
         except KeyError:
             continue
     return short_to_long, frozenset(list_datatypes())
+
+
+register_cache(_tables)
 
 
 def _active() -> str:

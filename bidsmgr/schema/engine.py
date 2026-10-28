@@ -727,7 +727,10 @@ __all__ = [
 # The memoised lookups above hold answers about one BIDS version. Switching
 # version has to drop them, and listing them at the bottom rather than at each
 # definition keeps that list in one readable place.
-for _cached in (_entity_index_lookup, _format_pattern, _datatype_groups, _declared_type):
+for _cached in (
+    _entity_index_lookup, entity_keys, _key_to_long, directory_entity_keys,
+    opaque_directories, _format_pattern, _datatype_groups, _declared_type,
+):
     register_cache(_cached)
 
 

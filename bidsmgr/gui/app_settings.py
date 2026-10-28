@@ -176,7 +176,7 @@ class AppSettings:
     # (repetition time, volume count, a 4-D T1w...) were never reported.
     editor_strict_validate: bool = True
     # Validation engine (bidsval) knobs. ``validate_schema_version`` selects the
-    # BIDS schema version to validate against ("" = bidsval's bundled default);
+    # BIDS schema version or path to schema to validate against ("" = bidsval's bundled default);
     # ``validate_max_rows`` bounds how many rows of each TSV are scanned;
     # ``validate_show`` filters which severities the Editor's Validation pane
     # lists ("error_warning" | "error" | "warning").
